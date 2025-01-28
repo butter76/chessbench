@@ -179,11 +179,15 @@ class BagReader(Sequence[bytes]):
       assert len(matches) == 1
       if int(matches[0]) != '0':
         reader_class = BagShardReader
+        print('USING SHARDED READER')
       else:
         filename = filename.replace(matches[0], '')
         reader_class = BagFileReader
+        print('USING SINGLE FILE READER')
     else:
       reader_class = BagFileReader
+      print('USING SINGLE FILE READER')
+    print("FILENAME:", filename)
 
     self._reader = reader_class(
         filename=filename,

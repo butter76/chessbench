@@ -22,3 +22,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+data/
+lc0/
+BayesElo/
+Stockfish/
+checkpoints/

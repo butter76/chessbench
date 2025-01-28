@@ -118,7 +118,7 @@ class ConvertActionValueDataToSequence(ConvertToSequence):
     action = _process_move(move)
     return_bucket = _process_win_prob(win_prob, self._return_buckets_edges)
     sequence = np.concatenate([state, action, return_bucket])
-    return sequence, self._loss_mask
+    return state, win_prob
 
 
 _TRANSFORMATION_BY_POLICY = {
@@ -134,7 +134,7 @@ def build_data_loader(config: config_lib.DataConfig) -> pygrain.DataLoader:
   data_source = bagz.BagDataSource(
       os.path.join(
           os.getcwd(),
-          f'../data/{config.split}/{config.policy}_data.bag',
+          f'../data/{config.split}/{config.policy}@31_data.bag',
       ),
   )
 
@@ -166,5 +166,5 @@ def build_data_loader(config: config_lib.DataConfig) -> pygrain.DataLoader:
       sampler=sampler,
       operations=transformations,
       worker_count=config.worker_count,
-      read_options=None,
+      read_options=None, 
   )

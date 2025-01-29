@@ -138,8 +138,8 @@ def train(
             metrics_loss = {name: loss / (step_in_epoch + 1) for name, loss in metrics.items()}
             
             pbar.set_postfix({
-                'avg_loss': f'{avg_loss:.4f}',
-                **{f'{k}': f'{v:.4f}' for k,v in metrics_loss.items()},
+                'avg_loss': f'{avg_loss:.6f}',
+                **{f'{k}': f'{v:.6f}' for k,v in metrics_loss.items()},
                 'lr': f'{scheduler.get_last_lr()[0]:.6f}'
             })
             pbar.update(1)
@@ -180,8 +180,8 @@ def train(
                 avg_val_loss = val_loss / (step_in_epoch + 1)
                 val_metrics_loss = {name: loss / (step_in_epoch + 1) for name, loss in val_metrics.items()}
                 val_pbar.set_postfix({
-                    'avg_val_loss': f'{avg_val_loss:.4f}',
-                    **{f'{k}': f'{v:.4f}' for k,v in val_metrics_loss.items()},
+                    'avg_val_loss': f'{avg_val_loss:.6f}',
+                    **{f'{k}': f'{v:.6f}' for k,v in val_metrics_loss.items()},
                 })
 
                 val_pbar.update(1)
@@ -197,7 +197,7 @@ def train(
             'model_config': model_config,
             'step': step,
             "val_loss": avg_val_loss,
-            **{f'val_{k}': f'{v:.4f}' for k,v in val_metrics_loss.items()},
+            **{f'val_{k}': f'{v:.6f}' for k,v in val_metrics_loss.items()},
         }
         checkpoint_dir = os.path.join(
             os.getcwd(),

@@ -2,7 +2,7 @@
 
 import copy
 import os
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -68,7 +68,7 @@ def train(
     else:
         # Initialize model
         model = ChessTransformer(model_config).to(device)
-
+    model = cast(ChessTransformer, torch.compile(model))
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total number of parameters: {total_params:,}")
@@ -138,9 +138,9 @@ def train(
             metrics_loss = {name: loss / (step_in_epoch + 1) for name, loss in metrics.items()}
             
             pbar.set_postfix({
-                'avg_loss': f'{avg_loss:.6f}',
-                **{f'{k}': f'{v:.6f}' for k,v in metrics_loss.items()},
-                'lr': f'{scheduler.get_last_lr()[0]:.6f}'
+                'avg_loss': f'{avg_loss:.5f}',
+                **{f'{k}': f'{v:.5f}' for k,v in metrics_loss.items()},
+                'lr': f'{scheduler.get_last_lr()[0]:.5f}'
             })
             pbar.update(1)
                 
@@ -180,8 +180,8 @@ def train(
                 avg_val_loss = val_loss / (step_in_epoch + 1)
                 val_metrics_loss = {name: loss / (step_in_epoch + 1) for name, loss in val_metrics.items()}
                 val_pbar.set_postfix({
-                    'avg_val_loss': f'{avg_val_loss:.6f}',
-                    **{f'{k}': f'{v:.6f}' for k,v in val_metrics_loss.items()},
+                    'avg_val_loss': f'{avg_val_loss:.5f}',
+                    **{f'{k}': f'{v:.5f}' for k,v in val_metrics_loss.items()},
                 })
 
                 val_pbar.update(1)
@@ -197,7 +197,7 @@ def train(
             'model_config': model_config,
             'step': step,
             "val_loss": avg_val_loss,
-            **{f'val_{k}': f'{v:.6f}' for k,v in val_metrics_loss.items()},
+            **{f'val_{k}': f'{v:.5f}' for k,v in val_metrics_loss.items()},
         }
         checkpoint_dir = os.path.join(
             os.getcwd(),
@@ -233,7 +233,7 @@ def main():
         data=config_lib.DataConfig(
             batch_size=1024,
             shuffle=True,
-            worker_count=1,  # 0 disables multiprocessing
+            worker_count=2,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='train',
@@ -241,7 +241,7 @@ def main():
         eval_data=config_lib.DataConfig(
             batch_size=1024,
             shuffle=False,
-            worker_count=1,  # 0 disables multiprocessing
+            worker_count=2,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='test',

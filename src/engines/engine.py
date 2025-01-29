@@ -34,6 +34,8 @@ class Engine(Protocol):
 
   def analyse(self, board: chess.Board) -> AnalysisResult:
     """Returns various analysis results (including output) from a model."""
+    ...
 
   def play(self, board: chess.Board) -> chess.Move:
     """Returns the best legal move from a given board."""
+    ...

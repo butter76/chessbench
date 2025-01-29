@@ -36,7 +36,7 @@ class DataConfig:
   # Whether to drop partial batches.
   drop_remainder: bool = False
   # The number of child processes launched to parallelize the transformations.
-  worker_count: int | None = 0
+  worker_count: int = 1
   # The number of return buckets.
   num_return_buckets: int
   # The dataset split.
@@ -54,6 +54,8 @@ class TrainConfig:
 
   # The data configuration for training.
   data: DataConfig
+  # The data cconfiguration for evaluation.
+  eval_data: DataConfig
   # The learning rate for Adam.
   learning_rate: float
   # The gradient clipping value.
@@ -62,7 +64,7 @@ class TrainConfig:
   num_steps: int
   # The frequency (in gradient steps) at which checkpoints should be saved
   # (`None` means there is no checkpointing).
-  ckpt_frequency: int | None = None
+  ckpt_frequency: int = 1000
   # If provided, the maximum number of checkpoints to keep.
   ckpt_max_to_keep: int | None = 1
   # The frequency (in gradient steps) at which checkpoints should be saved
@@ -70,6 +72,12 @@ class TrainConfig:
   save_frequency: int | None = None
   # The frequency of logging in gradient steps (`None` means no logging).
   log_frequency: int | None = None
+  # Path to save the model.
+  save_checkpoint_path: str
+  # A checkpoint to resume from (if `None`, training starts from scratch).
+  checkpoint_path: str | None = None
+  # For AdamW
+  weight_decay: float = 0.01
 
 
 @dataclasses.dataclass(kw_only=True)

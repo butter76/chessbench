@@ -55,6 +55,7 @@ class DataLoaderBuilder(Protocol):
 
   def __call__(self, config: config_lib.DataConfig) -> pygrain.DataLoader:
     """Returns a PyGrain data loader from the `config`."""
+    ...
 
 
 class Evaluator(abc.ABC):
@@ -63,6 +64,7 @@ class Evaluator(abc.ABC):
   @abc.abstractmethod
   def step(self, params: hk.Params, step: int) -> Mapping[str, Any]:
     """Returns the results of evaluating the predictor with `params`."""
+    ...
 
 
 class EvaluatorBuilder(Protocol):
@@ -80,6 +82,7 @@ class EvaluatorBuilder(Protocol):
         evaluation loop and passed to the evaluator's step method.
       config: The configuration of the evaluator.
     """
+    ...
 
 
 CODERS = {

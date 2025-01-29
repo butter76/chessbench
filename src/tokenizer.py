@@ -59,7 +59,7 @@ _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
 SEQUENCE_LENGTH = 77
 
 
-def tokenize(fen: str) -> jtp.Int32[jtp.Array, 'T']:
+def tokenize(fen: str):
   """Returns an array of tokens from a fen string.
 
   We compute a tokenized representation of the board, from the FEN string.

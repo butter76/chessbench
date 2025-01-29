@@ -16,3 +16,4 @@ orbax-checkpoint
 pandas
 scipy
 typing-extensions
+tqdm

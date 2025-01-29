@@ -28,6 +28,8 @@ from searchless_chess.src import constants
 from searchless_chess.src import tokenizer
 from searchless_chess.src import utils
 
+import torch
+
 
 def _process_fen(fen: str) -> np.ndarray:
   return tokenizer.tokenize(fen).astype(np.int32)
@@ -55,71 +57,46 @@ class ConvertToSequence(pygrain.MapTransform, abc.ABC):
     self._return_buckets_edges, _ = utils.get_uniform_buckets_edges_values(
         num_return_buckets,
     )
-    # The loss mask ensures that we only train on the return bucket.
-    self._loss_mask = np.full(
-        shape=(self._sequence_length,),
-        fill_value=True,
-        dtype=bool,
-    )
-    self._loss_mask[-1] = False
-
-  @property
-  @abc.abstractmethod
-  def _sequence_length(self) -> int:
-    raise NotImplementedError()
 
 
 class ConvertBehavioralCloningDataToSequence(ConvertToSequence):
   """Converts the fen, move, and win probability into a sequence of integers."""
 
-  @property
-  def _sequence_length(self) -> int:
-    return tokenizer.SEQUENCE_LENGTH + 1  # (s) + (a)
-
   def map(
       self, element: bytes
-  ) -> tuple[constants.Sequences, constants.LossMask]:
+  ):
     fen, move = constants.CODERS['behavioral_cloning'].decode(element)
     state = _process_fen(fen)
     action = _process_move(move)
     sequence = np.concatenate([state, action])
-    return sequence, self._loss_mask
+    return torch.from_numpy(state), torch.from_numpy(action)
 
 
 class ConvertStateValueDataToSequence(ConvertToSequence):
   """Converts the fen, move, and win probability into a sequence of integers."""
 
-  @property
-  def _sequence_length(self) -> int:
-    return tokenizer.SEQUENCE_LENGTH + 1  # (s) +  (r)
-
   def map(
       self, element: bytes
-  ) -> tuple[constants.Sequences, constants.LossMask]:
+  ):
     fen, win_prob = constants.CODERS['state_value'].decode(element)
     state = _process_fen(fen)
     return_bucket = _process_win_prob(win_prob, self._return_buckets_edges)
     sequence = np.concatenate([state, return_bucket])
-    return state, win_prob
+    return torch.from_numpy(state), torch.tensor(win_prob, dtype=torch.float32)
 
 
 class ConvertActionValueDataToSequence(ConvertToSequence):
   """Converts the fen, move, and win probability into a sequence of integers."""
 
-  @property
-  def _sequence_length(self) -> int:
-    return tokenizer.SEQUENCE_LENGTH + 2  # (s) + (a) + (r)
-
   def map(
       self, element: bytes
-  ) -> tuple[constants.Sequences, constants.LossMask]:
+  ):
     fen, move, win_prob = constants.CODERS['action_value'].decode(element)
     state = _process_fen(fen)
     action = _process_move(move)
     return_bucket = _process_win_prob(win_prob, self._return_buckets_edges)
     sequence = np.concatenate([state, action, return_bucket])
-    return state, win_prob
-
+    return torch.from_numpy(state), torch.tensor(win_prob, dtype=torch.float32)
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

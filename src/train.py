@@ -13,7 +13,7 @@ torch.set_printoptions(profile="full")
 from tqdm import tqdm
 
 from searchless_chess.src import config as config_lib
-from searchless_chess.src import data_loader
+from searchless_chess.src.data_loader import build_data_loader
 from searchless_chess.src import tokenizer
 from searchless_chess.src import utils
 
@@ -33,12 +33,18 @@ def train(
     train_dataset = ChessDataset(train_config.data)
     train_dataloader = DataLoader(
         train_dataset,
+        batch_size=train_config.data.batch_size,
         num_workers=train_config.data.worker_count,
+        pin_memory=True,
+        prefetch_factor=1,
     )
     val_dataset = ChessDataset(train_config.eval_data)
     val_dataloader = DataLoader(
         val_dataset,
-        num_workers=train_config.data.worker_count,
+        batch_size=train_config.eval_data.batch_size,
+        num_workers=train_config.eval_data.worker_count,
+        pin_memory=True,
+        prefetch_factor=1,
     )
 
     # In the train function, modify the training loop:
@@ -84,6 +90,7 @@ def train(
     
     # Training loop
     step = 0
+    train_iter = iter(train_dataloader)
     for epoch in range(num_epochs):
         model.train()
         metrics = {}
@@ -92,10 +99,10 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, win_prob = next(iter(train_dataloader))
+            x, win_prob = next(train_iter)
                 
-            x = x.to(device).squeeze(0)
-            win_prob = win_prob.to(device).squeeze(0).unsqueeze(-1)
+            x = x.to(device)
+            win_prob = win_prob.to(device).unsqueeze(-1)
 
             target = {
                 'value_head': win_prob,
@@ -145,13 +152,14 @@ def train(
         val_metrics = {}
         val_loss = 0
         val_steps = cast(int, train_config.eval_data.num_records) // train_config.eval_data.batch_size
+        val_iter = iter(val_dataloader)
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, win_prob = next(iter(val_dataloader))
+                x, win_prob = next(val_iter)
 
-                x = x.to(device).squeeze(0)
-                win_prob = win_prob.to(device).squeeze(0).unsqueeze(-1)
+                x = x.to(device)
+                win_prob = win_prob.to(device).unsqueeze(-1)
 
                 target = {
                     'value_head': win_prob,
@@ -214,7 +222,7 @@ def main():
     model_config = TransformerConfig(
         embedding_dim=256,
         num_layers=8,
-        num_heads=8,
+        num_heads=16,
         widening_factor=3,
         dropout=0.1,
     )
@@ -223,26 +231,26 @@ def main():
     train_config = config_lib.TrainConfig(
         learning_rate=1e-4,
         data=config_lib.DataConfig(
-            batch_size=512,
+            batch_size=1024,
             shuffle=True,
-            worker_count=0,  # 0 disables multiprocessing
+            worker_count=1,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='train',
         ),
         eval_data=config_lib.DataConfig(
-            batch_size=512,
+            batch_size=1024,
             shuffle=False,
-            worker_count=0,  # 0 disables multiprocessing
+            worker_count=1,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='test',
             num_records=62000,
         ),
         log_frequency=1,
-        num_steps=2000,
-        ckpt_frequency=100,
-        save_frequency=100,
+        num_steps=60000,
+        ckpt_frequency=1000,
+        save_frequency=1000,
         save_checkpoint_path='../checkpoints/local/'
     )
     

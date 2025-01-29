@@ -1,6 +1,5 @@
 ninja
 packaging
-flash-attn
 absl-py
 apache-beam
 chess

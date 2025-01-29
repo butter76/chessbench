@@ -54,10 +54,12 @@ def train(
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Load from checkpoint if it exists
+    step = 0
     checkpoint_path = train_config.checkpoint_path
     if checkpoint_path is not None and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path)
         model_config =  checkpoint['model_config']
+        step = checkpoint['step']
         # Create model that matches the checkpoint
         model = ChessTransformer(
             config=model_config,
@@ -198,9 +200,9 @@ def train(
         print({
             "epoch": epoch,
             "train_loss": avg_loss,
-            **{f'{k}': f'{v:.4f}' for k,v in metrics_loss.items()},
+            **{f'{k}': f'{v:.5f}' for k,v in metrics_loss.items()},
             "val_loss": avg_val_loss,
-            **{f'val_{k}': f'{v:.4f}' for k,v in val_metrics_loss.items()},
+            **{f'val_{k}': f'{v:.5f}' for k,v in val_metrics_loss.items()},
         })
         
         # Checkpointing
@@ -260,7 +262,7 @@ def main():
             split='test',
             num_records=62000,
         ),
-        compile=False,
+        compile=True,
         log_frequency=1,
         num_steps=60000,
         ckpt_frequency=1000,

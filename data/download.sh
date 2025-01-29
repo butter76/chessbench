@@ -17,17 +17,17 @@
 
 set -ex
 
-# wget https://storage.googleapis.com/searchless_chess/data/eco_openings.pgn
-# wget https://storage.googleapis.com/searchless_chess/data/puzzles.csv
+wget https://storage.googleapis.com/searchless_chess/data/eco_openings.pgn
+wget https://storage.googleapis.com/searchless_chess/data/puzzles.csv
 
-# mkdir test
-# cd test
-# wget https://storage.googleapis.com/searchless_chess/data/test/action_value_data.bag
-# wget https://storage.googleapis.com/searchless_chess/data/test/behavioral_cloning_data.bag
-# wget https://storage.googleapis.com/searchless_chess/data/test/state_value_data.bag
-# cd ..
+mkdir test
+cd test
+wget https://storage.googleapis.com/searchless_chess/data/test/action_value_data.bag
+wget https://storage.googleapis.com/searchless_chess/data/test/behavioral_cloning_data.bag
+wget https://storage.googleapis.com/searchless_chess/data/test/state_value_data.bag
+cd ..
 
-# mkdir train
+mkdir train
 cd train
 # for idx in $(seq -f "%05g" 0 30)
 # do

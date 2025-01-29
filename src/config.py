@@ -78,6 +78,8 @@ class TrainConfig:
   checkpoint_path: str | None = None
   # For AdamW
   weight_decay: float = 0.01
+  # Compile the model
+  compile: bool = False
 
 
 @dataclasses.dataclass(kw_only=True)

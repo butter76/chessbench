@@ -68,7 +68,10 @@ def train(
     else:
         # Initialize model
         model = ChessTransformer(model_config).to(device)
-    model = cast(ChessTransformer, torch.compile(model))
+    
+    # Optional compilation
+    if train_config.compile:
+        model = cast(ChessTransformer, torch.compile(model))
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total number of parameters: {total_params:,}")
@@ -95,6 +98,8 @@ def train(
         model.train()
         metrics = {}
         total_loss = 0
+        avg_loss = 0
+        metrics_loss = {}
         pbar = tqdm(total=train_config.ckpt_frequency, desc=f'Epoch {epoch+1}/{num_epochs}')
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
@@ -190,6 +195,14 @@ def train(
 
         avg_val_loss = val_loss / val_steps
         val_metrics_loss = {name: loss / val_steps for name, loss in val_metrics.items()}
+        print({
+            "epoch": epoch,
+            "train_loss": avg_loss,
+            **{f'{k}': f'{v:.4f}' for k,v in metrics_loss.items()},
+            "val_loss": avg_val_loss,
+            **{f'val_{k}': f'{v:.4f}' for k,v in val_metrics_loss.items()},
+        })
+        
         # Checkpointing
         checkpoint = {
             'model': model.state_dict(),
@@ -247,6 +260,7 @@ def main():
             split='test',
             num_records=62000,
         ),
+        compile=False,
         log_frequency=1,
         num_steps=60000,
         ckpt_frequency=1000,

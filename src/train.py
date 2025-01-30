@@ -65,15 +65,16 @@ def train(
             config=model_config,
         ).to(device)
 
-        model.load_state_dict(checkpoint['model_state_dict'])
+        if train_config.compile:
+            model = cast(ChessTransformer, torch.compile(model))
+
+        model.load_state_dict(checkpoint['model'])
         print(f"Loaded model from checkpoint: {checkpoint_path}")
     else:
         # Initialize model
         model = ChessTransformer(model_config).to(device)
-    
-    # Optional compilation
-    if train_config.compile:
-        model = cast(ChessTransformer, torch.compile(model))
+        if train_config.compile:
+            model = cast(ChessTransformer, torch.compile(model))
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total number of parameters: {total_params:,}")
@@ -198,11 +199,12 @@ def train(
         avg_val_loss = val_loss / val_steps
         val_metrics_loss = {name: loss / val_steps for name, loss in val_metrics.items()}
         print({
-            "epoch": epoch,
+            "epoch": epoch + 1,
             "train_loss": avg_loss,
             **{f'{k}': f'{v:.5f}' for k,v in metrics_loss.items()},
             "val_loss": avg_val_loss,
             **{f'val_{k}': f'{v:.5f}' for k,v in val_metrics_loss.items()},
+            'lr': f'{scheduler.get_last_lr()[0]:.5f}',
         })
         
         # Checkpointing
@@ -267,7 +269,8 @@ def main():
         num_steps=60000,
         ckpt_frequency=1000,
         save_frequency=1000,
-        save_checkpoint_path='../checkpoints/local/'
+        save_checkpoint_path='../checkpoints/local/',
+        checkpoint_path='../checkpoints/decent/checkpoint_40000.pt',
     )
     
     # Train model

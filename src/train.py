@@ -70,21 +70,31 @@ def train(
 
         model.load_state_dict(checkpoint['model'])
         print(f"Loaded model from checkpoint: {checkpoint_path}")
+
+        # Load optimizer state
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=train_config.learning_rate,
+            weight_decay=train_config.weight_decay
+        )
+
+        optimizer.load_state_dict(checkpoint['optimizer'])
+
     else:
         # Initialize model
         model = ChessTransformer(model_config).to(device)
         if train_config.compile:
             model = cast(ChessTransformer, torch.compile(model))
 
+        # Setup optimizer
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=train_config.learning_rate,
+            weight_decay=train_config.weight_decay
+        )
+
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total number of parameters: {total_params:,}")
-    
-    # Setup optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=train_config.learning_rate,
-        weight_decay=train_config.weight_decay
-    )
 
     # After creating the optimizer, add the scheduler:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -204,6 +214,7 @@ def train(
             "val_loss": avg_val_loss,
             **{f'val_{k}': f'{v:.5f}' for k,v in val_metrics_loss.items()},
             'lr': f'{scheduler.get_last_lr()[0]:.5f}',
+            'step': step,
         })
         
         # Checkpointing

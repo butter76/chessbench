@@ -1,6 +1,6 @@
 """PyTorch implementation of the training algorithm for action-value prediction."""
 
-import copy
+from itertools import cycle
 import os
 from typing import Any, cast
 
@@ -95,8 +95,7 @@ def train(
     )
     
     # Training loop
-    step = 0
-    train_iter = iter(train_dataloader)
+    train_iter = cycle(train_dataloader)
     for epoch in range(num_epochs):
         model.train()
         metrics = {}

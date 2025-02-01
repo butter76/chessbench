@@ -82,7 +82,7 @@ class ConvertStateValueDataToSequence(ConvertToSequence):
     state = _process_fen(fen)
     return_bucket = _process_win_prob(win_prob, self._return_buckets_edges)
     sequence = np.concatenate([state, return_bucket])
-    return torch.from_numpy(state), torch.tensor(win_prob, dtype=torch.float32)
+    return state, np.array([win_prob])
 
 
 class ConvertActionValueDataToSequence(ConvertToSequence):
@@ -96,7 +96,7 @@ class ConvertActionValueDataToSequence(ConvertToSequence):
     action = _process_move(move)
     return_bucket = _process_win_prob(win_prob, self._return_buckets_edges)
     sequence = np.concatenate([state, action, return_bucket])
-    return torch.from_numpy(state), torch.tensor(win_prob, dtype=torch.float32)
+    return state, np.array([win_prob])
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

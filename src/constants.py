@@ -120,3 +120,18 @@ class ActionValueData(NamedTuple):
   fen: str
   move: str
   win_prob: float
+
+class ActionValuesData(NamedTuple):
+  fen: str
+  move_values: list[tuple[str, float]]  # List of (move, win_prob) pairs
+
+# Add to the CODERS dictionary:
+CODERS['action_values'] = coders.TupleCoder((
+  CODERS['fen'],
+  coders.IterableCoder(
+    coders.TupleCoder((CODERS['move'], CODERS['win_prob']))
+  )
+))
+
+def encode_action_values(data: ActionValuesData) -> bytes:
+  return CODERS['action_values'].encode((data.fen, data.move_values))

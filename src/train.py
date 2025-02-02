@@ -7,104 +7,15 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 torch.set_default_dtype(torch.bfloat16)
 torch.set_printoptions(profile="full")
 from tqdm import tqdm
 
 from searchless_chess.src import config as config_lib
-from searchless_chess.src.data_loader import build_data_loader, _TRANSFORMATION_BY_POLICY
-from searchless_chess.src import tokenizer
-from searchless_chess.src import utils
 
-from searchless_chess.src.dataset import ChessDataset
+from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
-import grain.python as pygrain
-import bagz
 
-from searchless_chess.src import constants
-from searchless_chess.src.data_loader import _process_fen
-import numpy as np
-
-# class TupleBatchTransform(pygrain.MapTransform):
-#     def __init__(self, batch_size):
-#         self.batch_size = batch_size
-#         self.batch = []
-    
-#     def map(self, element):
-#         self.batch.append(element)
-#         if len(self.batch) == self.batch_size:
-#             # Stack each tensor in the tuple separately
-#             result = tuple(torch.stack([b[i] for b in self.batch]) for i in range(len(batch[0])))
-#             batch = []
-#             return result
-#         return None
-    
-
-# def custom_batch_function(record_metadata_list: list[pygrain.RecordMetadata], 
-#                           dataset: pygrain.MapDataset,
-#                           batch_size: int = 32) -> tuple[torch.Tensor, ...]:
-#     """
-#     Custom batch function that creates batches of PyTorch tensors.
-    
-#     Args:
-#         record_metadata_list: List of RecordMetadata objects.
-#         dataset: The PyGrain dataset.
-#         batch_size: The desired batch size (default: 32).
-    
-#     Returns:
-#         A tuple of batched PyTorch tensors.
-#     """
-#     # Ensure we don't exceed the number of available records
-#     batch_size = min(batch_size, len(record_metadata_list))
-    
-#     # Initialize lists to hold individual tensors
-#     batched_data = [[] for _ in range(len(dataset[0]))]
-    
-#     for metadata in record_metadata_list[:batch_size]:
-#         # Get the record data (assumed to be a tuple of tensors)
-#         record_data = dataset[metadata.index]
-        
-#         # Add each tensor to its respective list
-#         for i, tensor in enumerate(record_data):
-#             batched_data[i].append(tensor)
-    
-#     # Stack the tensors in each list
-#     batched_tensors = tuple(torch.stack(tensor_list) for tensor_list in batched_data)
-    
-#     return batched_tensors
-class ConvertToTorch(pygrain.MapTransform):
-    def map(self, element):
-        return tuple(torch.from_numpy(arr) for arr in element)
-
-        
-
-def load_datasource(config: config_lib.DataConfig):
-    data_path = os.path.join(
-        os.getcwd(),
-        f'../data/{config.split}/{config.policy}_data.bag'
-    )
-    bag_source = bagz.BagDataSource(data_path)
-    sampler = pygrain.IndexSampler(
-        num_records=len(bag_source),
-        shard_options=pygrain.NoSharding(),
-        shuffle=False,
-        num_epochs=None,
-    )
-
-    transformations = (
-        _TRANSFORMATION_BY_POLICY[config.policy](num_return_buckets=config.num_return_buckets),
-        pygrain.Batch(batch_size=config.batch_size),
-        ConvertToTorch(),
-    )
-
-    return pygrain.DataLoader(
-        data_source=bag_source,
-        sampler=sampler,
-        operations=transformations,
-        worker_count=config.worker_count,
-        read_options=None,
-    )
 
 def train(
     train_config: config_lib.TrainConfig,
@@ -130,6 +41,7 @@ def train(
         checkpoint = torch.load(checkpoint_path)
         model_config =  checkpoint['model_config']
         step = checkpoint['step']
+
         # Create model that matches the checkpoint
         model = ChessTransformer(
             config=model_config,
@@ -316,7 +228,7 @@ def main():
     """Main training function."""
     # Set constants
     num_return_buckets = 128
-    policy = 'state_value'
+    policy = 'action_value'
     
     # Create model config
     model_config = TransformerConfig(

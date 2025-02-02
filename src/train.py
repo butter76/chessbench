@@ -259,7 +259,7 @@ def main():
         learning_rate=1e-3,
         data=config_lib.DataConfig(
             batch_size=2048,
-            shuffle=False,
+            shuffle=True,
             seed=42142,
             worker_count=16,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
@@ -274,8 +274,8 @@ def main():
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='test',
-            num_records=62000,
             dataset_path='../data/output/validation.bag',
+            num_records=1_000_000
         ),
         compile=False,
         log_frequency=1,

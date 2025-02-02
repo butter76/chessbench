@@ -19,8 +19,8 @@ import dataclasses
 from typing import Literal
 
 
-PolicyType = Literal['action_value', 'state_value', 'behavioral_cloning']
-POLICY_TYPES = ['action_value', 'state_value', 'behavioral_cloning']
+PolicyType = Literal['action_value', 'state_value', 'behavioral_cloning', 'action_values']
+POLICY_TYPES = ['action_value', 'state_value', 'behavioral_cloning', 'action_values']
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -41,6 +41,8 @@ class DataConfig:
   num_return_buckets: int
   # The dataset split.
   split: Literal['train', 'test']
+  # The dataset path.
+  dataset_path: str
   # The policy used to create the dataset.
   policy: PolicyType
   # The number of records to read from the dataset (can be useful when, e.g.,

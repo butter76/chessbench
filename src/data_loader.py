@@ -28,7 +28,9 @@ from searchless_chess.src import constants
 from searchless_chess.src import tokenizer
 from searchless_chess.src import utils
 
+from searchless_chess.src.engines import engine
 import torch
+import chess
 
 
 def _process_fen(fen: str) -> np.ndarray:
@@ -98,12 +100,37 @@ class ConvertActionValueDataToSequence(ConvertToSequence):
     sequence = np.concatenate([state, action, return_bucket])
     return state, np.array([win_prob])
 
+class ConvertActionValuesDataToSequence(ConvertToSequence):
+  """Converts the fen, move, and win probability into a sequence of integers."""
+  def map(
+    self, element: bytes
+  ):
+  
+    fen, move_values = constants.CODERS['action_values'].decode(element)
+    state = _process_fen(fen)
+    legal_actions = np.zeros((64, 64))
+    actions = np.zeros((64, 64))
+
+    ## Validation
+    assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
+
+    for move, win_prob in move_values:
+      # Dropping underpromotions for now
+      if "=" in move:
+        if move[4:] not in ["=Q", "-q"]:
+          continue
+      s1 = utils._parse_square(move[0:2])
+      s2 = utils._parse_square(move[2:4])
+      legal_actions[s1, s2] = 1
+      actions[s1, s2] = win_prob
+    return state, legal_actions, actions
+
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,
     'action_value': ConvertActionValueDataToSequence,
+    'action_values': ConvertActionValuesDataToSequence,
     'state_value': ConvertStateValueDataToSequence,
 }
-
 
 # Follows the base_constants.DataLoaderBuilder protocol.
 def build_data_loader(config: config_lib.DataConfig) -> pygrain.DataLoader:

@@ -2,6 +2,8 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+torch.set_default_dtype(torch.bfloat16)
+torch.set_printoptions(profile="full")
 import dataclasses
 
 
@@ -86,6 +88,8 @@ class ChessTransformer(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
 
+        self.config = config
+
         self.vocab_size = len(tokenizer._CHARACTERS)
         self.seq_len = tokenizer.SEQUENCE_LENGTH
         
@@ -103,11 +107,17 @@ class ChessTransformer(nn.Module):
                 dropout=config.dropout
             ) for _ in range(config.num_layers)
         ])
+
+        self.self_head = nn.Linear(config.embedding_dim, self.vocab_size)
         
-        self.value_head = nn.Sequential(
-            nn.Linear(config.embedding_dim * self.seq_len, 1),
-            nn.Sigmoid(),
-        )
+        # Complex Projection for action matrix
+        self.final_num_heads = config.num_heads
+        self.final_head_dim = config.embedding_dim // config.num_heads
+        self.final_scaling = self.final_head_dim ** -0.5
+
+        self.final_q_proj = nn.Linear(config.embedding_dim, config.embedding_dim)
+        self.final_k_proj = nn.Linear(config.embedding_dim, config.embedding_dim)
+        self.final_out_proj = nn.Linear(self.final_head_dim, 2)
         
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         x = self.embedding(x)
@@ -119,11 +129,43 @@ class ChessTransformer(nn.Module):
         batch_size = x.shape[0]
         flat_x = x.reshape(batch_size, -1)  # [batch, seq_len * embedding_dim]
 
+        # Compute Q, K, V for the final attention op.
+        q = self.final_q_proj(x)  # [batch, seq_len, embed_dim]
+        k = self.final_k_proj(x)  # [batch, seq_len, embed_dim]
+
+        # Reshape for multi-head attention.
+        # We'll reshape and transpose such that the shape becomes
+        # [batch, num_heads, seq_len, head_dim]
+        def reshape_for_heads(t):
+            return t.reshape(batch_size, self.seq_len, self.final_num_heads, self.final_head_dim).transpose(1, 2)
+        
+        q = reshape_for_heads(q)
+        k = reshape_for_heads(k)
+
+        # Compute scaled dot-product attention.
+        # q: [batch, num_heads, seq_len, head_dim]
+        # k: [batch, num_heads, seq_len, head_dim]
+        # => scores: [batch, num_heads, seq_len, seq_len]
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.final_scaling
+        # Move num_heads to the end: [batch, seq_len, seq_len, num_heads]
+        attn_scores = attn_scores.permute(0, 2, 3, 1)
+        # Apply final projection: [batch, seq_len, seq_len, 2]
+        attn_scores = self.final_out_proj(attn_scores)
+        # Shorten seq_len to 64: [batch, 64, 64, 2]
+        attn_scores = attn_scores[:, :64, :64, :]
+        # Apply sigmoid to constrain values between 0 and 1
+        attn_scores = torch.sigmoid(attn_scores)
+
         return {
-            'value_head': self.value_head(flat_x),
+            'self': self.self_head(x),
+            'value': attn_scores[:, :, :, 0],
+            'legal': attn_scores[:, :, :, 1],
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+
         return {
-            'value': nn.functional.mse_loss(output['value_head'], target['value_head']),
+            'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
+            'legal': F.binary_cross_entropy(output['legal'], target['legal']),
+            'value': (F.mse_loss(output['value'], target['value'], reduction='none') * target['legal']).sum() / target['legal'].sum(),
         }

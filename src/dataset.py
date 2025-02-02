@@ -19,16 +19,10 @@ class ConvertToTorch(pygrain.MapTransform):
         
 
 def load_datasource(config: config_lib.DataConfig):
-    if config.split == 'train':
-        data_path = os.path.join(
-            os.getcwd(),
-            f'../data/{config.split}/{config.policy}@31_data.bag'
-        )
-    else:
-        data_path = os.path.join(
-            os.getcwd(),
-            f'../data/{config.split}/{config.policy}_data.bag'
-        )
+    data_path = os.path.join(
+        os.getcwd(),
+        config.dataset_path,
+    )
     bag_source = bagz.BagDataSource(data_path)
     sampler = pygrain.IndexSampler(
         num_records=len(bag_source),

@@ -70,12 +70,20 @@ def train(
         print("Loading Optimizer from checkpoint...")
         optimizer.load_state_dict(checkpoint['optimizer'])
 
-    # After creating the optimizer, add the scheduler:
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    # # After creating the optimizer, add the scheduler:
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    #     optimizer,
+    #     T_0=train_config.ckpt_frequency * 2,  # First restart cycle length
+    #     T_mult=2,  # Each cycle gets twice as long
+    #     eta_min=train_config.learning_rate / 100  # Minimum learning rate
+    # )
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        T_0=train_config.ckpt_frequency * 2,  # First restart cycle length
-        T_mult=2,  # Each cycle gets twice as long
-        eta_min=train_config.learning_rate / 100  # Minimum learning rate
+        mode='min',
+        factor=0.33,  # Multiply LR by 0.25 when plateauing
+        patience=3,  # Number of epochs to wait before reducing LR
+        min_lr=1e-5
     )
 
     if checkpoint is not None and 'scheduler' in checkpoint:
@@ -100,13 +108,16 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, win_prob = next(train_iter)
+            x, legal_actions, avs = next(train_iter)
                 
-            x = x.to(device)
-            win_prob = win_prob.to(torch.bfloat16).to(device)
+            x = x.to(torch.long).to(device)
+            legal_actions = legal_actions.to(torch.bfloat16).to(device)
+            avs = avs.to(torch.bfloat16).to(device)
 
             target = {
-                'value_head': win_prob,
+                'self': x,
+                'legal': legal_actions,
+                'value': avs
             }
             
             # Forward pass
@@ -128,7 +139,6 @@ def train(
                     train_config.max_grad_norm
                 )
             optimizer.step()
-            scheduler.step()
 
             # Update metrics
             metrics = {name: loss.item() + metrics.get(name, 0) for name, loss in losses.items()}
@@ -157,13 +167,16 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, win_prob = next(val_iter)
-
-                x = x.to(device)
-                win_prob = win_prob.to(torch.bfloat16).to(device)
+                x, legal_actions, avs = next(val_iter)
+                
+                x = x.to(torch.long).to(device)
+                legal_actions = legal_actions.to(torch.bfloat16).to(device)
+                avs = avs.to(torch.bfloat16).to(device)
 
                 target = {
-                    'value_head': win_prob,
+                    'self': x,
+                    'legal': legal_actions,
+                    'value': avs
                 }
                 
                 # Forward pass
@@ -191,6 +204,8 @@ def train(
 
         avg_val_loss = val_loss / val_steps
         val_metrics_loss = {name: loss / val_steps for name, loss in val_metrics.items()}
+
+        scheduler.step(avg_val_loss)
         print({
             "epoch": epoch + 1,
             "train_loss": avg_loss,
@@ -228,7 +243,7 @@ def main():
     """Main training function."""
     # Set constants
     num_return_buckets = 128
-    policy = 'action_value'
+    policy = 'action_values'
     
     # Create model config
     model_config = TransformerConfig(
@@ -241,30 +256,33 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=1e-4,
+        learning_rate=1e-3,
         data=config_lib.DataConfig(
-            batch_size=1024,
-            shuffle=True,
-            worker_count=4,  # 0 disables multiprocessing
+            batch_size=2048,
+            shuffle=False,
+            seed=42142,
+            worker_count=16,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='train',
+            dataset_path='../data/output/new@24.bag',
         ),
         eval_data=config_lib.DataConfig(
-            batch_size=1024,
+            batch_size=2048,
             shuffle=False,
-            worker_count=4,  # 0 disables multiprocessing
+            worker_count=16,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='test',
             num_records=62000,
+            dataset_path='../data/output/validation.bag',
         ),
-        compile=True,
+        compile=False,
         log_frequency=1,
-        num_steps=60000,
-        ckpt_frequency=20,
-        save_frequency=1000,
-        save_checkpoint_path='../checkpoints/local/',
+        num_steps=60000 * 3 * 10,
+        ckpt_frequency=1000 * 3,
+        save_frequency=1000 * 3,
+        save_checkpoint_path='../checkpoints/with-legal-moves-aux/',
     )
     
     # Train model

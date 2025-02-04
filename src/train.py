@@ -7,7 +7,7 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 import torch.optim as optim
-torch.set_default_dtype(torch.bfloat16)
+torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 from tqdm import tqdm
 
@@ -82,7 +82,7 @@ def train(
         optimizer,
         mode='min',
         factor=0.33,  # Multiply LR by 0.25 when plateauing
-        patience=3,  # Number of epochs to wait before reducing LR
+        patience=5,  # Number of epochs to wait before reducing LR
         min_lr=1e-5
     )
 
@@ -108,22 +108,18 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, legal_actions, avs = next(train_iter)
+            x, win_prob = next(train_iter)
                 
             x = x.to(torch.long).to(device)
-            legal_actions = legal_actions.to(torch.bfloat16).to(device)
-            avs = avs.to(torch.bfloat16).to(device)
+            win_prob = win_prob.to(torch.float32).to(device)
 
             target = {
                 'self': x,
-                'legal': legal_actions,
-                'value': avs
+                'value': win_prob
             }
             
             # Forward pass
             value = model(x)
-
-
             
             # Compute loss
             losses = model.losses(value, target)
@@ -167,16 +163,14 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, legal_actions, avs = next(val_iter)
-                
+                x, win_prob = next(val_iter)
+                    
                 x = x.to(torch.long).to(device)
-                legal_actions = legal_actions.to(torch.bfloat16).to(device)
-                avs = avs.to(torch.bfloat16).to(device)
+                win_prob = win_prob.to(torch.float32).to(device)
 
                 target = {
                     'self': x,
-                    'legal': legal_actions,
-                    'value': avs
+                    'value': win_prob
                 }
                 
                 # Forward pass
@@ -256,7 +250,7 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=1e-3,
+        learning_rate=2e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -282,7 +276,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/with-legal-moves-aux/',
+        save_checkpoint_path='../checkpoints/avs-minimal-float32/',
     )
     
     # Train model

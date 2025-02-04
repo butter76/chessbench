@@ -31,6 +31,7 @@ from searchless_chess.src import utils
 from searchless_chess.src.engines import engine
 import torch
 import chess
+import random
 
 
 def _process_fen(fen: str) -> np.ndarray:
@@ -107,23 +108,26 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
   ):
   
     fen, move_values = constants.CODERS['action_values'].decode(element)
-    state = _process_fen(fen)
     legal_actions = np.zeros((64, 64))
     actions = np.zeros((64, 64))
 
     ## Validation
     assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
 
+    filtered_moves = []
     for move, win_prob in move_values:
       # Dropping underpromotions for now
       if "=" in move:
         if move[4:] not in ["=Q", "-q"]:
           continue
-      s1 = utils._parse_square(move[0:2])
-      s2 = utils._parse_square(move[2:4])
-      legal_actions[s1, s2] = 1
-      actions[s1, s2] = win_prob
-    return state, legal_actions, actions
+      filtered_moves.append((move, win_prob))
+    move, win_prob = random.choice(filtered_moves)
+    board = chess.Board(fen)
+    board.push(chess.Move.from_uci(move))
+
+    state = _process_fen(board.fen())
+    
+    return state, np.array([win_prob])
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

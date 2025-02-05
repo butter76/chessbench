@@ -13,7 +13,7 @@ from searchless_chess.src import tokenizer
 from searchless_chess.src import utils
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from flash_attn import flash_attn_func
+from flash_attn import flash_attn_qkvpacked_func
 from flash_attn.modules.mha import FlashSelfAttention
 
 @dataclasses.dataclass(kw_only=True)
@@ -31,6 +31,8 @@ class TransformerConfig:
     widening_factor: int = 4
     # The dropout rate.
     dropout: float = 0.1
+    # repeater for tokens
+    repeater: int = 1
 
     ## TODO: Implement
     # Whether to apply QK normalization trick in attention layer.
@@ -57,10 +59,10 @@ class FlashAttentionLayer(nn.Module):
         # Single QKV projection
         qkv = self.qkv_proj(x)
         qkv = qkv.reshape(batch_size, seq_len, 3, self.nhead, self.head_dim)
-        q, k, v = qkv.unbind(dim=2)
         
-        # Use flash_attn_func directly instead of FlashSelfAttention module
-        output = cast(Any, flash_attn_func(q, k, v, causal=causal, dropout_p=self.dropout))
+        # Use dropout only during training
+        dropout_p = self.dropout if self.training else 0.0
+        output = cast(Any, flash_attn_qkvpacked_func(qkv, causal=causal, dropout_p=dropout_p))
         
         output = output.contiguous().view(batch_size, seq_len, d_model)
         return self.out_proj(output)
@@ -90,11 +92,14 @@ class ChessTransformer(nn.Module):
         self.config = config
 
         self.vocab_size = len(tokenizer._CHARACTERS)
-        self.seq_len = tokenizer.SEQUENCE_LENGTH
+        self.seq_len = tokenizer.SEQUENCE_LENGTH * config.repeater
         
         self.embedding = nn.Embedding(self.vocab_size, config.embedding_dim)
         self.pos_embedding = nn.Parameter(
             torch.randn(1, self.seq_len, config.embedding_dim)
+        )
+        self.sq_embedding = nn.Parameter(
+            torch.randn(1, self.seq_len // config.repeater, config.embedding_dim)
         )
 
         self.transformer = nn.ModuleList([
@@ -114,13 +119,54 @@ class ChessTransformer(nn.Module):
             nn.Linear(config.embedding_dim // 2, 1),
             nn.Sigmoid()  # Output between 0 and 1 for win probability
         )
+
+        # Complex Projection for action matrix
+        self.final_ln = nn.LayerNorm(config.embedding_dim)
+        self.final_num_heads = config.num_heads
+        self.final_head_dim = config.embedding_dim // self.final_num_heads
+        self.final_scaling = self.final_head_dim ** -0.5
+
+
+        self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
+        self.final_out_proj = nn.Sequential(
+            nn.Linear(self.final_num_heads * self.config.repeater * self.config.repeater, 
+                    self.final_num_heads * self.config.repeater),
+            nn.GELU(),
+            nn.Linear(self.final_num_heads * self.config.repeater, 2),
+            nn.Sigmoid(),
+        )
         
         
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        batch_size = x.size(0)
         x = self.embedding(x)
+        x = x + self.sq_embedding
+        x = x.repeat_interleave(self.config.repeater, dim=1)
         x = x + self.pos_embedding
         for layer in self.transformer:
             x = layer(x)
+
+
+        # qk = self.final_qk_proj(self.final_ln(x))
+        # qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
+
+        # q, k = qk.unbind(2, dim=2)
+
+        # attn_scores = torch.baddbmm(
+        #     torch.empty(batch_size, self.final_num_heads, self.seq_len, self.seq_len, dtype=q.dtype, device=q.device),
+        #     q,
+        #     k.transpose(-2, -1),
+        #     beta=0.0,
+        #     alpha=self.final_scaling,
+        # )
+        # attn_scores = torch.tanh(attn_scores)
+
+        # s = self.seq_len // self.config.repeater
+
+        # attn_scores = attn_scores.reshape(batch_size, self.final_num_heads, self.config.repeater, s, self.config.repeater, s).permute(0, 3, 5, 1, 2, 4)
+        # attn_scores = attn_scores.reshape(batch_size, s, s, self.final_num_heads * self.config.repeater * self.config.repeater)
+
+        # attn_scores = self.final_out_proj(attn_scores)
 
         return {
             'self': self.self_head(x),
@@ -130,6 +176,6 @@ class ChessTransformer(nn.Module):
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
 
         return {
-            'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
+            'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].repeat_interleave(self.config.repeater, dim=1).view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
         }

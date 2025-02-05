@@ -90,7 +90,7 @@ def train(
         optimizer,
         mode='min',
         factor=0.33,  # Multiply LR by 0.25 when plateauing
-        patience=5,  # Number of epochs to wait before reducing LR
+        patience=6,  # Number of epochs to wait before reducing LR
         min_lr=1e-5
     )
 
@@ -137,13 +137,15 @@ def train(
             
             # Backward pass
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
             if train_config.max_grad_norm is not None:
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), 
+                    model.parameters(),
                     train_config.max_grad_norm
                 )
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             # Update metrics
             metrics = {name: loss.item() + metrics.get(name, 0) for name, loss in losses.items()}
@@ -260,7 +262,7 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=4e-4,
+        learning_rate=8e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,

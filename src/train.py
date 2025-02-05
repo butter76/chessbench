@@ -7,6 +7,8 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 from tqdm import tqdm
@@ -70,6 +72,12 @@ def train(
         print("Loading Optimizer from checkpoint...")
         optimizer.load_state_dict(checkpoint['optimizer'])
 
+
+    scaler = GradScaler(device)
+    if checkpoint is not None and 'scaler' in checkpoint:
+        print("Loading Scaler from checkpoint...")
+        scaler.load_state_dict(checkpoint['scaler'])
+
     # # After creating the optimizer, add the scheduler:
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     #     optimizer,
@@ -118,12 +126,13 @@ def train(
                 'value': win_prob
             }
             
-            # Forward pass
-            value = model(x)
-            
-            # Compute loss
-            losses = model.losses(value, target)
-            loss = cast(torch.Tensor, sum(losses.values())) 
+            with autocast(device, dtype=torch.bfloat16):
+                # Forward pass
+                value = model(x)
+                
+                # Compute loss
+                losses = model.losses(value, target)
+                loss = cast(torch.Tensor, sum(losses.values())) 
 
             
             # Backward pass
@@ -173,8 +182,8 @@ def train(
                     'value': win_prob
                 }
                 
-                # Forward pass
-                value = model(x)
+                with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
+                    value = model(x)
 
                 # Compute loss
                 losses = model.losses(value, target)
@@ -215,6 +224,7 @@ def train(
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'scheduler': scheduler.state_dict(),
+            'scaler': scaler.state_dict(),
             'model_config': model_config,
             'step': step,
             "val_loss": avg_val_loss,
@@ -250,7 +260,7 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=2e-4,
+        learning_rate=4e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -272,11 +282,12 @@ def main():
             num_records=1_000_000
         ),
         compile=False,
+        max_grad_norm=1.0,
         log_frequency=1,
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/avs-minimal-float32/',
+        save_checkpoint_path='../checkpoints/mixed-precision-flash-testing/',
     )
     
     # Train model

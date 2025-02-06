@@ -91,7 +91,7 @@ def train(
         mode='min',
         factor=0.33,  # Multiply LR by 0.25 when plateauing
         patience=6,  # Number of epochs to wait before reducing LR
-        min_lr=1e-5
+        min_lr=3e-5
     )
 
     if checkpoint is not None and 'scheduler' in checkpoint:
@@ -116,14 +116,18 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, win_prob = next(train_iter)
+            x, legal_actions, avs, value_prob = next(train_iter)
                 
             x = x.to(torch.long).to(device)
-            win_prob = win_prob.to(torch.float32).to(device)
+            legal_actions = legal_actions.to(torch.float32).to(device)
+            avs = avs.to(torch.float32).to(device)
+            value_prob = value_prob.to(torch.float32).to(device)
 
             target = {
                 'self': x,
-                'value': win_prob
+                'legal': legal_actions,
+                'avs': avs,
+                'value': value_prob,
             }
             
             with autocast(device, dtype=torch.bfloat16):
@@ -174,14 +178,18 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, win_prob = next(val_iter)
-                    
+                x, legal_actions, avs, value_prob = next(val_iter)
+                
                 x = x.to(torch.long).to(device)
-                win_prob = win_prob.to(torch.float32).to(device)
+                legal_actions = legal_actions.to(torch.float32).to(device)
+                avs = avs.to(torch.float32).to(device)
+                value_prob = value_prob.to(torch.float32).to(device)
 
                 target = {
                     'self': x,
-                    'value': win_prob
+                    'legal': legal_actions,
+                    'avs': avs,
+                    'value': value_prob,
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
@@ -262,7 +270,7 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=8e-4,
+        learning_rate=4e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -289,7 +297,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/mixed-precision-flash-testing/',
+        save_checkpoint_path='../checkpoints/mixed-precision/',
     )
     
     # Train model

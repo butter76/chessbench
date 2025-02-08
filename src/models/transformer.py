@@ -92,14 +92,11 @@ class ChessTransformer(nn.Module):
         self.config = config
 
         self.vocab_size = len(tokenizer._CHARACTERS)
-        self.seq_len = tokenizer.SEQUENCE_LENGTH * config.repeater
+        self.seq_len = tokenizer.SEQUENCE_LENGTH
         
         self.embedding = nn.Embedding(self.vocab_size, config.embedding_dim)
         self.pos_embedding = nn.Parameter(
             torch.randn(1, self.seq_len, config.embedding_dim)
-        )
-        self.sq_embedding = nn.Parameter(
-            torch.randn(1, self.seq_len // config.repeater, config.embedding_dim)
         )
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -107,7 +104,9 @@ class ChessTransformer(nn.Module):
             nhead=config.num_heads,
             dim_feedforward=config.embedding_dim * config.widening_factor,
             dropout=config.dropout,
+            activation="gelu",
             batch_first=True,
+            norm_first=True,
         )
         self.transformer = nn.TransformerEncoder(
             encoder_layer, 
@@ -132,23 +131,22 @@ class ChessTransformer(nn.Module):
 
         self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
         self.final_out_proj = nn.Sequential(
-            nn.Linear(self.final_num_heads * self.config.repeater * self.config.repeater, 
-                    self.final_num_heads * self.config.repeater),
+            nn.Linear(self.final_num_heads, 
+                    self.final_num_heads),
             nn.GELU(),
-            nn.Linear(self.final_num_heads * self.config.repeater, 2),
+            nn.Linear(self.final_num_heads, 2),
         )
         
         
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         batch_size = x.size(0)
         x = self.embedding(x)
-        x = x + self.sq_embedding
-        x = x.repeat_interleave(self.config.repeater, dim=1)
         x = x + self.pos_embedding
         x = self.transformer(x)
+        x = self.final_ln(x)
 
 
-        qk = self.final_qk_proj(self.final_ln(x))
+        qk = self.final_qk_proj(x)
         qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
 
         q, k = qk.unbind(dim=2)
@@ -156,10 +154,8 @@ class ChessTransformer(nn.Module):
         attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
         attn_scores = torch.tanh(attn_scores)
 
-        s = self.seq_len // self.config.repeater
+        attn_scores = attn_scores.permute(0, 2, 3, 1)
 
-        attn_scores = attn_scores.reshape(batch_size, self.final_num_heads, self.config.repeater, s, self.config.repeater, s).permute(0, 3, 5, 1, 2, 4)
-        attn_scores = attn_scores.reshape(batch_size, s, s, self.final_num_heads * self.config.repeater * self.config.repeater)
 
         attn_scores = self.final_out_proj(attn_scores)
 
@@ -174,7 +170,7 @@ class ChessTransformer(nn.Module):
         legal_moves = target['legal'] == 1
 
         return {
-            'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].repeat_interleave(self.config.repeater, dim=1).view(-1)),
+            'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             'avs': F.mse_loss(output['avs'][legal_moves], target['avs'][legal_moves]),

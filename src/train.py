@@ -265,7 +265,7 @@ def main():
         num_layers=8,
         num_heads=16,
         widening_factor=3,
-        dropout=0.1,
+        dropout=0,
     )
     
     # Create training config
@@ -297,7 +297,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/mixed-precision/',
+        save_checkpoint_path='../checkpoints/no-dropout/',
     )
     
     # Train model

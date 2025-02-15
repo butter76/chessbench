@@ -13,8 +13,6 @@ from searchless_chess.src import tokenizer
 from searchless_chess.src import utils
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from flash_attn import flash_attn_qkvpacked_func
-from flash_attn.modules.mha import FlashSelfAttention
 
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
@@ -28,7 +26,7 @@ class TransformerConfig:
     num_heads: int = 8
     # How much larger the hidden layer of the feedforward network should be
     # compared to the `embedding_dim`.
-    widening_factor: int = 4
+    widening_factor: float = 4
     # The dropout rate.
     dropout: float = 0.1
     # repeater for tokens
@@ -40,47 +38,169 @@ class TransformerConfig:
     # Whether to apply post LN after attention + MLP blocks
     apply_post_ln: bool = True
 
-class FlashAttentionLayer(nn.Module):
-    def __init__(self, d_model, nhead, dropout=0.1):
+class MultiHeadAttention(nn.Module):
+    """
+    Computes multi-head attention. Supports nested or padded tensors.
+
+    Args:
+        E_q (int): Size of embedding dim for query
+        E_k (int): Size of embedding dim for key
+        E_v (int): Size of embedding dim for value
+        E_total (int): Total embedding dim of combined heads post input projection. Each head
+            has dim E_total // nheads
+        nheads (int): Number of heads
+        dropout (float, optional): Dropout probability. Default: 0.0
+        bias (bool, optional): Whether to add bias to input projection. Default: True
+    """
+    def __init__(
+        self,
+        E_q: int,
+        E_k: int,
+        E_v: int,
+        E_total: int,
+        nheads: int,
+        dropout: float = 0.0,
+        bias=True,
+        device=None,
+        dtype=None,
+    ):
+        factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
-        # Pass causal=True directly in the constructor
-        self.flash_attention = FlashSelfAttention(causal=True, attention_dropout=dropout)
-        self.nhead = nhead
-        self.head_dim = d_model // nhead
-        self.scaling = self.head_dim ** -0.5
+        self.nheads = nheads
         self.dropout = dropout
-        
-        self.qkv_proj = nn.Linear(d_model, 3 * d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
+        self._qkv_same_embed_dim = E_q == E_k and E_q == E_v
+        if self._qkv_same_embed_dim:
+          self.packed_proj = nn.Linear(E_q, E_total * 3, bias=bias, **factory_kwargs)
+        else:
+          self.q_proj = nn.Linear(E_q, E_total, bias=bias, **factory_kwargs)
+          self.k_proj = nn.Linear(E_k, E_total, bias=bias, **factory_kwargs)
+          self.v_proj = nn.Linear(E_v, E_total, bias=bias, **factory_kwargs)
+        E_out = E_q
+        self.out_proj = nn.Linear(E_total, E_out, bias=bias, **factory_kwargs)
+        assert E_total % nheads == 0, "Embedding dim is not divisible by nheads"
+        self.E_head = E_total // nheads
+        self.bias = bias
 
-    def forward(self, x, causal=True):
-        batch_size, seq_len, d_model = x.shape
-        
-        # Single QKV projection
-        qkv = self.qkv_proj(x)
-        qkv = qkv.reshape(batch_size, seq_len, 3, self.nhead, self.head_dim)
-        
-        # Use dropout only during training
-        dropout_p = self.dropout if self.training else 0.0
-        output = cast(Any, flash_attn_qkvpacked_func(qkv, causal=causal, dropout_p=dropout_p))
-        
-        output = output.contiguous().view(batch_size, seq_len, d_model)
-        return self.out_proj(output)
+    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None, is_causal=False) -> torch.Tensor:
+        """
+        Forward pass; runs the following process:
+            1. Apply input projection
+            2. Split heads and prepare for SDPA
+            3. Run SDPA
+            4. Apply output projection
 
-class FlashTransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward, dropout):
+        Args:
+            query (torch.Tensor): query of shape (N, L_q, E_qk)
+            key (torch.Tensor): key of shape (N, L_kv, E_qk)
+            value (torch.Tensor): value of shape (N, L_kv, E_v)
+            attn_mask (torch.Tensor, optional): attention mask of shape (N, L_q, L_kv) to pass to sdpa. Default: None
+            is_causal (bool, optional): Whether to apply causal mask. Default: False
+
+        Returns:
+            attn_output (torch.Tensor): output of shape (N, L_t, E_q)
+        """
+        # Step 1. Apply input projection
+        if self._qkv_same_embed_dim:
+            if query is key and key is value:
+                result = self.packed_proj(query)
+                query, key, value = torch.chunk(result, 3, dim=-1)
+            else:
+                q_weight, k_weight, v_weight = torch.chunk(self.packed_proj.weight, 3, dim=0)
+                if self.bias:
+                    q_bias, k_bias, v_bias = torch.chunk(self.packed_proj.bias, 3, dim=0)
+                else:
+                    q_bias, k_bias, v_bias = None, None, None
+                query, key, value = F.linear(query, q_weight, q_bias), F.linear(key, k_weight, k_bias), F.linear(value, v_weight, v_bias)
+
+        else:
+            query = self.q_proj(query)
+            key = self.k_proj(key)
+            value = self.v_proj(value)
+
+        # Step 2. Split heads and prepare for SDPA
+        # reshape query, key, value to separate by head
+        # (N, L_t, E_total) -> (N, L_t, nheads, E_head) -> (N, nheads, L_t, E_head)
+        query = query.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+        # (N, L_s, E_total) -> (N, L_s, nheads, E_head) -> (N, nheads, L_s, E_head)
+        key = key.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+        # (N, L_s, E_total) -> (N, L_s, nheads, E_head) -> (N, nheads, L_s, E_head)
+        value = value.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+
+        # Step 3. Run SDPA
+        # (N, nheads, L_t, E_head)
+        attn_output = F.scaled_dot_product_attention(
+            query, key, value, dropout_p=self.dropout, is_causal=is_causal)
+        # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
+        attn_output = attn_output.transpose(1, 2).flatten(-2)
+
+        # Step 4. Apply output projection
+        # (N, L_t, E_total) -> (N, L_t, E_out)
+        attn_output = self.out_proj(attn_output)
+
+        return attn_output
+
+class MyTransformerEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        nhead,
+        dim_feedforward=2048,
+        dropout=0.1,
+        activation = F.relu,
+        layer_norm_eps=1e-5,
+        norm_first=True,
+        bias=True,
+        device=None,
+        dtype=None,
+    ):
+        factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
-        self.flash_attention = FlashAttentionLayer(d_model, nhead, dropout)
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-        self.activation = F.gelu
+        self.d_model = d_model
+        self.self_attn = MultiHeadAttention(
+            d_model,
+            d_model,
+            d_model,
+            d_model,
+            nhead,
+            dropout=dropout,
+            bias=bias,
+            **factory_kwargs,
+        )
+        self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
+        # self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias, **factory_kwargs)
 
-    def forward(self, x):
-        x = x + self.flash_attention(self.norm1(x))
-        x = x + self.dropout(self.linear2(self.activation(self.linear1(self.norm2(x)))))
+        self.norm_first = norm_first
+        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
+        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
+
+        # self.dropout1 = nn.Dropout(dropout)
+        # self.dropout2 = nn.Dropout(dropout)
+        self.activation = activation
+        
+
+    def _sa_block(self, x, attn_mask, is_causal):
+        x = self.self_attn(x, x, x, is_causal=is_causal)
+        return x
+
+    def _ff_block(self, x):
+        x = self.linear2(self.activation(self.linear1(x)))
+        return x
+
+    def forward(self, src, src_mask=None, is_causal=False):
+        '''
+        Arguments:
+            src: (batch_size, seq_len, d_model)
+            src_mask: (batch_size, seq_len, seq_len)
+            is_causal: bool
+        '''
+        x = src
+        if self.norm_first:
+            x = x + self._sa_block(self.norm1(x), src_mask, is_causal)
+            x = x + self._ff_block(self.norm2(x))
+        else:
+            x = self.norm1(x + self._sa_block(x, src_mask, is_causal))
+            x = self.norm2(x + self._ff_block(x))
         return x
 
 class ChessTransformer(nn.Module):
@@ -99,19 +219,15 @@ class ChessTransformer(nn.Module):
             torch.randn(1, self.seq_len, config.embedding_dim)
         )
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=config.embedding_dim,
-            nhead=config.num_heads,
-            dim_feedforward=config.embedding_dim * config.widening_factor,
-            dropout=config.dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer, 
-            num_layers=config.num_layers
-        )
+        self.transformer = nn.ModuleList([
+            MyTransformerEncoderLayer(
+                d_model=config.embedding_dim,
+                nhead=config.num_heads,
+                dim_feedforward=int(config.embedding_dim * config.widening_factor),
+                dropout=config.dropout,
+                activation=F.gelu,
+            ) for _ in range(config.num_layers)
+        ])
 
         self.self_head = nn.Linear(config.embedding_dim, self.vocab_size)
 
@@ -124,46 +240,47 @@ class ChessTransformer(nn.Module):
 
         # Complex Projection for action matrix
         self.final_ln = nn.LayerNorm(config.embedding_dim)
-        self.final_num_heads = config.num_heads
-        self.final_head_dim = config.embedding_dim // self.final_num_heads
-        self.final_scaling = self.final_head_dim ** -0.5
+        # self.final_num_heads = config.num_heads
+        # self.final_head_dim = config.embedding_dim // self.final_num_heads
+        # self.final_scaling = self.final_head_dim ** -0.5
 
 
-        self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
-        self.final_out_proj = nn.Sequential(
-            nn.Linear(self.final_num_heads, 
-                    self.final_num_heads),
-            nn.GELU(),
-            nn.Linear(self.final_num_heads, 2),
-        )
+        # self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
+        # self.final_out_proj = nn.Sequential(
+        #     nn.Linear(self.final_num_heads, 
+        #             self.final_num_heads),
+        #     nn.GELU(),
+        #     nn.Linear(self.final_num_heads, 2),
+        # )
         
         
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         batch_size = x.size(0)
         x = self.embedding(x)
         x = x + self.pos_embedding
-        x = self.transformer(x)
+        for layer in self.transformer:
+            x = layer(x)
         x = self.final_ln(x)
 
 
-        qk = self.final_qk_proj(x)
-        qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
+        # qk = self.final_qk_proj(x)
+        # qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
 
-        q, k = qk.unbind(dim=2)
+        # q, k = qk.unbind(dim=2)
 
-        attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
-        attn_scores = torch.tanh(attn_scores)
+        # attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
+        # attn_scores = torch.tanh(attn_scores)
 
-        attn_scores = attn_scores.permute(0, 2, 3, 1)
+        # attn_scores = attn_scores.permute(0, 2, 3, 1)
 
 
-        attn_scores = self.final_out_proj(attn_scores)
+        # attn_scores = self.final_out_proj(attn_scores)
 
         return {
             'self': self.self_head(x),
             'value': self.value_head(x[:, -1, :]),
-            'legal': attn_scores[:, :64, :64, 1],
-            'avs': torch.sigmoid(attn_scores[:, :64, :64, 0]),
+            # 'legal': attn_scores[:, :64, :64, 1],
+            # 'avs': torch.sigmoid(attn_scores[:, :64, :64, 0]),
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -172,6 +289,6 @@ class ChessTransformer(nn.Module):
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
-            'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
-            'avs': F.mse_loss(output['avs'][legal_moves], target['avs'][legal_moves]),
+            # 'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
+            # 'avs': F.mse_loss(output['avs'][legal_moves], target['avs'][legal_moves]),
         }

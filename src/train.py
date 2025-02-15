@@ -39,6 +39,7 @@ def train(
     step = 0
     checkpoint_path = train_config.checkpoint_path
     checkpoint = None
+    compiled = False
     if checkpoint_path is not None and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path)
         model_config =  checkpoint['model_config']
@@ -49,17 +50,20 @@ def train(
             config=model_config,
         ).to(device)
 
-        if train_config.compile:
+        if checkpoint['compiled']:
             model = cast(ChessTransformer, torch.compile(model))
+            compiled = True
 
         model.load_state_dict(checkpoint['model'])
         print(f"Loaded model from checkpoint: {checkpoint_path}")
 
     else:
         # Initialize model
-        model = ChessTransformer(model_config).to(device)
+        model = ChessTransformer(model_config)
         if train_config.compile:
             model = cast(ChessTransformer, torch.compile(model))
+            compiled = True
+        model = model.to(device)
 
     # Setup optimizer
     optimizer = torch.optim.AdamW(
@@ -232,6 +236,7 @@ def train(
         # Checkpointing
         checkpoint = {
             'model': model.state_dict(),
+            'compiled': compiled,
             'optimizer': optimizer.state_dict(),
             'scheduler': scheduler.state_dict(),
             'scaler': scaler.state_dict(),
@@ -297,7 +302,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/no-dropout/',
+        save_checkpoint_path='../checkpoints/double-attend/',
     )
     
     # Train model

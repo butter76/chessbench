@@ -16,3 +16,4 @@ pandas
 scipy
 typing-extensions
 tqdm
+wheel

@@ -90,12 +90,12 @@ def train(
     #     eta_min=train_config.learning_rate / 100  # Minimum learning rate
     # )
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
-        mode='min',
-        factor=0.33,  # Multiply LR by 0.25 when plateauing
-        patience=6,  # Number of epochs to wait before reducing LR
-        min_lr=3e-5
+        start_factor=1.0,
+        end_factor=0.25,  # 4e-4 -> 1e-4
+        total_iters=100,  # Number of epochs for the decay
+        last_epoch=-1
     )
 
     if checkpoint is not None and 'scheduler' in checkpoint:
@@ -222,7 +222,7 @@ def train(
         avg_val_loss = val_loss / val_steps
         val_metrics_loss = {name: loss / val_steps for name, loss in val_metrics.items()}
 
-        scheduler.step(avg_val_loss)
+        scheduler.step()
         print({
             "epoch": epoch + 1,
             "train_loss": avg_loss,

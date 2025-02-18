@@ -12,4 +12,6 @@ python3 -m pip install flash-attn
 export PYTHONPATH=$PYTHONPATH:$(pwd)/..
 export LLVM_BUILD_DIR=$HOME/llvm-project/build
 LLVM_INCLUDE_DIRS=$LLVM_BUILD_DIR/include   LLVM_LIBRARY_DIR=$LLVM_BUILD_DIR/lib   LLVM_SYSPATH=$LLVM_BUILD_DIR   python3 -m pip install -e python
+
+python3 -m pip install https://github.com/acollins3/triton/releases/download/triton-2.1.0-arm64/triton-2.1.0-cp310-cp310-linux_aarch64.whl
 ```

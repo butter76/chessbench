@@ -1,22 +1,21 @@
-from typing import Any, cast
+from typing import cast
 import torch
+from torch.nn.attention.flex_attention import (
+    flex_attention,
+)
 import torch.nn as nn
 import torch.nn.functional as F
-torch.set_default_dtype(torch.float32)
-torch.set_printoptions(profile="full")
+
+from searchless_chess.src import tokenizer
+torch.set_default_dtype(torch.float16)
 import dataclasses
 
+vocab_size = 1024
+seq_length = 1024
 
-from searchless_chess.src import config as config_lib
-from searchless_chess.src import data_loader
-from searchless_chess.src import tokenizer
-from searchless_chess.src import utils
-from torch.nn.attention import SDPBackend, sdpa_kernel
-
-from searchless_chess.src.models.dense_attention.danet_layers import DANetLayer
-from searchless_chess.src.models.dense_attention.model_config import ModelConfig
-
-
+def score_mod(score, batch, head, token_q, token_kv):
+    return score
+compiled_flex_attention = torch.compile(flex_attention, dynamic=False)
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
     """Hyperparameters used in the Transformer architectures."""
@@ -40,7 +39,6 @@ class TransformerConfig:
     apply_qk_layernorm: bool = False
     # Whether to apply post LN after attention + MLP blocks
     apply_post_ln: bool = True
-
 class MultiHeadAttention(nn.Module):
     """
     Computes multi-head attention. Supports nested or padded tensors.
@@ -134,8 +132,8 @@ class MultiHeadAttention(nn.Module):
         # with torch.nn.attention.sdpa_kernel(
         #     SDPBackend.CUDNN_ATTENTION
         # ):
-        attn_output = F.scaled_dot_product_attention(
-            query, key, value, dropout_p=self.dropout, is_causal=is_causal)
+        attn_output = flex_attention(
+            query, key, value, score_mod=None)
         # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)
 
@@ -217,8 +215,8 @@ class ChessTransformer(nn.Module):
 
         self.config = config
 
-        self.vocab_size = len(tokenizer._CHARACTERS)
-        self.seq_len = tokenizer.SEQUENCE_LENGTH
+        self.vocab_size = vocab_size
+        self.seq_len = seq_length
         
         self.embedding = nn.Embedding(self.vocab_size, config.embedding_dim)
         self.pos_embedding = nn.Parameter(
@@ -226,19 +224,13 @@ class ChessTransformer(nn.Module):
         )
 
         self.transformer = nn.ModuleList([
-            DANetLayer(
-                ModelConfig(
-                    self.vocab_size,
-                    hidden_size= config.embedding_dim,
-                    num_hidden_layers=config.num_layers,
-                    num_attention_heads=config.num_heads,
-                    intermediate_size=int(config.widening_factor),
-                    hidden_act="gelu",
-                    max_position_embeddings=self.seq_len,
-
-                    
-                ), layer_number
-            ) for layer_number in range(config.num_layers)
+            MyTransformerEncoderLayer(
+                d_model=config.embedding_dim,
+                nhead=config.num_heads,
+                dim_feedforward=int(config.embedding_dim * config.widening_factor),
+                dropout=config.dropout,
+                activation=F.gelu,
+            ) for _ in range(config.num_layers)
         ])
 
         self.self_head = nn.Linear(config.embedding_dim, self.vocab_size)
@@ -296,7 +288,6 @@ class ChessTransformer(nn.Module):
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        legal_moves = target['legal'] == 1
 
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
@@ -304,3 +295,40 @@ class ChessTransformer(nn.Module):
             # 'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             # 'avs': F.mse_loss(output['avs'][legal_moves], target['avs'][legal_moves]),
         }
+
+
+# Create config
+config = TransformerConfig(
+    embedding_dim=1024,
+    num_layers=8,
+    num_heads=32,
+    widening_factor=3,
+    dropout=0
+)
+
+# Initialize model
+model = ChessTransformer(config)
+model = torch.compile(model).cuda()
+model.train()
+
+# Create dummy input data
+batch_size = 64
+x = torch.randint(0, vocab_size, (batch_size, seq_length)).cuda()  # Random integers between 0-63
+
+
+# Create dummy target data
+target = {
+    'self': x,
+    'value': torch.rand((batch_size, 1)).cuda(),  # Random values between 0-1
+}
+
+# Forward pass
+output = model(x)
+print(output)
+losses = model.losses(output, target)
+print(losses)
+
+# Compute total loss and do backprop
+total_loss = sum(loss for loss in losses.values())
+total_loss.backward()
+print("DONE", total_loss)

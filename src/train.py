@@ -268,7 +268,7 @@ def main():
     model_config = TransformerConfig(
         embedding_dim=256,
         num_layers=8,
-        num_heads=16,
+        num_heads=8,
         widening_factor=3,
         dropout=0,
     )
@@ -302,7 +302,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/triton-attention/',
+        save_checkpoint_path='../checkpoints/dense-attention-head-1/',
     )
     
     # Train model

@@ -1,0 +1,2 @@
+Total number of parameters: 5,468,498
+{'epoch': 1, 'train_loss': 0.5590274514754613, 'self': '0.00440', 'value': '0.55462', 'val_loss': 0.5558794769840162, 'val_self': '0.00004', 'val_value': '0.55584', 'lr': '0.00040', 'step': 3000}

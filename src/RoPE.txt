@@ -1,0 +1,4 @@
+Total number of parameters: 5,316,896
+torch.Size([1, 16, 16])
+torch.Size([2048, 16, 16])
+torch.Size([2048, 16, 16, 16])

@@ -13,6 +13,9 @@ from searchless_chess.src import tokenizer
 from searchless_chess.src import utils
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from searchless_chess.src.models.dense_attention.danet_layers import DANetLayer
+from searchless_chess.src.models.dense_attention.model_config import ModelConfig
+
 
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
@@ -151,7 +154,7 @@ class MyTransformerEncoderLayer(nn.Module):
         dropout=0.1,
         activation = F.relu,
         layer_norm_eps=1e-5,
-        norm_first=True,
+        norm_first=False,
         bias=True,
         device=None,
         dtype=None,
@@ -222,6 +225,7 @@ class ChessTransformer(nn.Module):
             torch.randn(1, self.seq_len, config.embedding_dim)
         )
 
+        # VANILLA ATTENTION
         self.transformer = nn.ModuleList([
             MyTransformerEncoderLayer(
                 d_model=config.embedding_dim,
@@ -231,6 +235,23 @@ class ChessTransformer(nn.Module):
                 activation=F.gelu,
             ) for _ in range(config.num_layers)
         ])
+
+        # # DENSE ATTENTION
+        # self.transformer = nn.ModuleList([
+        #     DANetLayer(
+        #         ModelConfig(
+        #             self.vocab_size,
+        #             hidden_size= config.embedding_dim,
+        #             num_hidden_layers=config.num_layers,
+        #             num_attention_heads=config.num_heads,
+        #             intermediate_size=int(config.widening_factor),
+        #             hidden_act="gelu",
+        #             max_position_embeddings=self.seq_len,
+
+                    
+        #         ), layer_number
+        #     ) for layer_number in range(config.num_layers)
+        # ])
 
         self.self_head = nn.Linear(config.embedding_dim, self.vocab_size)
 
@@ -243,18 +264,18 @@ class ChessTransformer(nn.Module):
 
         # Complex Projection for action matrix
         self.final_ln = nn.LayerNorm(config.embedding_dim)
-        # self.final_num_heads = config.num_heads
-        # self.final_head_dim = config.embedding_dim // self.final_num_heads
-        # self.final_scaling = self.final_head_dim ** -0.5
+        self.final_num_heads = config.num_heads
+        self.final_head_dim = config.embedding_dim // self.final_num_heads
+        self.final_scaling = self.final_head_dim ** -0.5
 
 
-        # self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
-        # self.final_out_proj = nn.Sequential(
-        #     nn.Linear(self.final_num_heads, 
-        #             self.final_num_heads),
-        #     nn.GELU(),
-        #     nn.Linear(self.final_num_heads, 2),
-        # )
+        self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
+        self.final_out_proj = nn.Sequential(
+            nn.Linear(self.final_num_heads, 
+                    self.final_num_heads),
+            nn.GELU(),
+            nn.Linear(self.final_num_heads, 2),
+        )
         
         
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -263,27 +284,26 @@ class ChessTransformer(nn.Module):
         x = x + self.pos_embedding
         for layer in self.transformer:
             x = layer(x)
-        x = self.final_ln(x)
 
 
-        # qk = self.final_qk_proj(x)
-        # qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
+        qk = self.final_qk_proj(self.final_ln(x))
+        qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
 
-        # q, k = qk.unbind(dim=2)
+        q, k = qk.unbind(dim=2)
 
-        # attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
-        # attn_scores = torch.tanh(attn_scores)
+        attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
+        attn_scores = torch.tanh(attn_scores)
 
-        # attn_scores = attn_scores.permute(0, 2, 3, 1)
+        attn_scores = attn_scores.permute(0, 2, 3, 1)
 
 
-        # attn_scores = self.final_out_proj(attn_scores)
+        attn_scores = self.final_out_proj(attn_scores)
 
         return {
             'self': self.self_head(x),
             'value': self.value_head(x[:, -1, :]),
-            # 'legal': attn_scores[:, :64, :64, 1],
-            # 'avs': torch.sigmoid(attn_scores[:, :64, :64, 0]),
+            'legal': attn_scores[:, :64, :64, 1],
+            'avs': torch.sigmoid(attn_scores[:, :64, :64, 0]),
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -292,6 +312,6 @@ class ChessTransformer(nn.Module):
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
-            # 'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
-            # 'avs': F.mse_loss(output['avs'][legal_moves], target['avs'][legal_moves]),
+            'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
+            'avs': F.mse_loss(output['avs'][legal_moves], target['avs'][legal_moves]),
         }

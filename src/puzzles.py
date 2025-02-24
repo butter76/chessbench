@@ -41,6 +41,7 @@ _AGENT = flags.DEFINE_enum(
     default=None,
     enum_values=[
         'local',
+        'my_engine',
         '9M',
         '136M',
         '270M',

@@ -279,7 +279,7 @@ def main():
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
-            seed=42142,
+            seed=42143242,
             worker_count=16,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
@@ -302,7 +302,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/fixed-norm/',
+        save_checkpoint_path='../checkpoints/handwritten-attention/',
     )
     
     # Train model

@@ -89,6 +89,7 @@ class MultiHeadAttention(nn.Module):
         E_k: int,
         E_v: int,
         E_total: int,
+        E_head: int,
         nheads: int,
         dropout: float = 0.0,
         bias=True,
@@ -99,17 +100,19 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.nheads = nheads
         self.dropout = dropout
-        self._qkv_same_embed_dim = E_q == E_k and E_q == E_v
+        self._qkv_same_embed_dim = True
+        E_total = nheads * E_head
         if self._qkv_same_embed_dim:
-          self.packed_proj = nn.Linear(E_q, E_total * 3, bias=bias, **factory_kwargs)
+          self.packed_proj = nn.Linear(E_q, nheads * E_head * 3, bias=bias, **factory_kwargs)
         else:
-          self.q_proj = nn.Linear(E_q, E_total, bias=bias, **factory_kwargs)
-          self.k_proj = nn.Linear(E_k, E_total, bias=bias, **factory_kwargs)
-          self.v_proj = nn.Linear(E_v, E_total, bias=bias, **factory_kwargs)
+          self.q_proj = nn.Linear(E_q, nheads * E_head, bias=bias, **factory_kwargs)
+          self.k_proj = nn.Linear(E_k, nheads * E_head, bias=bias, **factory_kwargs)
+          self.v_proj = nn.Linear(E_v, nheads * E_head, bias=bias, **factory_kwargs)
         E_out = E_q
         self.out_proj = nn.Linear(E_total, E_out, bias=bias, **factory_kwargs)
         assert E_total % nheads == 0, "Embedding dim is not divisible by nheads"
-        self.E_head = E_total // nheads
+        self.E_head = E_head
+        self.E_total = E_total
         self.bias = bias
 
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None, is_causal=False) -> torch.Tensor:
@@ -155,7 +158,7 @@ class MultiHeadAttention(nn.Module):
         # (N, L_s, E_total) -> (N, L_s, nheads, E_head) -> (N, nheads, L_s, E_head)
         key = key.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
         # (N, L_s, E_total) -> (N, L_s, nheads, E_head) -> (N, nheads, L_s, E_head)
-        value = value.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+        value = value.unflatten(-1, [self.nheads, self.E_total // self.nheads]).transpose(1, 2)
 
         # Step 3. Run SDPA
         # (N, nheads, L_t, E_head)
@@ -195,6 +198,7 @@ class MyTransformerEncoderLayer(nn.Module):
             d_model,
             d_model,
             d_model,
+            16,
             nhead,
             dropout=dropout,
             bias=bias,

@@ -43,7 +43,7 @@ class TransformerConfig:
     apply_post_ln: bool = True
 
 # Efficient implementation equivalent to the following:
-def scaled_dot_product_attention(query, key, value, attn_mask=None,
+def scaled_dot_product_attention(query, key, value, bias_params, attn_mask=None,
         is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
     L, S = query.size(-2), key.size(-2)
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
@@ -66,6 +66,7 @@ def scaled_dot_product_attention(query, key, value, attn_mask=None,
 
     attn_weight = query @ key.transpose(-2, -1) * scale_factor
     attn_weight += attn_bias
+    attn_weight += bias_params.unsqueeze(0)
     attn_weight = torch.softmax(attn_weight, dim=-1)
     return attn_weight @ value
 
@@ -89,6 +90,7 @@ class MultiHeadAttention(nn.Module):
         E_k: int,
         E_v: int,
         E_total: int,
+        seq_len: int,
         nheads: int,
         dropout: float = 0.0,
         bias=True,
@@ -102,6 +104,7 @@ class MultiHeadAttention(nn.Module):
         self._qkv_same_embed_dim = E_q == E_k and E_q == E_v
         if self._qkv_same_embed_dim:
           self.packed_proj = nn.Linear(E_q, E_total * 3, bias=bias, **factory_kwargs)
+          self.qkv_packed_bias = nn.Parameter(torch.rand(seq_len, E_total * 3))
         else:
           self.q_proj = nn.Linear(E_q, E_total, bias=bias, **factory_kwargs)
           self.k_proj = nn.Linear(E_k, E_total, bias=bias, **factory_kwargs)
@@ -111,6 +114,8 @@ class MultiHeadAttention(nn.Module):
         assert E_total % nheads == 0, "Embedding dim is not divisible by nheads"
         self.E_head = E_total // nheads
         self.bias = bias
+
+        self.bias_params = nn.Parameter(torch.rand(nheads, seq_len, seq_len))
 
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None, is_causal=False) -> torch.Tensor:
         """
@@ -133,7 +138,7 @@ class MultiHeadAttention(nn.Module):
         # Step 1. Apply input projection
         if self._qkv_same_embed_dim:
             if query is key and key is value:
-                result = self.packed_proj(query)
+                result = self.packed_proj(query) + self.qkv_packed_bias
                 query, key, value = torch.chunk(result, 3, dim=-1)
             else:
                 q_weight, k_weight, v_weight = torch.chunk(self.packed_proj.weight, 3, dim=0)
@@ -163,7 +168,7 @@ class MultiHeadAttention(nn.Module):
         #     SDPBackend.CUDNN_ATTENTION
         # ):
         attn_output = scaled_dot_product_attention(
-            query, key, value, is_causal=is_causal)
+            query, key, value, is_causal=is_causal, bias_params=self.bias_params)
         # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)
 
@@ -195,6 +200,7 @@ class MyTransformerEncoderLayer(nn.Module):
             d_model,
             d_model,
             d_model,
+            77,
             nhead,
             dropout=dropout,
             bias=bias,

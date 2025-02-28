@@ -17,7 +17,6 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from searchless_chess.src.models.dense_attention.danet_layers import DANetLayer
 from searchless_chess.src.models.dense_attention.model_config import ModelConfig
 
-
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
     """Hyperparameters used in the Transformer architectures."""
@@ -253,6 +252,8 @@ class ChessTransformer(nn.Module):
             torch.randn(1, self.seq_len, config.embedding_dim)
         )
 
+        self.activation = F.gelu
+
         # VANILLA ATTENTION
         self.transformer = nn.ModuleList([
             MyTransformerEncoderLayer(
@@ -260,7 +261,7 @@ class ChessTransformer(nn.Module):
                 nhead=config.num_heads,
                 dim_feedforward=int(config.embedding_dim * config.widening_factor),
                 dropout=config.dropout,
-                activation=F.gelu,
+                activation=self.activation,
             ) for _ in range(config.num_layers)
         ])
 
@@ -286,8 +287,7 @@ class ChessTransformer(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(config.embedding_dim, config.embedding_dim // 2),
             nn.GELU(),
-            nn.Linear(config.embedding_dim // 2, 1),
-            nn.Sigmoid()  # Output between 0 and 1 for win probability
+            nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
         )
 
         # Complex Projection for action matrix
@@ -327,19 +327,29 @@ class ChessTransformer(nn.Module):
 
         attn_scores = self.final_out_proj(attn_scores)
 
+        bin_width = 1.0 / data_loader.NUM_BINS
+        bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
+
+
+        hl = self.value_head(x[:, -1, :])
+        value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
+
         return {
             'self': self.self_head(x),
-            'value': self.value_head(x[:, -1, :]),
+            'hl': hl,
+            'value': value,
             'legal': attn_scores[:, :64, :64, 1],
             'avs': torch.sigmoid(attn_scores[:, :64, :64, 0]),
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+
         legal_moves = target['legal'] == 1
 
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
+            'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             'avs': F.mse_loss(output['avs'][legal_moves], target['avs'][legal_moves]),
         }

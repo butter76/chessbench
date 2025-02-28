@@ -33,6 +33,7 @@ import torch
 import chess
 import random
 
+NUM_BINS = 81
 
 def _process_fen(fen: str) -> np.ndarray:
   return tokenizer.tokenize(fen).astype(np.int32)
@@ -118,6 +119,8 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
 
     value_prob = 0.0
     for move, win_prob in move_values:
+      if win_prob > value_prob:
+        value_prob = win_prob
       # Dropping underpromotions for now
       if "=" in move:
         if move[4:] not in ["=Q", "-q"]:
@@ -126,9 +129,16 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
       s2 = utils._parse_square(move[2:4])
       legal_actions[s1, s2] = 1
       actions[s1, s2] = win_prob
-      if win_prob > value_prob:
-        value_prob = win_prob
-    return state, legal_actions, actions, np.array([value_prob])
+
+    bin_width = 1.0 / NUM_BINS
+    sigma = bin_width * 0.75
+    bin_centers = np.arange(bin_width / 2, 1.0, bin_width)
+
+    diffs = value_prob - bin_centers
+    probs = np.exp(-0.5 * (diffs / sigma)**2)
+    probs = probs / probs.sum(keepdims=True)
+
+    return state, legal_actions, actions, probs, np.array([value_prob])
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

@@ -119,8 +119,6 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
 
     value_prob = 0.0
     for move, win_prob in move_values:
-      if win_prob > value_prob:
-        value_prob = win_prob
       # Dropping underpromotions for now
       if "=" in move:
         if move[4:] not in ["=Q", "-q"]:
@@ -129,6 +127,8 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
       s2 = utils._parse_square(move[2:4])
       legal_actions[s1, s2] = 1
       actions[s1, s2] = win_prob
+      if win_prob > value_prob:
+        value_prob = win_prob
 
     bin_width = 1.0 / NUM_BINS
     sigma = bin_width * 0.75

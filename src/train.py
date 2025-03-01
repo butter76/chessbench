@@ -305,7 +305,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/hl-gauss/',
+        save_checkpoint_path='../checkpoints/hl-gauss-unfix/',
     )
     
     # Train model

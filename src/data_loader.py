@@ -108,10 +108,14 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     self, element: bytes
   ):
   
+    bin_width = 1.0 / NUM_BINS
+    sigma = bin_width * 0.75
+    bin_centers = np.arange(bin_width / 2, 1.0, bin_width)
+
     fen, move_values = constants.CODERS['action_values'].decode(element)
     state = _process_fen(fen)
     legal_actions = np.zeros((64, 64))
-    actions = np.zeros((64, 64))
+    action_values = np.zeros((64, 64))
 
     ## Validation
     # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
@@ -119,8 +123,6 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
 
     value_prob = 0.0
     for move, win_prob in move_values:
-      if win_prob > value_prob:
-        value_prob = win_prob
       # Dropping underpromotions for now
       if "=" in move:
         if move[4:] not in ["=Q", "-q"]:
@@ -128,17 +130,20 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
       s1 = utils._parse_square(move[0:2])
       s2 = utils._parse_square(move[2:4])
       legal_actions[s1, s2] = 1
-      actions[s1, s2] = win_prob
 
-    bin_width = 1.0 / NUM_BINS
-    sigma = bin_width * 0.75
-    bin_centers = np.arange(bin_width / 2, 1.0, bin_width)
+      # av_diffs = win_prob - bin_centers
+      # av_probs = np.exp(-0.5 * (av_diffs / sigma)**2)
+      # av_probs = av_probs / av_probs.sum(keepdims=True)
+      # action_probs[s1, s2] = av_probs
+      action_values[s1, s2] = win_prob
+      if win_prob > value_prob:
+        value_prob = win_prob
 
     diffs = value_prob - bin_centers
     probs = np.exp(-0.5 * (diffs / sigma)**2)
     probs = probs / probs.sum(keepdims=True)
 
-    return state, legal_actions, actions, probs, np.array([value_prob])
+    return state, legal_actions, action_values, probs, np.array([value_prob])
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

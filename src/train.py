@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from searchless_chess.src import config as config_lib
 
+from searchless_chess.src.data_loader import NUM_BINS
 from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
 
@@ -108,6 +109,10 @@ def train(
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total number of parameters: {total_params:,}")
+
+    bin_width = 1.0 / NUM_BINS
+    sigma = bin_width * 0.75
+    bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to(device)
     
     # Training loop
     for epoch in range(num_epochs):
@@ -128,9 +133,14 @@ def train(
             hl = hl.to(torch.float32).to(device)
             value_prob = value_prob.to(torch.float32).to(device)
 
+            av_diffs = avs[:, :, :, None] - bin_centers[None, None, None, :]
+            ahl = torch.exp(-0.5 * (av_diffs / sigma) ** 2)
+            ahl = ahl / ahl.sum(dim=-1, keepdim=True)
+
             target = {
                 'self': x,
                 'legal': legal_actions,
+                'ahl': ahl,
                 'avs': avs,
                 'hl': hl,
                 'value': value_prob,
@@ -142,7 +152,7 @@ def train(
                 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k != 'value'))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in  ['value', 'avs']))
 
             
             # Backward pass
@@ -192,9 +202,14 @@ def train(
                 hl = hl.to(torch.float32).to(device)
                 value_prob = value_prob.to(torch.float32).to(device)
 
+                av_diffs = avs[:, :, :, None] - bin_centers[None, None, None, :]
+                ahl = torch.exp(-0.5 * (av_diffs / sigma) ** 2)
+                ahl = ahl / ahl.sum(dim=-1, keepdim=True)
+
                 target = {
                     'self': x,
                     'legal': legal_actions,
+                    'ahl': ahl,
                     'avs': avs,
                     'hl': hl,
                     'value': value_prob,
@@ -205,7 +220,7 @@ def train(
 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k != 'value'))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in  ['value', 'avs']))
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()
@@ -305,7 +320,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/hl-gauss/',
+        save_checkpoint_path='../checkpoints/ahl/',
     )
     
     # Train model

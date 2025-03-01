@@ -51,6 +51,7 @@ _CHARACTERS = [
     'Q',
     'K',
     'w',
+    '=',
     '.',
 ]
 # pyfmt: enable
@@ -59,7 +60,7 @@ _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
 SEQUENCE_LENGTH = 77
 
 
-def tokenize(fen: str):
+def tokenize(fen: str, move: str | None = None):
   """Returns an array of tokens from a fen string.
 
   We compute a tokenized representation of the board, from the FEN string.
@@ -110,6 +111,9 @@ def tokenize(fen: str):
   # moves).
   fullmoves += '.' * (3 - len(fullmoves))
   indices.extend([_CHARACTERS_INDEX[x] for x in fullmoves])
+
+
+
 
   assert len(indices) == SEQUENCE_LENGTH
 

@@ -20,6 +20,8 @@ from torch.amp.autocast_mode import autocast
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 
+import random
+
 def _parse_square(square: str):
   return chess.square_mirror(chess.parse_square(square))
 
@@ -57,21 +59,56 @@ class MyTransformerEngine(engine.Engine):
         sorted_legal_moves = engine.get_ordered_legal_moves(board)
         x = []
         for move in sorted_legal_moves:
+            # board.push(move)
+            x.append(tokenizer.tokenize(board.fen(), move.uci()))
+            # board.pop()
+        x = np.array(x)
+        x = torch.tensor(x, dtype=torch.long, device=self.device)
+        with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
+            output = self.model(x)
+        return output
+    
+    def analyse_val(self, board: chess.Board) -> engine.AnalysisResult:
+        sorted_legal_moves = engine.get_ordered_legal_moves(board)
+        x = []
+        for move in sorted_legal_moves:
             board.push(move)
-            x.append(tokenizer.tokenize(board.fen()))
+            next_moves = engine.get_ordered_legal_moves(board)
+            next_move = move
+            if len(next_moves) > 0:
+                next_move = random.choice(next_moves)
+            x.append(tokenizer.tokenize(board.fen(), next_move.uci()))
             board.pop()
         x = np.array(x)
         x = torch.tensor(x, dtype=torch.long, device=self.device)
         with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
             output = self.model(x)
-        return output        
+        return output 
 
     def play(self, board: chess.Board) -> chess.Move:
         self.model.eval()
         sorted_legal_moves = engine.get_ordered_legal_moves(board)
-        if True:
+        if False:
             # print(board.fen())
-            value = self.analyse(board)['value']
+            value = self.analyse(board)['av']
+            value = value[:, 0].clone()
+            # print(board.fen())
+            for i, (move, av) in enumerate(zip(sorted_legal_moves, value)):
+                # print(move, av.item())
+                board.push(move)
+                if board.is_checkmate():
+                    board.pop()
+                    return move
+                if board.is_fivefold_repetition() or board.can_claim_threefold_repetition() or board.is_stalemate():
+                    value[i] = 0.5
+                board.pop()
+            best_ix = cast(int, torch.argmax(value).item())
+            best_move = sorted_legal_moves[best_ix]
+            best_value = value[best_ix].item()
+            # print(f"Best Move: {best_move} with value {best_value}")
+        elif True:
+            # print(board.fen())
+            value = self.analyse_val(board)['value']
             value = value[:, 0].clone()
             # print(board.fen())
             for i, (move, av) in enumerate(zip(sorted_legal_moves, value)):

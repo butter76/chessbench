@@ -331,13 +331,18 @@ class ChessTransformer(nn.Module):
         bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
 
 
-        hl = self.value_head(x[:, -1, :])
+        hl = self.value_head(x[:, -5, :])
         value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
+
+        ahl = self.value_head(x[:, -1, :])
+        av = torch.sum(F.softmax(ahl, dim=-1) * bin_centers, dim=-1, keepdim=True)
 
         return {
             'self': self.self_head(x),
             'hl': hl,
             'value': value,
+            'ahl': ahl,
+            'av': av,
             'legal': attn_scores[:, :64, :64, 1],
             'avs': torch.sigmoid(attn_scores[:, :64, :64, 0]),
         }
@@ -350,6 +355,8 @@ class ChessTransformer(nn.Module):
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
+            'av': F.mse_loss(output['av'], target['av']),
+            'ahl': -0.1 * torch.sum(target['ahl'] * F.log_softmax(output['ahl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             'avs': F.mse_loss(output['avs'][legal_moves], target['avs'][legal_moves]),
         }

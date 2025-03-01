@@ -120,11 +120,13 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, legal_actions, avs, hl, value_prob = next(train_iter)
+            x, legal_actions, avs, ahl, av, hl, value_prob = next(train_iter)
                 
             x = x.to(torch.long).to(device)
             legal_actions = legal_actions.to(torch.float32).to(device)
             avs = avs.to(torch.float32).to(device)
+            ahl = ahl.to(torch.float32).to(device)
+            av = av.to(torch.float32).to(device)  
             hl = hl.to(torch.float32).to(device)
             value_prob = value_prob.to(torch.float32).to(device)
 
@@ -132,6 +134,8 @@ def train(
                 'self': x,
                 'legal': legal_actions,
                 'avs': avs,
+                'ahl': ahl,
+                'av': av,
                 'hl': hl,
                 'value': value_prob,
             }
@@ -142,7 +146,7 @@ def train(
                 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k != 'value'))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'av']))
 
             
             # Backward pass
@@ -184,11 +188,13 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, legal_actions, avs, hl, value_prob = next(val_iter)
+                x, legal_actions, avs, ahl, av, hl, value_prob = next(val_iter)
                 
                 x = x.to(torch.long).to(device)
                 legal_actions = legal_actions.to(torch.float32).to(device)
                 avs = avs.to(torch.float32).to(device)
+                ahl = ahl.to(torch.float32).to(device)
+                av = av.to(torch.float32).to(device)  
                 hl = hl.to(torch.float32).to(device)
                 value_prob = value_prob.to(torch.float32).to(device)
 
@@ -196,6 +202,8 @@ def train(
                     'self': x,
                     'legal': legal_actions,
                     'avs': avs,
+                    'ahl': ahl,
+                    'av': av,
                     'hl': hl,
                     'value': value_prob,
                 }
@@ -205,7 +213,7 @@ def train(
 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k != 'value'))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'av']))
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()
@@ -305,7 +313,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/hl-gauss/',
+        save_checkpoint_path='../checkpoints/one-move-take2/',
     )
     
     # Train model

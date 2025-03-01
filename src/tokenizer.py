@@ -51,15 +51,16 @@ _CHARACTERS = [
     'Q',
     'K',
     'w',
+    '=',
     '.',
 ]
 # pyfmt: enable
 _CHARACTERS_INDEX = {letter: index for index, letter in enumerate(_CHARACTERS)}
 _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
-SEQUENCE_LENGTH = 77
+SEQUENCE_LENGTH = 77 + 4
 
 
-def tokenize(fen: str):
+def tokenize(fen: str, move: str | None = None):
   """Returns an array of tokens from a fen string.
 
   We compute a tokenized representation of the board, from the FEN string.
@@ -111,6 +112,17 @@ def tokenize(fen: str):
   fullmoves += '.' * (3 - len(fullmoves))
   indices.extend([_CHARACTERS_INDEX[x] for x in fullmoves])
 
-  assert len(indices) == SEQUENCE_LENGTH
+  assert len(indices) == SEQUENCE_LENGTH - 4
+
+  if move is not None:
+    if len(move) == 6:
+      move = move[:2] + move[4:]
+    elif len(move) == 5:
+      move = move[:2] + '=' + move[4:]
+    assert len(move) == 4
+    
+    indices.extend([_CHARACTERS_INDEX[x] for x in move])
+
+    assert len(indices) == SEQUENCE_LENGTH
 
   return np.asarray(indices, dtype=np.uint8)

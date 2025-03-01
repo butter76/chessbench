@@ -135,6 +135,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
       # Dropping underpromotions for now
       if "=" in move:
         if move[4:] not in ["=Q", "-q"]:
+          raise ValueError(f"Invalid move: {move}")
           continue
       s1 = utils._parse_square(move[0:2])
       s2 = utils._parse_square(move[2:4])
@@ -151,7 +152,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
 
     state = _process_fen(fen, move)
 
-    return state, legal_actions, actions, action_probs, np.array([win_prob]), probs, np.array([value_prob])
+    return state, action_probs, np.array([win_prob])
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

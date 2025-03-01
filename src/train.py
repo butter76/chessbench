@@ -120,24 +120,16 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, legal_actions, avs, ahl, av, hl, value_prob = next(train_iter)
+            x, ahl, av = next(train_iter)
                 
             x = x.to(torch.long).to(device)
-            legal_actions = legal_actions.to(torch.float32).to(device)
-            avs = avs.to(torch.float32).to(device)
             ahl = ahl.to(torch.float32).to(device)
             av = av.to(torch.float32).to(device)  
-            hl = hl.to(torch.float32).to(device)
-            value_prob = value_prob.to(torch.float32).to(device)
 
             target = {
                 'self': x,
-                'legal': legal_actions,
-                'avs': avs,
                 'ahl': ahl,
                 'av': av,
-                'hl': hl,
-                'value': value_prob,
             }
             
             with autocast(device, dtype=torch.bfloat16):
@@ -188,24 +180,16 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, legal_actions, avs, ahl, av, hl, value_prob = next(val_iter)
+                x, ahl, av = next(val_iter)
                 
                 x = x.to(torch.long).to(device)
-                legal_actions = legal_actions.to(torch.float32).to(device)
-                avs = avs.to(torch.float32).to(device)
                 ahl = ahl.to(torch.float32).to(device)
-                av = av.to(torch.float32).to(device)  
-                hl = hl.to(torch.float32).to(device)
-                value_prob = value_prob.to(torch.float32).to(device)
+                av = av.to(torch.float32).to(device)
 
                 target = {
                     'self': x,
-                    'legal': legal_actions,
-                    'avs': avs,
                     'ahl': ahl,
                     'av': av,
-                    'hl': hl,
-                    'value': value_prob,
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
@@ -313,7 +297,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/one-move-take2/',
+        save_checkpoint_path='../checkpoints/action-value-only/',
     )
     
     # Train model

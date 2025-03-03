@@ -346,10 +346,12 @@ class ChessTransformer(nn.Module):
 
         legal_moves = target['legal'] == 1
 
+        batch_size = target['legal'].size(0)
+
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
-            'avs': F.mse_loss(output['avs'][legal_moves], target['avs'][legal_moves]),
+            'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
         }

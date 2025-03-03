@@ -32,6 +32,7 @@ from searchless_chess.src.engines import engine
 import torch
 import chess
 import random
+import math
 
 NUM_BINS = 81
 
@@ -39,9 +40,9 @@ NUM_BINS = 81
 def _process_prob(
     win_prob: float,
 ) -> np.ndarray:
-  bin_width = 1.0 / NUM_BINS
+  bin_width = 1.0 / (NUM_BINS - 1)
   sigma = bin_width * 0.75
-  bin_centers = np.arange(bin_width / 2, 1.0, bin_width)
+  bin_centers = np.arange(0, 1.0 + bin_width, bin_width)
   
 
   diffs = win_prob - bin_centers
@@ -130,23 +131,23 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
     assert len(move_values) != 0
 
-    value_prob = 0.0
+    value_prob = max(win_prob for _, win_prob in move_values)
+    weights = []
     for move, win_prob in move_values:
-      # Dropping underpromotions for now
-      if "=" in move:
-        if move[4:] not in ["=Q", "-q"]:
-          raise ValueError(f"Invalid move: {move}")
-          continue
       s1 = utils._parse_square(move[0:2])
       s2 = utils._parse_square(move[2:4])
       legal_actions[s1, s2] = 1
       actions[s1, s2] = win_prob
-      if win_prob > value_prob:
-        value_prob = win_prob
+
+      if win_prob >= value_prob * 0.9:
+        weights.append(1)
+      else:
+        weights.append(1 / (1 + math.e ** (3 - 3 * (win_prob / (value_prob + 0.01)))))
+
 
 
     probs = _process_prob(value_prob)
-    move, win_prob = random.choice(move_values)
+    move, win_prob = random.choices(move_values, weights=weights, k=1)[0]
 
     action_probs = _process_prob(win_prob)
 

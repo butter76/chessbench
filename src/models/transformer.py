@@ -306,7 +306,7 @@ class ChessTransformer(nn.Module):
         )
         
         
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, legal: torch.Tensor) -> dict[str, torch.Tensor]:
         batch_size = x.size(0)
         x = self.embedding(x)
         x = x + self.pos_embedding
@@ -334,14 +334,20 @@ class ChessTransformer(nn.Module):
         # hl = self.value_head(x[:, -1, :])
         # value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
 
-        value = self.value_head(x[:, -1, :])
+        # value = self.value_head(x[:, -1, :])
+
+        avs = torch.sigmoid(attn_scores[:, :, :, 0])
+
+        value = avs.clone()
+        value[~legal.to(torch.bool)] = 0.0
+        value, _ = torch.max(value.view(batch_size, -1), dim=-1, keepdim=True)
 
         return {
             'self': self.self_head(x),
             # 'hl': hl,
             'value': value,
             'legal': attn_scores[:, :, :, 1],
-            'avs': torch.sigmoid(attn_scores[:, :, :, 0]),
+            'avs': avs,
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

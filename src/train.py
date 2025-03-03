@@ -142,11 +142,11 @@ def train(
             
             with autocast(device, dtype=torch.bfloat16):
                 # Forward pass
-                value = model(x)
+                value = model(x, legal_actions)
                 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items()))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k != 'value'))
 
             
             # Backward pass
@@ -209,11 +209,11 @@ def train(
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
-                    value = model(x)
+                    value = model(x, legal_actions)
 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items()))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k != 'value'))
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()
@@ -313,7 +313,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/mse-standard/',
+        save_checkpoint_path='../checkpoints/no-value/',
     )
     
     # Train model

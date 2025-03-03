@@ -139,10 +139,10 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
         policy[s1, s2] = 1
         set_policy = True
       
-      if win_prob >= value_prob * 0.9:
+      if win_prob >= value_prob * 0.95:
         weights[s1, s2] = 1
       else:
-        weights[s1, s2] = 1 / (1 + math.e ** (3 - 3 * (win_prob / (value_prob + 0.01))))
+        weights[s1, s2] = 1 / (1 + math.e ** (4 - 4 * (win_prob / (value_prob + 0.01))))
 
 
     bin_width = 1.0 / (NUM_BINS - 1)

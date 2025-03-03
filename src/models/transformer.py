@@ -287,7 +287,7 @@ class ChessTransformer(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(config.embedding_dim, config.embedding_dim // 2),
             nn.GELU(),
-            nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
+            nn.Linear(config.embedding_dim // 2, 1),
         )
 
         # Complex Projection for action matrix
@@ -331,12 +331,14 @@ class ChessTransformer(nn.Module):
         bin_centers = torch.arange(0.0, 1.0 + bin_width, bin_width).to('cuda')
 
 
-        hl = self.value_head(x[:, -1, :])
-        value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
+        # hl = self.value_head(x[:, -1, :])
+        # value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
+
+        value = self.value_head(x[:, -1, :])
 
         return {
             'self': self.self_head(x),
-            'hl': hl,
+            # 'hl': hl,
             'value': value,
             'legal': attn_scores[:, :, :, 1],
             'avs': torch.sigmoid(attn_scores[:, :, :, 0]),
@@ -351,7 +353,7 @@ class ChessTransformer(nn.Module):
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
-            'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
+            # 'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
         }

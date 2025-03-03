@@ -87,7 +87,7 @@ class MyTransformerEngine(engine.Engine):
             best_move = sorted_legal_moves[best_ix]
             best_value = value[best_ix].item()
             # print(f"Best Move: {best_move} with value {best_value}")
-        elif True:
+        elif False:
             move_values = []
             avs = self.analyse_shallow(board)['avs'][0, :, :].clone()
             for (i, move) in enumerate(sorted_legal_moves):
@@ -126,7 +126,7 @@ class MyTransformerEngine(engine.Engine):
                 if board.is_fivefold_repetition() or board.can_claim_threefold_repetition() or board.is_stalemate():
                     best_res = 0.5
                 else:
-                    legal_moves = torch.zeros((64, 64)).to(self.device)
+                    legal_moves = torch.zeros((77, 77)).to(self.device)
                     for next_move in engine.get_ordered_legal_moves(board):
                         board.push(next_move)
                         if board.is_checkmate():
@@ -136,11 +136,16 @@ class MyTransformerEngine(engine.Engine):
                         else:
                             board.pop()
                         next_move = next_move.uci()
-                        if "=" in next_move:
-                            if next_move[4:] not in ["=Q", "-q"]:
-                                continue
                         s1 = _parse_square(next_move[0:2])
-                        s2 = _parse_square(next_move[2:4])
+                        if next_move[4:] in ['R', 'r']:
+                            s2 = 64
+                        elif next_move[4:] in ['B', 'b']:
+                            s2 = 65
+                        elif next_move[4:] in ['N', 'n']:
+                            s2 = 66
+                        else:
+                            assert next_move[4:] in ['Q', 'q', '']
+                            s2 = utils._parse_square(next_move[2:4])
                         legal_moves[s1, s2] = 1
                     else:
                         best_res = torch.max(av[legal_moves == 1]).item()

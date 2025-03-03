@@ -161,8 +161,8 @@ class MultiHeadAttention(nn.Module):
         # with torch.nn.attention.sdpa_kernel(
         #     SDPBackend.CUDNN_ATTENTION
         # ):
-        attn_output = scaled_dot_product_attention(
-            query, key, value, is_causal=is_causal)
+        attn_output = F.scaled_dot_product_attention(
+            query, key, value, dropout_p=self.dropout, is_causal=is_causal)
         # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)
 
@@ -327,8 +327,8 @@ class ChessTransformer(nn.Module):
 
         attn_scores = self.final_out_proj(attn_scores)
 
-        bin_width = 1.0 / data_loader.NUM_BINS
-        bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
+        bin_width = 1.0 / (data_loader.NUM_BINS - 1)
+        bin_centers = torch.arange(0.0, 1.0 + bin_width, bin_width).to('cuda')
 
 
         hl = self.value_head(x[:, -1, :])
@@ -338,8 +338,8 @@ class ChessTransformer(nn.Module):
             'self': self.self_head(x),
             'hl': hl,
             'value': value,
-            'legal': attn_scores[:, :64, :64, 1],
-            'avs': torch.sigmoid(attn_scores[:, :64, :64, 0]),
+            'legal': attn_scores[:, :, :, 1],
+            'avs': torch.sigmoid(attn_scores[:, :, :, 0]),
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

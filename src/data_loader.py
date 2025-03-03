@@ -32,6 +32,7 @@ from searchless_chess.src.engines import engine
 import torch
 import chess
 import random
+import math
 
 NUM_BINS = 81
 
@@ -110,35 +111,49 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
   
     fen, move_values = constants.CODERS['action_values'].decode(element)
     state = _process_fen(fen)
-    legal_actions = np.zeros((64, 64))
-    actions = np.zeros((64, 64))
+    legal_actions = np.zeros((77, 77))
+    actions = np.zeros((77, 77))
+    policy = np.zeros((77, 77))
+    weights = np.zeros((77, 77))
 
     ## Validation
     # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
     assert len(move_values) != 0
 
-    value_prob = 0.0
+    value_prob = max(win_prob for _, win_prob in move_values)
+    set_policy = False
     for move, win_prob in move_values:
-      # Dropping underpromotions for now
-      if "=" in move:
-        if move[4:] not in ["=Q", "-q"]:
-          continue
       s1 = utils._parse_square(move[0:2])
-      s2 = utils._parse_square(move[2:4])
+      if move[4:] in ['R', 'r']:
+        s2 = 64
+      elif move[4:] in ['B', 'b']:
+        s2 = 65
+      elif move[4:] in ['N', 'n']:
+        s2 = 66
+      else:
+        assert move[4:] in ['Q', 'q', '']
+        s2 = utils._parse_square(move[2:4])
       legal_actions[s1, s2] = 1
       actions[s1, s2] = win_prob
-      if win_prob > value_prob:
-        value_prob = win_prob
+      if win_prob == value_prob and not set_policy:
+        policy[s1, s2] = 1
+        set_policy = True
+      
+      if win_prob >= value_prob * 0.9:
+        weights[s1, s2] = 1
+      else:
+        weights[s1, s2] = 1 / (1 + math.e ** (3 - 3 * (win_prob / (value_prob + 0.01))))
 
-    bin_width = 1.0 / NUM_BINS
+
+    bin_width = 1.0 / (NUM_BINS - 1)
     sigma = bin_width * 0.75
-    bin_centers = np.arange(bin_width / 2, 1.0, bin_width)
+    bin_centers = np.arange(0.0, 1.0 + bin_width, bin_width)
 
     diffs = value_prob - bin_centers
-    probs = np.exp(-0.5 * (diffs / sigma)**2)
+    probs = np.exp(-0.5 * (diffs / sigma) ** 2)
     probs = probs / probs.sum(keepdims=True)
 
-    return state, legal_actions, actions, probs, np.array([value_prob])
+    return state, legal_actions, actions, probs, np.array([value_prob]), policy, weights
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

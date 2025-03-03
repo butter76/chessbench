@@ -288,6 +288,7 @@ class ChessTransformer(nn.Module):
             nn.Linear(config.embedding_dim, config.embedding_dim // 2),
             nn.GELU(),
             nn.Linear(config.embedding_dim // 2, 1),
+            nn.Sigmoid(),
         )
 
         # Complex Projection for action matrix

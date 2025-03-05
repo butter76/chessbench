@@ -161,7 +161,7 @@ class MultiHeadAttention(nn.Module):
         # with torch.nn.attention.sdpa_kernel(
         #     SDPBackend.CUDNN_ATTENTION
         # ):
-        attn_output = scaled_dot_product_attention(
+        attn_output = F.scaled_dot_product_attention(
             query, key, value, is_causal=is_causal)
         # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)

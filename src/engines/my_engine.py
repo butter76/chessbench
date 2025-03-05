@@ -115,6 +115,34 @@ class MyTransformerEngine(engine.Engine):
                 move_values.append((best_res, i))
             (best_value, best_idx) = max(move_values)
             best_move = sorted_legal_moves[best_idx]
+        elif False:
+            move_values = []
+            avs = self.analyse_shallow(board)['policy'][0, :, :].clone()
+            for (i, move) in enumerate(sorted_legal_moves):
+                board.push(move)
+                if board.is_checkmate():
+                    board.pop()
+                    return move
+                if False:
+                    best_res = 0.5
+                    board.pop()
+                else:
+                    board.pop()
+                    move = move.uci()
+                    s1 = _parse_square(move[0:2])
+                    if move[4:] in ['R', 'r']:
+                        s2 = 64
+                    elif move[4:] in ['B', 'b']:
+                        s2 = 65
+                    elif move[4:] in ['N', 'n']:
+                        s2 = 66
+                    else:
+                        assert move[4:] in ['Q', 'q', '']
+                        s2 = utils._parse_square(move[2:4])
+                    best_res = avs[s1, s2].item()
+                move_values.append((best_res, i))
+            (best_value, best_idx) = max(move_values)
+            best_move = sorted_legal_moves[best_idx]
         else:
             move_values = []
             avs = self.analyse(board)['avs']
@@ -126,6 +154,7 @@ class MyTransformerEngine(engine.Engine):
                 if board.is_fivefold_repetition() or board.can_claim_threefold_repetition() or board.is_stalemate():
                     best_res = 0.5
                 else:
+                    av = av.clone()
                     legal_moves = torch.zeros((77, 77)).to(self.device)
                     for next_move in engine.get_ordered_legal_moves(board):
                         board.push(next_move)
@@ -133,8 +162,6 @@ class MyTransformerEngine(engine.Engine):
                             board.pop()
                             best_res = 1
                             break
-                        else:
-                            board.pop()
                         next_move = next_move.uci()
                         s1 = _parse_square(next_move[0:2])
                         if next_move[4:] in ['R', 'r']:
@@ -146,7 +173,10 @@ class MyTransformerEngine(engine.Engine):
                         else:
                             assert next_move[4:] in ['Q', 'q', '']
                             s2 = utils._parse_square(next_move[2:4])
+                        if board.is_stalemate():
+                            av[s1, s2] = 0.5
                         legal_moves[s1, s2] = 1
+                        board.pop()
                     else:
                         best_res = torch.max(av[legal_moves == 1]).item()
                 move_values.append((1 - best_res, i))

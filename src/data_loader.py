@@ -139,10 +139,10 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
       legal_actions[s1, s2] = 1
       actions[s1, s2] = win_prob
 
-      if win_prob >= value_prob * 0.9:
+      if win_prob >= value_prob * 0.95:
         weights.append(1)
       else:
-        weights.append(1 / (1 + math.e ** (3 - 3 * (win_prob / (value_prob + 0.01)))))
+        weights.append(1 / (1 + math.e ** (4 - 4 * (win_prob / (value_prob + 0.01)))))
 
 
 

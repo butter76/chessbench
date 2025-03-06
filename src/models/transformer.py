@@ -262,6 +262,7 @@ class ChessTransformer(nn.Module):
                 dim_feedforward=int(config.embedding_dim * config.widening_factor),
                 dropout=config.dropout,
                 activation=self.activation,
+                norm_first=True,
             ) for _ in range(config.num_layers)
         ])
 
@@ -287,7 +288,7 @@ class ChessTransformer(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(config.embedding_dim, config.embedding_dim // 2),
             nn.GELU(),
-            nn.Linear(config.embedding_dim // 2, 1),
+            nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
         )
 
         # Complex Projection for action matrix
@@ -327,22 +328,23 @@ class ChessTransformer(nn.Module):
 
         attn_scores = self.final_out_proj(attn_scores)
 
-        bin_width = 1.0 / (data_loader.NUM_BINS - 1)
-        bin_centers = torch.arange(0.0, 1.0 + bin_width, bin_width).to('cuda')
+        bin_width = 1.0 / (data_loader.NUM_BINS)
+        bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
 
 
-        # hl = self.value_head(x[:, -1, :])
-        # value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
+        hl = self.value_head(x[:, -1, :])
+        value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
 
-        valuel = self.value_head(x[:, -1, :])
+        # valuel = self.value_head(x[:, -1, :])
 
         avsl = attn_scores[:, :, :, 0]
 
         return {
             'self': self.self_head(x),
             # 'hl': hl,
-            'value': torch.sigmoid(valuel),
-            'valuel': valuel,
+            'value': value,
+            'hl': hl,
+            # 'valuel': valuel,
             'legal': attn_scores[:, :, :, 1],
             'avs': torch.sigmoid(avsl),
             'avsl': avsl,
@@ -370,8 +372,8 @@ class ChessTransformer(nn.Module):
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
-            'valuel': F.binary_cross_entropy_with_logits(output['valuel'], target['value']),
-            # 'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
+            # 'valuel': F.binary_cross_entropy_with_logits(output['valuel'], target['value']),
+            'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
             'avsl': ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),

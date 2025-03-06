@@ -33,6 +33,7 @@ import torch
 import chess
 import random
 import math
+from scipy.stats import norm
 
 NUM_BINS = 81
 
@@ -40,13 +41,13 @@ NUM_BINS = 81
 def _process_prob(
     win_prob: float,
 ) -> np.ndarray:
-  bin_width = 1.0 / (NUM_BINS - 1)
+  bin_width = 1.0 / NUM_BINS
   sigma = bin_width * 0.75
-  bin_centers = np.arange(0, 1.0 + bin_width, bin_width)
-  
+  bin_starts = np.arange(0.0, 1.0, bin_width)
+  bin_ends = bin_starts + bin_width
 
-  diffs = win_prob - bin_centers
-  probs = np.exp(-0.5 * (diffs / sigma)**2)
+  probs = norm.cdf(bin_ends, loc=win_prob, scale=sigma) - norm.cdf(bin_starts, loc=win_prob, scale=sigma)
+  # Normalize the probabilities
   probs = probs / probs.sum(keepdims=True)
   return probs
 

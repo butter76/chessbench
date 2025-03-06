@@ -161,7 +161,7 @@ class MultiHeadAttention(nn.Module):
         # with torch.nn.attention.sdpa_kernel(
         #     SDPBackend.CUDNN_ATTENTION
         # ):
-        attn_output = scaled_dot_product_attention(
+        attn_output = F.scaled_dot_product_attention(
             query, key, value, is_causal=is_causal)
         # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)
@@ -331,8 +331,8 @@ class ChessTransformer(nn.Module):
         bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
 
 
-        hl = self.value_head(x[:, -5, :])
-        value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
+        # hl = self.value_head(x[:, -5, :])
+        # value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
 
         ahl = self.value_head(x[:, -1, :])
         av = torch.sum(F.softmax(ahl, dim=-1) * bin_centers, dim=-1, keepdim=True)

@@ -256,14 +256,22 @@ class ChessTransformer(nn.Module):
 
         # VANILLA ATTENTION
         self.transformer = nn.ModuleList([
-            MyTransformerEncoderLayer(
+            *[MyTransformerEncoderLayer(
+                d_model=config.embedding_dim,
+                nhead=config.num_heads,
+                dim_feedforward=int(config.embedding_dim * config.widening_factor),
+                dropout=config.dropout,
+                activation=self.activation,
+                norm_first=False,
+            ) for _ in range(config.num_layers // 4)],
+            *[MyTransformerEncoderLayer(
                 d_model=config.embedding_dim,
                 nhead=config.num_heads,
                 dim_feedforward=int(config.embedding_dim * config.widening_factor),
                 dropout=config.dropout,
                 activation=self.activation,
                 norm_first=True,
-            ) for _ in range(config.num_layers)
+            ) for _ in range(3 * config.num_layers // 4)]
         ])
 
         # # DENSE ATTENTION

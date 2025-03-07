@@ -17,6 +17,44 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from searchless_chess.src.models.dense_attention.danet_layers import DANetLayer
 from searchless_chess.src.models.dense_attention.model_config import ModelConfig
 
+class Rational(nn.Module):
+    """
+    Rational Activation Function
+    Represented as ratio of two polynomials P(x)/Q(x)
+    with trainable coefficients
+    """
+    def __init__(self, 
+                 numerator_degree=3, 
+                 denominator_degree=2,
+                 init_type='auto',
+                 trainable=True):
+        super(Rational, self).__init__()
+        
+        
+        # Initialize numerator coefficients
+        self.coeffs = torch.ones(6)
+        self.params = nn.Parameter(self.coeffs, requires_grad=trainable)
+        
+        # Initialize to approximate a specific activation
+        self._init_gelu()
+        # Default (auto) initialization is identity-like
+        
+    def _init_gelu(self):
+        # Initialize to approximate ReLU
+        with torch.no_grad():
+            self.coeffs.copy_(torch.tensor([0.0416166, 0.642805, 3.0018, -2.30959, 0.7712, 1.73136]))
+            
+    def forward(self, x):
+
+        linear = self.params[0] * x + self.params[1]
+
+        numerator = self.params[2] * x + self.params[3]
+
+        denominator = 1e-6 + (x - self.params[4]) ** 2 + (self.params[5] ** 2)
+        
+        # Return P(x)/Q(x)
+        return linear + numerator / denominator
+
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
     """Hyperparameters used in the Transformer architectures."""
@@ -209,7 +247,7 @@ class MyTransformerEncoderLayer(nn.Module):
 
         # self.dropout1 = nn.Dropout(dropout)
         # self.dropout2 = nn.Dropout(dropout)
-        self.activation = activation
+        self.activation = Rational()
         
 
     def _sa_block(self, x, attn_mask, is_causal):

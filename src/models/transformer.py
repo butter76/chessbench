@@ -32,17 +32,9 @@ class Rational(nn.Module):
         
         
         # Initialize numerator coefficients
-        self.coeffs = torch.ones(6)
-        self.params = nn.Parameter(self.coeffs, requires_grad=trainable)
+        coeffs = torch.tensor([0.0416166, 0.642805, 3.0018, -2.30959, 0.7712, 1.73136])
+        self.params = nn.Parameter(coeffs, requires_grad=trainable)
         
-        # Initialize to approximate a specific activation
-        self._init_gelu()
-        # Default (auto) initialization is identity-like
-        
-    def _init_gelu(self):
-        # Initialize to approximate ReLU
-        with torch.no_grad():
-            self.coeffs.copy_(torch.tensor([0.0416166, 0.642805, 3.0018, -2.30959, 0.7712, 1.73136]))
             
     def forward(self, x):
 

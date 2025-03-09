@@ -13,6 +13,7 @@ from searchless_chess.src import data_loader
 from searchless_chess.src import tokenizer
 from searchless_chess.src import utils
 from torch.nn.attention import SDPBackend, sdpa_kernel
+import random
 
 from searchless_chess.src.models.dense_attention.danet_layers import DANetLayer
 from searchless_chess.src.models.dense_attention.model_config import ModelConfig
@@ -254,6 +255,15 @@ class ChessTransformer(nn.Module):
 
         self.activation = F.gelu
 
+        self.input_transformer = MyTransformerEncoderLayer(
+            d_model=config.embedding_dim,
+            nhead=config.num_heads,
+            dim_feedforward=int(config.embedding_dim * config.widening_factor),
+            dropout=config.dropout,
+            activation=self.activation,
+            norm_first=False,
+        )
+
         # VANILLA ATTENTION
         self.transformer = nn.ModuleList([
             *[MyTransformerEncoderLayer(
@@ -273,6 +283,15 @@ class ChessTransformer(nn.Module):
                 norm_first=True,
             ) for _ in range(3 * config.num_layers // 4)]
         ])
+
+        self.output_transformer = MyTransformerEncoderLayer(
+            d_model=config.embedding_dim,
+            nhead=config.num_heads,
+            dim_feedforward=int(config.embedding_dim * config.widening_factor),
+            dropout=config.dropout,
+            activation=self.activation,
+            norm_first=True,
+        )
 
         # # DENSE ATTENTION
         # self.transformer = nn.ModuleList([
@@ -315,13 +334,18 @@ class ChessTransformer(nn.Module):
         )
         
         
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, loops: int) -> dict[str, torch.Tensor]:
         batch_size = x.size(0)
         x = self.embedding(x)
         x = x + self.pos_embedding
-        for layer in self.transformer:
-            x = layer(x)
 
+        x = self.input_transformer(x)
+
+        for _ in range(loops):
+            for layer in self.transformer:
+                x = layer(x)
+
+        x = self.output_transformer(x)
 
         qk = self.final_qk_proj(self.final_ln(x))
         qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)

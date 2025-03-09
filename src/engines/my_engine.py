@@ -63,7 +63,7 @@ class MyTransformerEngine(engine.Engine):
         x = np.array(x)
         x = torch.tensor(x, dtype=torch.long, device=self.device)
         with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
-            output = self.model(x)
+            output = self.model(x, loops=4)
         return output        
 
     def play(self, board: chess.Board) -> chess.Move:

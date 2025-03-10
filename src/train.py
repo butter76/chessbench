@@ -120,29 +120,28 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, legal_actions, avs, hl, value_prob, policy, weights = next(train_iter)
+            x, next_x, hl, value_prob, ahl, action_prob, move_embd = next(train_iter)
                 
             x = x.to(torch.long).to(device)
-            legal_actions = legal_actions.to(torch.float32).to(device)
-            avs = avs.to(torch.float32).to(device)
+            next_x = next_x.to(torch.long).to(device)
             hl = hl.to(torch.float32).to(device)
             value_prob = value_prob.to(torch.float32).to(device)
-            policy = policy.to(torch.float32).to(device)
-            weights = weights.to(torch.float32).to(device)
+            ahl = ahl.to(torch.float32).to(device)
+            action_prob = action_prob.to(torch.float32).to(device)
+            move_embd = move_embd.to(torch.long).to(device)
 
             target = {
                 'self': x,
-                'legal': legal_actions,
-                'avs': avs,
+                'next': next_x,
                 'hl': hl,
                 'value': value_prob,
-                'policy': policy,
-                'weights': weights,
+                'ahl': ahl,
+                'avs': action_prob,
             }
             
             with autocast(device, dtype=torch.bfloat16):
                 # Forward pass
-                value = model(x)
+                value = model(x, move_embd)
                 
                 # Compute loss
                 losses = model.losses(value, target)
@@ -188,28 +187,27 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, legal_actions, avs, hl, value_prob, policy, weights = next(val_iter)
+                x, next_x, hl, value_prob, ahl, action_prob, move_embd = next(val_iter)
                 
                 x = x.to(torch.long).to(device)
-                legal_actions = legal_actions.to(torch.float32).to(device)
-                avs = avs.to(torch.float32).to(device)
+                next_x = next_x.to(torch.long).to(device)
                 hl = hl.to(torch.float32).to(device)
                 value_prob = value_prob.to(torch.float32).to(device)
-                policy = policy.to(torch.float32).to(device)
-                weights = weights.to(torch.float32).to(device)
+                ahl = ahl.to(torch.float32).to(device)
+                action_prob = action_prob.to(torch.float32).to(device)
+                move_embd = move_embd.to(torch.long).to(device)
 
                 target = {
                     'self': x,
-                    'legal': legal_actions,
-                    'avs': avs,
+                    'next': next_x,
                     'hl': hl,
                     'value': value_prob,
-                    'policy': policy,
-                    'weights': weights,
+                    'ahl': ahl,
+                    'avs': action_prob,
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
-                    value = model(x)
+                    value = model(x, move_embd)
 
                 # Compute loss
                 losses = model.losses(value, target)
@@ -313,7 +311,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-24-hl/',
+        save_checkpoint_path='../checkpoints/layer-16-action-lookahead/',
     )
     
     # Train model

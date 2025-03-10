@@ -252,6 +252,8 @@ class ChessTransformer(nn.Module):
             torch.randn(1, self.seq_len, config.embedding_dim)
         )
 
+        self.move_embedding = nn.Embedding(3, config.embedding_dim)
+
         self.activation = F.gelu
 
         # VANILLA ATTENTION
@@ -265,6 +267,15 @@ class ChessTransformer(nn.Module):
                 norm_first=True,
             ) for _ in range(config.num_layers)
         ])
+
+        self.next_transformer = MyTransformerEncoderLayer(
+            d_model=config.embedding_dim,
+            nhead=config.num_heads,
+            dim_feedforward=int(config.embedding_dim * config.widening_factor),
+            dropout=config.dropout,
+            activation=self.activation,
+            norm_first=True,
+        )
 
         # # DENSE ATTENTION
         # self.transformer = nn.ModuleList([
@@ -291,6 +302,13 @@ class ChessTransformer(nn.Module):
             nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
         )
 
+        self.next_head = nn.Linear(config.embedding_dim, self.vocab_size)
+        self.next_value_head = nn.Sequential(
+            nn.Linear(config.embedding_dim, config.embedding_dim // 2),
+            nn.GELU(),
+            nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
+        )
+
         # Complex Projection for action matrix
         self.final_ln = nn.LayerNorm(config.embedding_dim)
         self.final_num_heads = config.num_heads
@@ -307,26 +325,31 @@ class ChessTransformer(nn.Module):
         )
         
         
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, move_embd: torch.Tensor) -> dict[str, torch.Tensor]:
         batch_size = x.size(0)
         x = self.embedding(x)
         x = x + self.pos_embedding
         for layer in self.transformer:
             x = layer(x)
 
+        next_x = x + self.move_embedding(move_embd)
 
-        qk = self.final_qk_proj(self.final_ln(x))
-        qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
-
-        q, k = qk.unbind(dim=2)
-
-        attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
-        attn_scores = torch.tanh(attn_scores)
-
-        attn_scores = attn_scores.permute(0, 2, 3, 1)
+        next_x = self.next_transformer(next_x)
 
 
-        attn_scores = self.final_out_proj(attn_scores)
+
+        # qk = self.final_qk_proj(self.final_ln(x))
+        # qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
+
+        # q, k = qk.unbind(dim=2)
+
+        # attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
+        # attn_scores = torch.tanh(attn_scores)
+
+        # attn_scores = attn_scores.permute(0, 2, 3, 1)
+
+
+        # attn_scores = self.final_out_proj(attn_scores)
 
         bin_width = 1.0 / (data_loader.NUM_BINS)
         bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
@@ -335,47 +358,57 @@ class ChessTransformer(nn.Module):
         hl = self.value_head(x[:, -1, :])
         value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
 
+        ahl = self.next_value_head(next_x[:, -1, :])
+        action = torch.sum(F.softmax(ahl, dim=-1) * bin_centers, dim=-1, keepdim=True)
+
         # valuel = self.value_head(x[:, -1, :])
 
-        avsl = attn_scores[:, :, :, 0]
+        # avsl = attn_scores[:, :, :, 0]
 
         return {
             'self': self.self_head(x),
+            'next': self.next_head(next_x),
             # 'hl': hl,
             'value': value,
             'hl': hl,
+            'avs': action,
+            'ahl': ahl,
+
             # 'valuel': valuel,
-            'legal': attn_scores[:, :, :, 1],
-            'avs': torch.sigmoid(avsl),
-            'avsl': avsl,
-            'policy': attn_scores[:, :, :, 2],
+            # 'legal': attn_scores[:, :, :, 1],
+            # 'avs': torch.sigmoid(avsl),
+            # 'avsl': avsl,
+            # 'policy': attn_scores[:, :, :, 2],
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
 
-        legal_moves = target['legal'] == 1
+        # legal_moves = target['legal'] == 1
 
-        # Policy loss with masking
-        batch_size = output['policy'].shape[0]
-        # Clone policy logits to avoid modifying the original
-        masked_policy = output['policy'].clone()
-        # Apply masking - set illegal moves to large negative value
-        masked_policy[~legal_moves] = -1e9  
+        # # Policy loss with masking
+        # batch_size = output['policy'].shape[0]
+        # # Clone policy logits to avoid modifying the original
+        # masked_policy = output['policy'].clone()
+        # # Apply masking - set illegal moves to large negative value
+        # masked_policy[~legal_moves] = -1e9  
         
-        # Reshape for softmax over all possible moves
-        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 77*77]
-        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 77*77]
+        # # Reshape for softmax over all possible moves
+        # masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 77*77]
+        # target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 77*77]
 
-        # Compute cross entropy loss
-        policy_loss = F.cross_entropy(masked_policy_flat, target_policy_flat.argmax(dim=1))
+        # # Compute cross entropy loss
+        # policy_loss = F.cross_entropy(masked_policy_flat, target_policy_flat.argmax(dim=1))
 
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
+            'next': F.cross_entropy(output['next'].view(-1, output['next'].size(-1)), target['next'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
             # 'valuel': F.binary_cross_entropy_with_logits(output['valuel'], target['value']),
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
-            'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
-            'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
-            'avsl': ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
-            'policy': policy_loss * 0.1,
+            'avs': F.mse_loss(output['avs'], target['avs']),
+            'ahl': -0.1 * torch.sum(target['ahl'] * F.log_softmax(output['ahl'], dim=-1), dim=-1).mean(),
+            # 'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
+            # 'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
+            # 'avsl': ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
+            # 'policy': policy_loss * 0.1,
         }

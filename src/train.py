@@ -278,7 +278,7 @@ def main():
     # Create model config
     model_config = TransformerConfig(
         embedding_dim=256,
-        num_layers=24,
+        num_layers=16,
         num_heads=16,
         widening_factor=3,
         dropout=0,
@@ -290,7 +290,7 @@ def main():
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
-            seed=42143242,
+            seed=42173522,
             worker_count=16,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
@@ -313,7 +313,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-24-hl/',
+        save_checkpoint_path='../checkpoints/MLP-RPE/',
     )
     
     # Train model

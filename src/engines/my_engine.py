@@ -69,7 +69,7 @@ class MyTransformerEngine(engine.Engine):
     def play(self, board: chess.Board) -> chess.Move:
         self.model.eval()
         sorted_legal_moves = engine.get_ordered_legal_moves(board)
-        if False:
+        if True:
             # print(board.fen())
             value = self.analyse(board)['value']
             value = value[:, 0].clone()

@@ -42,18 +42,18 @@ class TransformerConfig:
     apply_post_ln: bool = True
 
 # Efficient implementation equivalent to the following:
-def scaled_dot_product_attention(query, key, value, q_bias, k_bias, attn_mask=None,
+def scaled_dot_product_attention(query, key, value, q_bias, k_bias, bias, attn_mask=None,
         is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
     L, S = query.size(-2), key.size(-2)
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
 
     product = query @ key.transpose(-1, -2)
-    bias = torch.einsum("hijk,hijk->hij", q_bias, k_bias)
-    q_linear = torch.einsum("bhik,hijk->bhij", query, k_bias)
-    k_linear = torch.einsum("hijk,bhjk->bhij", q_bias, key)
+    # bias = torch.einsum("hijk,hijk->hij", q_bias, k_bias)
+    # q_linear = torch.einsum("bhik,hijk->bhij", query, k_bias)
+    # k_linear = torch.einsum("hijk,bhjk->bhij", q_bias, key)
 
     
-    attn_weight = (product + bias + q_linear + k_linear) * scale_factor
+    attn_weight = (product) * scale_factor + bias
     attn_weight = torch.softmax(attn_weight, dim=-1)
     return attn_weight @ value
 
@@ -89,6 +89,18 @@ class MultiHeadAttention(nn.Module):
         self.dropout = dropout
         self._qkv_same_embed_dim = E_q == E_k and E_q == E_v
         seq_len = 77
+
+        self.flatten = nn.Linear(E_q, 32)
+        self.smolgen = nn.Sequential(
+            nn.Linear(32 * 77, 256),
+            nn.LayerNorm(256, eps=1e-5),
+            nn.Linear(256, 256 * 16),
+        )
+        self.smolgen_shared = nn.Sequential(
+            nn.LayerNorm(256, eps=1e-5),
+            nn.Linear(256, 77 * 77),
+        )
+
         if self._qkv_same_embed_dim:
           self.packed_proj = nn.Linear(E_q, E_total * 3, bias=bias, **factory_kwargs)
           self.q_bias = nn.Parameter(torch.zeros(nheads, seq_len, seq_len, E_total // nheads))
@@ -103,6 +115,9 @@ class MultiHeadAttention(nn.Module):
         self.kk_proj = nn.Linear(E_total, E_total, bias=bias, **factory_kwargs)
         self.q_norm = nn.LayerNorm(E_total, eps=1e-5)
         self.k_norm = nn.LayerNorm(E_total, eps=1e-5)
+
+        self.log_bias = nn.Parameter(torch.zeros(nheads, seq_len, seq_len))
+        nn.init.uniform_(self.log_bias, -0.02, 0.02)
 
         E_out = E_q
         self.out_proj = nn.Linear(E_total, E_out, bias=bias, **factory_kwargs)
@@ -128,6 +143,11 @@ class MultiHeadAttention(nn.Module):
         Returns:
             attn_output (torch.Tensor): output of shape (N, L_t, E_q)
         """
+        flat = self.flatten(query).view(query.size(0), -1)
+        smol = self.smolgen(flat).view(-1, 16, 256)
+        smol_bias = self.smolgen_shared(smol).view(-1, 16, 77, 77)
+
+
         # Step 1. Apply input projection
         if self._qkv_same_embed_dim:
             if query is key and key is value:
@@ -146,10 +166,10 @@ class MultiHeadAttention(nn.Module):
             key = self.k_proj(key)
             value = self.v_proj(value)
 
-        query = self.q_norm(query)
-        key = self.k_norm(key)
-        query = self.qq_proj(F.gelu(query))
-        key = self.kk_proj(F.gelu(key))
+        # query = self.q_norm(query)
+        # key = self.k_norm(key)
+        # query = self.qq_proj(F.gelu(query))
+        # key = self.kk_proj(F.gelu(key))
 
         # Step 2. Split heads and prepare for SDPA
         # reshape query, key, value to separate by head
@@ -166,7 +186,7 @@ class MultiHeadAttention(nn.Module):
         #     SDPBackend.CUDNN_ATTENTION
         # ):
         attn_output = scaled_dot_product_attention(
-            query, key, value, is_causal=is_causal, q_bias=self.q_bias, k_bias=self.k_bias)
+            query, key, value, is_causal=is_causal, q_bias=self.q_bias, k_bias=self.k_bias, bias=smol_bias)
         # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)
 

@@ -313,7 +313,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/MLP-RPE/',
+        save_checkpoint_path='../checkpoints/smolgen/',
     )
     
     # Train model

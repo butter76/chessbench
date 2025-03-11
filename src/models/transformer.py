@@ -293,18 +293,28 @@ class ChessTransformer(nn.Module):
 
         # Complex Projection for action matrix
         self.final_ln = nn.LayerNorm(config.embedding_dim)
-        self.final_num_heads = config.num_heads
-        self.final_head_dim = config.embedding_dim // self.final_num_heads
-        self.final_scaling = self.final_head_dim ** -0.5
+        # self.final_num_heads = config.num_heads
+        # self.final_head_dim = config.embedding_dim // self.final_num_heads
+        # self.final_scaling = self.final_head_dim ** -0.5
 
 
         self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
-        self.final_out_proj = nn.Sequential(
-            nn.Linear(self.final_num_heads, 
-                    self.final_num_heads),
+        self.qq_proj = nn.Sequential(
+            nn.LayerNorm(config.embedding_dim, eps=1e-5),
             nn.GELU(),
-            nn.Linear(self.final_num_heads, 3),
+            nn.Linear(config.embedding_dim, config.embedding_dim),
         )
+        self.kk_proj = nn.Sequential(
+            nn.LayerNorm(config.embedding_dim, eps=1e-5),
+            nn.GELU(),
+            nn.Linear(config.embedding_dim, config.embedding_dim),
+        )
+        # self.final_out_proj = nn.Sequential(
+        #     nn.Linear(self.final_num_heads, 
+        #             self.final_num_heads),
+        #     nn.GELU(),
+        #     nn.Linear(self.final_num_heads, 3),
+        # )
         
         
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -316,17 +326,18 @@ class ChessTransformer(nn.Module):
 
 
         qk = self.final_qk_proj(self.final_ln(x))
-        qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
 
-        q, k = qk.unbind(dim=2)
+        q, k = torch.chunk(qk, 2, dim=-1)
+        q = self.qq_proj(q)
+        k = self.kk_proj(k)
 
-        attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
-        attn_scores = torch.tanh(attn_scores)
+        q = q.unflatten(-1, [4, 64]).transpose(1, 2)
+        k = k.unflatten(-1, [4, 64]).transpose(1, 2)
 
-        attn_scores = attn_scores.permute(0, 2, 3, 1)
+        scale_factor = 1 / math.sqrt(q.size(-1))
 
 
-        attn_scores = self.final_out_proj(attn_scores)
+        attn_scores = q @ k.transpose(-2, -1) * scale_factor
 
         bin_width = 1.0 / (data_loader.NUM_BINS)
         bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
@@ -337,7 +348,7 @@ class ChessTransformer(nn.Module):
 
         # valuel = self.value_head(x[:, -1, :])
 
-        avsl = attn_scores[:, :, :, 0]
+        avsl = attn_scores[:, 0, :, :]
 
         return {
             'self': self.self_head(x),
@@ -345,10 +356,10 @@ class ChessTransformer(nn.Module):
             'value': value,
             'hl': hl,
             # 'valuel': valuel,
-            'legal': attn_scores[:, :, :, 1],
+            'legal': attn_scores[:, 1, :, :],
             'avs': torch.sigmoid(avsl),
             'avsl': avsl,
-            'policy': attn_scores[:, :, :, 2],
+            'policy': attn_scores[:, 2, :, :],
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

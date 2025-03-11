@@ -64,7 +64,36 @@ class MyTransformerEngine(engine.Engine):
         x = torch.tensor(x, dtype=torch.long, device=self.device)
         with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
             output = self.model(x)
-        return output        
+        return output
+    
+    def analyse_av(self, board: chess.Board) -> engine.AnalysisResult:
+        sorted_legal_moves = engine.get_ordered_legal_moves(board)
+        x = []
+        embds = []
+        for move in sorted_legal_moves:
+            x.append(tokenizer.tokenize(board.fen()))
+            move_embd = np.zeros((77,))
+            move = move.uci()
+            s1 = utils._parse_square(move[0:2])
+            if move[4:] in ['R', 'r']:
+                s2 = 64
+            elif move[4:] in ['B', 'b']:
+                s2 = 65
+            elif move[4:] in ['N', 'n']:
+                s2 = 66
+            else:
+                assert move[4:] in ['Q', 'q', '']
+                s2 = utils._parse_square(move[2:4])
+            move_embd[s1] = 1
+            move_embd[s2] = 2
+            embds.append(move_embd)
+        x = np.array(x)
+        x = torch.tensor(x, dtype=torch.long, device=self.device)
+        embds = np.array(embds)
+        embds = torch.tensor(embds, dtype=torch.long, device=self.device)
+        with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
+            output = self.model(x, embds)
+        return output 
 
     def play(self, board: chess.Board) -> chess.Move:
         self.model.eval()
@@ -84,6 +113,24 @@ class MyTransformerEngine(engine.Engine):
                     value[i] = 0.5
                 board.pop()
             best_ix = cast(int, torch.argmin(value).item())
+            best_move = sorted_legal_moves[best_ix]
+            best_value = value[best_ix].item()
+            # print(f"Best Move: {best_move} with value {best_value}")
+        elif True:
+            # print(board.fen())
+            value = self.analyse_av(board)['avs']
+            value = value[:, 0].clone()
+            # print(board.fen())
+            for i, (move, av) in enumerate(zip(sorted_legal_moves, value)):
+                # print(move, av.item())
+                board.push(move)
+                if board.is_checkmate():
+                    board.pop()
+                    return move
+                if board.is_fivefold_repetition() or board.can_claim_threefold_repetition() or board.is_stalemate():
+                    value[i] = 0.5
+                board.pop()
+            best_ix = cast(int, torch.argmax(value).item())
             best_move = sorted_legal_moves[best_ix]
             best_value = value[best_ix].item()
             # print(f"Best Move: {best_move} with value {best_value}")

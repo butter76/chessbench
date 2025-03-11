@@ -296,17 +296,21 @@ class ChessTransformer(nn.Module):
 
         self.self_head = nn.Linear(config.embedding_dim, self.vocab_size)
 
+        self.flatten_head = nn.Linear(config.embedding_dim, 32)
+
         self.value_head = nn.Sequential(
-            nn.Linear(config.embedding_dim, config.embedding_dim // 2),
+            nn.Linear(32 * self.seq_len, 256),
             nn.GELU(),
-            nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
+            nn.Linear(256, data_loader.NUM_BINS),
         )
 
         self.next_head = nn.Linear(config.embedding_dim, self.vocab_size)
+
+        self.next_flatten_head = nn.Linear(config.embedding_dim, 32)
         self.next_value_head = nn.Sequential(
-            nn.Linear(config.embedding_dim, config.embedding_dim // 2),
+            nn.Linear(32 * self.seq_len, 256),
             nn.GELU(),
-            nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
+            nn.Linear(256, data_loader.NUM_BINS),
         )
 
         # Complex Projection for action matrix
@@ -355,10 +359,10 @@ class ChessTransformer(nn.Module):
         bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
 
 
-        hl = self.value_head(x[:, -1, :])
+        hl = self.value_head(self.flatten_head(x).view(batch_size, -1))
         value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
 
-        ahl = self.next_value_head(next_x[:, -1, :])
+        ahl = self.next_value_head(self.next_flatten_head(next_x).view(batch_size, -1))
         action = torch.sum(F.softmax(ahl, dim=-1) * bin_centers, dim=-1, keepdim=True)
 
         # valuel = self.value_head(x[:, -1, :])

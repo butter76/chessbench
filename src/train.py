@@ -235,9 +235,9 @@ def train(
         print({
             "epoch": epoch + 1,
             "train_loss": avg_loss,
-            **{f'{k}': f'{v:.5f}' for k,v in metrics_loss.items()},
+            **{f'{k}': f'{v:.6f}' for k,v in metrics_loss.items()},
             "val_loss": avg_val_loss,
-            **{f'val_{k}': f'{v:.5f}' for k,v in val_metrics_loss.items()},
+            **{f'val_{k}': f'{v:.6f}' for k,v in val_metrics_loss.items()},
             'lr': f'{scheduler.get_last_lr()[0]:.5f}',
             'step': step,
         })
@@ -276,7 +276,7 @@ def main():
     # Create model config
     model_config = TransformerConfig(
         embedding_dim=256,
-        num_layers=24,
+        num_layers=16,
         num_heads=16,
         widening_factor=3,
         dropout=0,
@@ -311,7 +311,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-action-lookahead/',
+        save_checkpoint_path='../checkpoints/layer-16-action-lookahead-with-flattening/',
     )
     
     # Train model

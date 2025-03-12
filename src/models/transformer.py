@@ -268,14 +268,14 @@ class ChessTransformer(nn.Module):
             ) for _ in range(config.num_layers)
         ])
 
-        self.next_transformer = MyTransformerEncoderLayer(
-            d_model=config.embedding_dim,
-            nhead=config.num_heads,
-            dim_feedforward=int(config.embedding_dim * config.widening_factor),
-            dropout=config.dropout,
-            activation=self.activation,
-            norm_first=True,
-        )
+        # self.next_transformer = MyTransformerEncoderLayer(
+        #     d_model=config.embedding_dim,
+        #     nhead=config.num_heads,
+        #     dim_feedforward=int(config.embedding_dim * config.widening_factor),
+        #     dropout=config.dropout,
+        #     activation=self.activation,
+        #     norm_first=True,
+        # )
 
         # # DENSE ATTENTION
         # self.transformer = nn.ModuleList([
@@ -338,7 +338,8 @@ class ChessTransformer(nn.Module):
 
         next_x = x + self.move_embedding(move_embd)
 
-        next_x = self.next_transformer(next_x)
+        for layer in self.transformer:
+            next_x = layer(next_x)
 
 
 

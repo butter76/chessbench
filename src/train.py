@@ -311,7 +311,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-action-lookahead-with-flattening/',
+        save_checkpoint_path='../checkpoints/layer-16-action-looped/',
     )
     
     # Train model

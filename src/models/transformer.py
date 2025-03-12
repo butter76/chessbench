@@ -166,10 +166,10 @@ class MultiHeadAttention(nn.Module):
             key = self.k_proj(key)
             value = self.v_proj(value)
 
-        # query = self.q_norm(query)
-        # key = self.k_norm(key)
-        # query = self.qq_proj(F.gelu(query))
-        # key = self.kk_proj(F.gelu(key))
+        query = self.q_norm(query)
+        key = self.k_norm(key)
+        query = self.qq_proj(F.gelu(query))
+        key = self.kk_proj(F.gelu(key))
 
         # Step 2. Split heads and prepare for SDPA
         # reshape query, key, value to separate by head

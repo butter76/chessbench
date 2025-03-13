@@ -94,7 +94,7 @@ class MultiHeadAttention(nn.Module):
         self.smolgen = nn.Sequential(
             nn.Linear(32 * 77, 256),
             nn.LayerNorm(256, eps=1e-5),
-            nn.Linear(256, 256 * 16),
+            nn.Linear(256, 256 * self.nheads),
         )
         self.smolgen_shared = nn.Sequential(
             nn.LayerNorm(256, eps=1e-5),
@@ -144,8 +144,8 @@ class MultiHeadAttention(nn.Module):
             attn_output (torch.Tensor): output of shape (N, L_t, E_q)
         """
         flat = self.flatten(query).view(query.size(0), -1)
-        smol = self.smolgen(flat).view(-1, 16, 256)
-        smol_bias = self.smolgen_shared(smol).view(-1, 16, 77, 77)
+        smol = self.smolgen(flat).view(-1, self.nheads, 256)
+        smol_bias = self.smolgen_shared(smol).view(-1, self.nheads, 77, 77)
 
 
         # Step 1. Apply input projection

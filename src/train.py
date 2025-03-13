@@ -17,6 +17,7 @@ from searchless_chess.src import config as config_lib
 
 from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
+from searchless_chess.src.optimizer.soap import SOAP
 
 
 def train(
@@ -66,7 +67,7 @@ def train(
         model = model.to(device)
 
     # Setup optimizer
-    optimizer = torch.optim.AdamW(
+    optimizer = SOAP(
         model.parameters(),
         lr=train_config.learning_rate,
         weight_decay=train_config.weight_decay
@@ -237,9 +238,9 @@ def train(
         print({
             "epoch": epoch + 1,
             "train_loss": avg_loss,
-            **{f'{k}': f'{v:.5f}' for k,v in metrics_loss.items()},
+            **{f'{k}': f'{v:.6f}' for k,v in metrics_loss.items()},
             "val_loss": avg_val_loss,
-            **{f'val_{k}': f'{v:.5f}' for k,v in val_metrics_loss.items()},
+            **{f'val_{k}': f'{v:.6f}' for k,v in val_metrics_loss.items()},
             'lr': f'{scheduler.get_last_lr()[0]:.5f}',
             'step': step,
         })
@@ -277,16 +278,16 @@ def main():
     
     # Create model config
     model_config = TransformerConfig(
-        embedding_dim=256,
+        embedding_dim=480,
         num_layers=16,
-        num_heads=16,
+        num_heads=15,
         widening_factor=3,
         dropout=0,
     )
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=4e-4,
+        learning_rate=2.8e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -313,7 +314,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/smolgen-mlp/',
+        save_checkpoint_path='../checkpoints/layer-16-480-15/',
     )
     
     # Train model

@@ -129,7 +129,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     # actions = np.zeros((77, 77))
     # policy = np.zeros((77, 77))
     # weights = np.zeros((77, 77))
-    move_embd = np.zeros((77,))
+    move_embd = np.zeros((4, 77))
 
     ## Validation
     # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
@@ -162,31 +162,37 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
 
 
     probs = _process_prob(value_prob)
-    move, win_prob = random.choices(move_values, weights=weights, k=1)[0]
-    action_probs = _process_prob(win_prob)
+    next_state = np.zeros((4, 77))
+    action_probs = np.zeros((4, NUM_BINS), dtype=np.float32)
+    win_prob = np.zeros((4, 1), dtype=np.float32)
+    random_moves = random.choices(move_values, weights=weights, k=4)
+    for i, (move, prob) in enumerate(random_moves):
+
+      action_prob = _process_prob(prob)
 
 
-    s1 = utils._parse_square(move[0:2])
-    if move[4:] in ['R', 'r']:
-      s2 = 64
-    elif move[4:] in ['B', 'b']:
-      s2 = 65
-    elif move[4:] in ['N', 'n']:
-      s2 = 66
-    else:
-      assert move[4:] in ['Q', 'q', '']
-      s2 = utils._parse_square(move[2:4])
+      s1 = utils._parse_square(move[0:2])
+      if move[4:] in ['R', 'r']:
+        s2 = 64
+      elif move[4:] in ['B', 'b']:
+        s2 = 65
+      elif move[4:] in ['N', 'n']:
+        s2 = 66
+      else:
+        assert move[4:] in ['Q', 'q', '']
+        s2 = utils._parse_square(move[2:4])
 
-    move_embd[s1] = 1
-    move_embd[s2] = 2
+      move_embd[i, s1] = 1
+      move_embd[i, s2] = 2
 
-    board = chess.Board(fen)
-    board.push(chess.Move.from_uci(move))
+      board = chess.Board(fen)
+      board.push(chess.Move.from_uci(move))
 
-    next_fen = board.fen()
-    next_state = _process_fen(next_fen)
-
-    return state, next_state, probs, np.array([value_prob]), action_probs, np.array([win_prob]), move_embd
+      next_fen = board.fen()
+      next_state[i, :] = _process_fen(next_fen)
+      win_prob[i, 0] = prob
+      action_probs[i, :] = action_prob
+    return state, next_state, probs, np.array([value_prob]), action_probs, win_prob, move_embd
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

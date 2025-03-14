@@ -4,6 +4,7 @@ from itertools import cycle
 import os
 from typing import Any, cast
 
+from humanize import metric
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -132,20 +133,31 @@ def train(
 
             target = {
                 'self': x,
-                'next': next_x,
                 'hl': hl,
                 'value': value_prob,
-                'ahl': ahl,
-                'avs': action_prob,
             }
             
             with autocast(device, dtype=torch.bfloat16):
                 # Forward pass
-                value = model(x, move_embd)
+                output, outputs = model(x, move_embd)
                 
                 # Compute loss
-                losses = model.losses(value, target)
+                losses = model.losses(output, target)
                 loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+
+                action_losses = {}
+                for i in range(4):
+                    action_target = {
+                        'self': next_x[:, i, :],
+                        'hl': ahl[:, i, :],
+                        'value': action_prob[:, i, :],
+                    }
+                    action_losses = model.losses(outputs[i], action_target)
+                    loss += cast(torch.Tensor, sum(v for k, v in action_losses.items() if k not in ['value', 'avs']))
+
+                losses['next'] = action_losses['self']
+                losses['avs'] = action_losses['value']
+                losses['ahl'] = action_losses['hl']
 
             
             # Backward pass
@@ -199,19 +211,27 @@ def train(
 
                 target = {
                     'self': x,
-                    'next': next_x,
                     'hl': hl,
                     'value': value_prob,
-                    'ahl': ahl,
-                    'avs': action_prob,
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
-                    value = model(x, move_embd)
+                    value, outputs = model(x, move_embd)
 
                 # Compute loss
                 losses = model.losses(value, target)
                 loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+
+                action_target = {
+                    'self': next_x[:, 0, :],
+                    'hl': ahl[:, 0, :],
+                    'value': action_prob[:, 0, :],
+                }
+                action_losses = model.losses(outputs[0], action_target)
+                losses['next'] = action_losses['self']
+                losses['avs'] = action_losses['value']
+                losses['ahl'] = action_losses['hl']
+                
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()
@@ -311,7 +331,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-action-looped/',
+        save_checkpoint_path='../checkpoints/4-targets/',
     )
     
     # Train model

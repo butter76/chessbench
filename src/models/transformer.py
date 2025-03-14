@@ -252,7 +252,9 @@ class ChessTransformer(nn.Module):
             torch.randn(1, self.seq_len, config.embedding_dim)
         )
 
-        self.move_embedding = nn.Embedding(3, config.embedding_dim)
+        self.move_embedding = nn.ModuleList([
+            nn.Embedding(3, config.embedding_dim) for _ in range(4)
+        ])
 
         self.activation = F.gelu
 
@@ -304,87 +306,56 @@ class ChessTransformer(nn.Module):
             nn.Linear(256, data_loader.NUM_BINS),
         )
 
-        self.next_head = nn.Linear(config.embedding_dim, self.vocab_size)
+        self.next_head = nn.ModuleList([
+            nn.Linear(config.embedding_dim, self.vocab_size) for _ in range(4)
+        ])
 
-        self.next_flatten_head = nn.Linear(config.embedding_dim, 32)
-        self.next_value_head = nn.Sequential(
-            nn.Linear(32 * self.seq_len, 256),
-            nn.GELU(),
-            nn.Linear(256, data_loader.NUM_BINS),
-        )
-
-        # Complex Projection for action matrix
-        self.final_ln = nn.LayerNorm(config.embedding_dim)
-        self.final_num_heads = config.num_heads
-        self.final_head_dim = config.embedding_dim // self.final_num_heads
-        self.final_scaling = self.final_head_dim ** -0.5
-
-
-        self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
-        self.final_out_proj = nn.Sequential(
-            nn.Linear(self.final_num_heads, 
-                    self.final_num_heads),
-            nn.GELU(),
-            nn.Linear(self.final_num_heads, 3),
-        )
+        self.next_flatten_head = nn.ModuleList([
+            nn.Linear(config.embedding_dim, 32) for _ in range(4)
+        ])
+        self.next_value_head = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(32 * self.seq_len, 256),
+                nn.GELU(),
+                nn.Linear(256, data_loader.NUM_BINS),
+            ) for _ in range(4)
+        ])
         
         
-    def forward(self, x: torch.Tensor, move_embd: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, move_embds: torch.Tensor):
         batch_size = x.size(0)
         x = self.embedding(x)
         x = x + self.pos_embedding
+        for i in range(4):
+            x = x + self.move_embedding[i](move_embds[:, i, :])
         for layer in self.transformer:
             x = layer(x)
 
-        next_x = x + self.move_embedding(move_embd)
-
-        for layer in self.transformer:
-            next_x = layer(next_x)
-
-
-
-        # qk = self.final_qk_proj(self.final_ln(x))
-        # qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
-
-        # q, k = qk.unbind(dim=2)
-
-        # attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
-        # attn_scores = torch.tanh(attn_scores)
-
-        # attn_scores = attn_scores.permute(0, 2, 3, 1)
-
-
-        # attn_scores = self.final_out_proj(attn_scores)
-
         bin_width = 1.0 / (data_loader.NUM_BINS)
         bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
+
+        outputs = []
+
+        for i in range(4):
+            hl = self.next_value_head[i](self.next_flatten_head[i](x).view(batch_size, -1))
+            value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
+            outputs.append({
+                'self': self.next_head[i](x),
+                'value': value,
+                'hl': hl,
+            })
 
 
         hl = self.value_head(self.flatten_head(x).view(batch_size, -1))
         value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
 
-        ahl = self.next_value_head(self.next_flatten_head(next_x).view(batch_size, -1))
-        action = torch.sum(F.softmax(ahl, dim=-1) * bin_centers, dim=-1, keepdim=True)
-
-        # valuel = self.value_head(x[:, -1, :])
-
-        # avsl = attn_scores[:, :, :, 0]
-
-        return {
+        output = {
             'self': self.self_head(x),
-            'next': self.next_head(next_x),
-            # 'hl': hl,
             'value': value,
             'hl': hl,
-            'avs': action,
-            'ahl': ahl,
-
-            # 'valuel': valuel,
-            # 'legal': attn_scores[:, :, :, 1],
-            # 'avs': torch.sigmoid(avsl),
-            # 'avsl': avsl,
-            # 'policy': attn_scores[:, :, :, 2],
         }
+
+        return output, outputs
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
 
@@ -405,13 +376,13 @@ class ChessTransformer(nn.Module):
         # policy_loss = F.cross_entropy(masked_policy_flat, target_policy_flat.argmax(dim=1))
 
         return {
-            'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
-            'next': F.cross_entropy(output['next'].view(-1, output['next'].size(-1)), target['next'].view(-1)),
+            'self': F.cross_entropy(output['self'].reshape(-1, output['self'].size(-1)), target['self'].reshape(-1)),
+            # 'next': F.cross_entropy(output['next'].view(-1, output['next'].size(-1)), target['next'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
             # 'valuel': F.binary_cross_entropy_with_logits(output['valuel'], target['value']),
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
-            'avs': F.mse_loss(output['avs'], target['avs']),
-            'ahl': -0.1 * torch.sum(target['ahl'] * F.log_softmax(output['ahl'], dim=-1), dim=-1).mean(),
+            # 'avs': F.mse_loss(output['avs'], target['avs']),
+            # 'ahl': -0.1 * torch.sum(target['ahl'] * F.log_softmax(output['ahl'], dim=-1), dim=-1).mean(),
             # 'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             # 'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
             # 'avsl': ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),

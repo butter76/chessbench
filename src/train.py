@@ -328,12 +328,12 @@ def main():
             num_records=1_000_000
         ),
         compile=True,
-        max_grad_norm=1.0,
+        max_grad_norm=5.0,
         log_frequency=1,
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/10-targets/',
+        save_checkpoint_path='../checkpoints/50-targets/',
     )
     
     # Train model

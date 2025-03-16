@@ -20,8 +20,28 @@ from torch.amp.autocast_mode import autocast
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 
+import random
+
 def _parse_square(square: str):
   return chess.square_mirror(chess.parse_square(square))
+
+def get_move_embd(move):
+    move_embd = np.zeros((77,), dtype=np.long)
+    if type(move) != str:
+        move = move.uci()
+    s1 = utils._parse_square(move[0:2])
+    if move[4:] in ['R', 'r']:
+        s2 = 64
+    elif move[4:] in ['B', 'b']:
+        s2 = 65
+    elif move[4:] in ['N', 'n']:
+        s2 = 66
+    else:
+        assert move[4:] in ['Q', 'q', '']
+        s2 = utils._parse_square(move[2:4])
+    move_embd[s1] = 1
+    move_embd[s2] = 2
+    return move_embd
 
 class MyTransformerEngine(engine.Engine):
     def __init__(
@@ -56,51 +76,53 @@ class MyTransformerEngine(engine.Engine):
     def analyse(self, board: chess.Board) -> engine.AnalysisResult:
         sorted_legal_moves = engine.get_ordered_legal_moves(board)
         x = []
+        embds = []
         for move in sorted_legal_moves:
             board.push(move)
             x.append(tokenizer.tokenize(board.fen()))
+            next_moves =  engine.get_ordered_legal_moves(board)
+            if len(next_moves) > 0:
+                e = [get_move_embd(next_move) for next_move in random.choices(next_moves, k=4)]
+            else:
+                e = np.zeros((4, 77), dtype=np.long)
+            embds.append(e)
             board.pop()
         x = np.array(x)
         x = torch.tensor(x, dtype=torch.long, device=self.device)
+        embds = np.array(embds, dtype=np.long)
+        embds = torch.tensor(embds, dtype=torch.long, device=self.device)
         with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
-            output = self.model(x)
+            output, _ = self.model(x, embds)
         return output
     
-    def analyse_av(self, board: chess.Board) -> engine.AnalysisResult:
+    def analyse_av(self, board: chess.Board, puzzle_move: str) -> engine.AnalysisResult:
         sorted_legal_moves = engine.get_ordered_legal_moves(board)
         x = []
         embds = []
-        for move in sorted_legal_moves:
+        for current_move in sorted_legal_moves:
+            e = []
             x.append(tokenizer.tokenize(board.fen()))
-            move_embd = np.zeros((77,))
-            move = move.uci()
-            s1 = utils._parse_square(move[0:2])
-            if move[4:] in ['R', 'r']:
-                s2 = 64
-            elif move[4:] in ['B', 'b']:
-                s2 = 65
-            elif move[4:] in ['N', 'n']:
-                s2 = 66
-            else:
-                assert move[4:] in ['Q', 'q', '']
-                s2 = utils._parse_square(move[2:4])
-            move_embd[s1] = 1
-            move_embd[s2] = 2
-            embds.append(move_embd)
+            e.append(get_move_embd(current_move))
+            if True:
+                e.append(get_move_embd(puzzle_move))
+            for other_move in random.choices(sorted_legal_moves, k=10 - len(e)):
+                e.append(get_move_embd(other_move))
+            embds.append(e)
+
         x = np.array(x)
         x = torch.tensor(x, dtype=torch.long, device=self.device)
-        embds = np.array(embds)
+        embds = np.array(embds, dtype=np.long)
         embds = torch.tensor(embds, dtype=torch.long, device=self.device)
         with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
-            output = self.model(x, embds)
-        return output 
+            output, outputs = self.model(x, embds)
+        return outputs[0]
 
-    def play(self, board: chess.Board) -> chess.Move:
+    def play(self, board: chess.Board, puzzle_move:str) -> chess.Move:
         self.model.eval()
         sorted_legal_moves = engine.get_ordered_legal_moves(board)
         if False:
             # print(board.fen())
-            value = self.analyse(board)['value']
+            value = self.analyse(board, puzzle_move=puzzle_move)['value']
             value = value[:, 0].clone()
             # print(board.fen())
             for i, (move, av) in enumerate(zip(sorted_legal_moves, value)):
@@ -118,7 +140,7 @@ class MyTransformerEngine(engine.Engine):
             # print(f"Best Move: {best_move} with value {best_value}")
         elif True:
             # print(board.fen())
-            value = self.analyse_av(board)['avs']
+            value = self.analyse_av(board, puzzle_move)['value']
             value = value[:, 0].clone()
             # print(board.fen())
             for i, (move, av) in enumerate(zip(sorted_legal_moves, value)):

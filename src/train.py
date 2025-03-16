@@ -10,6 +10,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
+
+from searchless_chess.src.data_loader import NUM_AV
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 from tqdm import tqdm
@@ -146,7 +148,7 @@ def train(
                 loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
 
                 action_losses = {}
-                for i in range(4):
+                for i in range(NUM_AV):
                     action_target = {
                         'self': next_x[:, i, :],
                         'hl': ahl[:, i, :],
@@ -309,7 +311,7 @@ def main():
             batch_size=2048,
             shuffle=True,
             seed=42143242,
-            worker_count=16,  # 0 disables multiprocessing
+            worker_count=32,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='train',
@@ -318,7 +320,7 @@ def main():
         eval_data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=False,
-            worker_count=16,  # 0 disables multiprocessing
+            worker_count=32,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='test',
@@ -331,7 +333,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/4-targets/',
+        save_checkpoint_path='../checkpoints/10-targets/',
     )
     
     # Train model

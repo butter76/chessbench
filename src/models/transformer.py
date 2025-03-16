@@ -253,7 +253,7 @@ class ChessTransformer(nn.Module):
         )
 
         self.move_embedding = nn.ModuleList([
-            nn.Embedding(3, config.embedding_dim) for _ in range(4)
+            nn.Embedding(3, config.embedding_dim) for _ in range(data_loader.NUM_AV)
         ])
 
         self.activation = F.gelu
@@ -307,18 +307,18 @@ class ChessTransformer(nn.Module):
         )
 
         self.next_head = nn.ModuleList([
-            nn.Linear(config.embedding_dim, self.vocab_size) for _ in range(4)
+            nn.Linear(config.embedding_dim, self.vocab_size) for _ in range(data_loader.NUM_AV)
         ])
 
         self.next_flatten_head = nn.ModuleList([
-            nn.Linear(config.embedding_dim, 32) for _ in range(4)
+            nn.Linear(config.embedding_dim, 32) for _ in range(data_loader.NUM_AV)
         ])
         self.next_value_head = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(32 * self.seq_len, 256),
                 nn.GELU(),
                 nn.Linear(256, data_loader.NUM_BINS),
-            ) for _ in range(4)
+            ) for _ in range(data_loader.NUM_AV)
         ])
         
         
@@ -326,7 +326,7 @@ class ChessTransformer(nn.Module):
         batch_size = x.size(0)
         x = self.embedding(x)
         x = x + self.pos_embedding
-        for i in range(4):
+        for i in range(data_loader.NUM_AV):
             x = x + self.move_embedding[i](move_embds[:, i, :])
         for layer in self.transformer:
             x = layer(x)
@@ -336,7 +336,7 @@ class ChessTransformer(nn.Module):
 
         outputs = []
 
-        for i in range(4):
+        for i in range(data_loader.NUM_AV):
             hl = self.next_value_head[i](self.next_flatten_head[i](x).view(batch_size, -1))
             value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
             outputs.append({

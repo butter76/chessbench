@@ -36,6 +36,7 @@ import math
 from scipy.stats import norm
 
 NUM_BINS = 81
+NUM_AV = 10
 
 def _process_prob(
     win_prob: float,
@@ -129,7 +130,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     # actions = np.zeros((77, 77))
     # policy = np.zeros((77, 77))
     # weights = np.zeros((77, 77))
-    move_embd = np.zeros((4, 77))
+    move_embd = np.zeros((NUM_AV, 77))
 
     ## Validation
     # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
@@ -162,10 +163,10 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
 
 
     probs = _process_prob(value_prob)
-    next_state = np.zeros((4, 77))
-    action_probs = np.zeros((4, NUM_BINS), dtype=np.float32)
-    win_prob = np.zeros((4, 1), dtype=np.float32)
-    random_moves = random.choices(move_values, weights=weights, k=4)
+    next_state = np.zeros((NUM_AV, 77))
+    action_probs = np.zeros((NUM_AV, NUM_BINS), dtype=np.float32)
+    win_prob = np.zeros((NUM_AV, 1), dtype=np.float32)
+    random_moves = random.choices(move_values, weights=weights, k=NUM_AV)
     for i, (move, prob) in enumerate(random_moves):
 
       action_prob = _process_prob(prob)

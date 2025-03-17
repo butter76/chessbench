@@ -36,7 +36,7 @@ import math
 from scipy.stats import norm
 
 NUM_BINS = 81
-NUM_AV = 50
+NUM_AV = 4
 
 def _process_prob(
     win_prob: float,
@@ -166,14 +166,9 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     next_state = np.zeros((NUM_AV, 77))
     action_probs = np.zeros((NUM_AV, NUM_BINS), dtype=np.float32)
     win_prob = np.zeros((NUM_AV, 1), dtype=np.float32)
-    if len(move_values) > NUM_AV:
-      random_moves = move_values[: (NUM_AV // 3)]
-      random_moves = random_moves + random.choices(move_values[(NUM_AV // 3):], k=NUM_AV - len(random_moves))
-      random.shuffle(random_moves)
-    else:
-      random_moves = move_values[:]
-      random_moves = random_moves + random.choices(move_values, k=NUM_AV - len(random_moves))
-      random.shuffle(random_moves)
+    random_moves = random.choices(move_values, k=NUM_AV)
+    random.shuffle(random_moves)
+    board = chess.Board(fen)
     for i, (move, prob) in enumerate(random_moves):
 
       action_prob = _process_prob(prob)
@@ -193,14 +188,15 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
       move_embd[i, s1] = 1
       move_embd[i, s2] = 2
 
-      board = chess.Board(fen)
       board.push(chess.Move.from_uci(move))
 
       next_fen = board.fen()
       next_state[i, :] = _process_fen(next_fen)
       win_prob[i, 0] = prob
       action_probs[i, :] = action_prob
+      board.pop()
     return state, next_state, probs, np.array([value_prob]), action_probs, win_prob, move_embd
+  
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

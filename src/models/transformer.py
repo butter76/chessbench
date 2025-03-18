@@ -268,14 +268,16 @@ class ChessTransformer(nn.Module):
             ) for _ in range(config.num_layers)
         ])
 
-        self.next_transformer = MyTransformerEncoderLayer(
-            d_model=config.embedding_dim,
-            nhead=config.num_heads,
-            dim_feedforward=int(config.embedding_dim * config.widening_factor),
-            dropout=config.dropout,
-            activation=self.activation,
-            norm_first=True,
-        )
+        self.next_transformer = nn.ModuleList([
+            MyTransformerEncoderLayer(
+                d_model=config.embedding_dim,
+                nhead=config.num_heads,
+                dim_feedforward=int(config.embedding_dim * config.widening_factor),
+                dropout=config.dropout,
+                activation=self.activation,
+                norm_first=True,
+            ) for _ in range(4)
+        ])
 
         # # DENSE ATTENTION
         # self.transformer = nn.ModuleList([
@@ -338,22 +340,23 @@ class ChessTransformer(nn.Module):
 
         next_x = x + self.move_embedding(move_embd)
 
-        next_x = self.next_transformer(next_x)
+        for layer in self.next_transformer:
+            next_x = layer(next_x)
 
 
 
-        # qk = self.final_qk_proj(self.final_ln(x))
-        # qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
+        qk = self.final_qk_proj(self.final_ln(x))
+        qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
 
-        # q, k = qk.unbind(dim=2)
+        q, k = qk.unbind(dim=2)
 
-        # attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
-        # attn_scores = torch.tanh(attn_scores)
+        attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
+        attn_scores = torch.tanh(attn_scores)
 
-        # attn_scores = attn_scores.permute(0, 2, 3, 1)
+        attn_scores = attn_scores.permute(0, 2, 3, 1)
 
 
-        # attn_scores = self.final_out_proj(attn_scores)
+        attn_scores = self.final_out_proj(attn_scores)
 
         bin_width = 1.0 / (data_loader.NUM_BINS)
         bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
@@ -367,7 +370,7 @@ class ChessTransformer(nn.Module):
 
         # valuel = self.value_head(x[:, -1, :])
 
-        # avsl = attn_scores[:, :, :, 0]
+        avsl = attn_scores[:, :, :, 0]
 
         return {
             'self': self.self_head(x),
@@ -379,29 +382,29 @@ class ChessTransformer(nn.Module):
             'ahl': ahl,
 
             # 'valuel': valuel,
-            # 'legal': attn_scores[:, :, :, 1],
-            # 'avs': torch.sigmoid(avsl),
-            # 'avsl': avsl,
-            # 'policy': attn_scores[:, :, :, 2],
+            'legal': attn_scores[:, :, :, 1],
+            'avs2': torch.sigmoid(avsl),
+            'avsl': avsl,
+            'policy': attn_scores[:, :, :, 2],
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
 
-        # legal_moves = target['legal'] == 1
+        legal_moves = target['legal'] == 1
 
-        # # Policy loss with masking
-        # batch_size = output['policy'].shape[0]
-        # # Clone policy logits to avoid modifying the original
-        # masked_policy = output['policy'].clone()
-        # # Apply masking - set illegal moves to large negative value
-        # masked_policy[~legal_moves] = -1e9  
+        # Policy loss with masking
+        batch_size = output['policy'].shape[0]
+        # Clone policy logits to avoid modifying the original
+        masked_policy = output['policy'].clone()
+        # Apply masking - set illegal moves to large negative value
+        masked_policy[~legal_moves] = -1e9  
         
-        # # Reshape for softmax over all possible moves
-        # masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 77*77]
-        # target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 77*77]
+        # Reshape for softmax over all possible moves
+        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 77*77]
+        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 77*77]
 
-        # # Compute cross entropy loss
-        # policy_loss = F.cross_entropy(masked_policy_flat, target_policy_flat.argmax(dim=1))
+        # Compute cross entropy loss
+        policy_loss = F.cross_entropy(masked_policy_flat, target_policy_flat.argmax(dim=1))
 
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
@@ -411,8 +414,8 @@ class ChessTransformer(nn.Module):
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'avs': F.mse_loss(output['avs'], target['avs']),
             'ahl': -0.1 * torch.sum(target['ahl'] * F.log_softmax(output['ahl'], dim=-1), dim=-1).mean(),
-            # 'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
-            # 'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
-            # 'avsl': ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
-            # 'policy': policy_loss * 0.1,
+            'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
+            'avs2': ((F.mse_loss(output['avs2'], target['action'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'avsl': ((F.binary_cross_entropy_with_logits(output['avsl'], target['action'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'policy': policy_loss * 0.1,
         }

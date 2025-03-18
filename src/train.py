@@ -120,7 +120,7 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, next_x, hl, value_prob, ahl, action_prob, move_embd = next(train_iter)
+            x, next_x, hl, value_prob, ahl, action_prob, move_embd, legal, action, policy, weights = next(train_iter)
                 
             x = x.to(torch.long).to(device)
             next_x = next_x.to(torch.long).to(device)
@@ -129,6 +129,11 @@ def train(
             ahl = ahl.to(torch.float32).to(device)
             action_prob = action_prob.to(torch.float32).to(device)
             move_embd = move_embd.to(torch.long).to(device)
+            legal = legal.to(torch.float32).to(device)
+            action = action.to(torch.float32).to(device)
+            policy = policy.to(torch.float32).to(device)
+            weights = weights.to(torch.float32).to(device)
+
 
             target = {
                 'self': x,
@@ -137,6 +142,10 @@ def train(
                 'value': value_prob,
                 'ahl': ahl,
                 'avs': action_prob,
+                'legal': legal,
+                'action': action,
+                'policy': policy,
+                'weights': weights,
             }
             
             with autocast(device, dtype=torch.bfloat16):
@@ -145,7 +154,7 @@ def train(
                 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2']))
 
             
             # Backward pass
@@ -187,7 +196,7 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, next_x, hl, value_prob, ahl, action_prob, move_embd = next(val_iter)
+                x, next_x, hl, value_prob, ahl, action_prob, move_embd, legal, action, policy, weights = next(val_iter)
                 
                 x = x.to(torch.long).to(device)
                 next_x = next_x.to(torch.long).to(device)
@@ -196,6 +205,11 @@ def train(
                 ahl = ahl.to(torch.float32).to(device)
                 action_prob = action_prob.to(torch.float32).to(device)
                 move_embd = move_embd.to(torch.long).to(device)
+                legal = legal.to(torch.float32).to(device)
+                action = action.to(torch.float32).to(device)
+                policy = policy.to(torch.float32).to(device)
+                weights = weights.to(torch.float32).to(device)
+
 
                 target = {
                     'self': x,
@@ -204,6 +218,10 @@ def train(
                     'value': value_prob,
                     'ahl': ahl,
                     'avs': action_prob,
+                    'legal': legal,
+                    'action': action,
+                    'policy': policy,
+                    'weights': weights,
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
@@ -211,7 +229,7 @@ def train(
 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2']))
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()
@@ -311,7 +329,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-action-lookahead-with-flattening/',
+        save_checkpoint_path='../checkpoints/layer-16+4actionlookahead-full/',
     )
     
     # Train model

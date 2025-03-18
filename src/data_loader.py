@@ -125,10 +125,10 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
   
     fen, move_values = constants.CODERS['action_values'].decode(element)
     state = _process_fen(fen)
-    # legal_actions = np.zeros((77, 77))
-    # actions = np.zeros((77, 77))
-    # policy = np.zeros((77, 77))
-    # weights = np.zeros((77, 77))
+    legal_actions = np.zeros((77, 77))
+    actions = np.zeros((77, 77))
+    policy = np.zeros((77, 77))
+    weights = np.zeros((77, 77))
     move_embd = np.zeros((77,))
 
     ## Validation
@@ -136,33 +136,35 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     assert len(move_values) != 0
 
     value_prob = max(win_prob for _, win_prob in move_values)
-    weights = []
-    # set_policy = False
+    value_weights = []
+    set_policy = False
     for move, win_prob in move_values:
-      # s1 = utils._parse_square(move[0:2])
-      # if move[4:] in ['R', 'r']:
-      #   s2 = 64
-      # elif move[4:] in ['B', 'b']:
-      #   s2 = 65
-      # elif move[4:] in ['N', 'n']:
-      #   s2 = 66
-      # else:
-      #   assert move[4:] in ['Q', 'q', '']
-      #   s2 = utils._parse_square(move[2:4])
-      # legal_actions[s1, s2] = 1
-      # actions[s1, s2] = win_prob
-      # if win_prob == value_prob and not set_policy:
-      #   policy[s1, s2] = 1
-      #   set_policy = True
+      s1 = utils._parse_square(move[0:2])
+      if move[4:] in ['R', 'r']:
+        s2 = 64
+      elif move[4:] in ['B', 'b']:
+        s2 = 65
+      elif move[4:] in ['N', 'n']:
+        s2 = 66
+      else:
+        assert move[4:] in ['Q', 'q', '']
+        s2 = utils._parse_square(move[2:4])
+      legal_actions[s1, s2] = 1
+      actions[s1, s2] = win_prob
+      if win_prob == value_prob and not set_policy:
+        policy[s1, s2] = 1
+        set_policy = True
       
       if win_prob >= value_prob * 0.95:
-        weights.append(1)
+        value_weights.append(1)
+        weights[s1, s2] = 1
       else:
-        weights.append(1 / (1 + math.e ** (4 - 4 * (win_prob / (value_prob + 0.01)))))
+        value_weights.append(1 / (1 + math.e ** (4 - 4 * (win_prob / (value_prob + 0.01)))))
+        weights[s1, s2] = 1 / (1 + math.e ** (4 - 4 * (win_prob / (value_prob + 0.01))))
 
 
     probs = _process_prob(value_prob)
-    move, win_prob = random.choices(move_values, weights=weights, k=1)[0]
+    move, win_prob = random.choices(move_values, weights=value_weights, k=1)[0]
     action_probs = _process_prob(win_prob)
 
 
@@ -186,7 +188,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     next_fen = board.fen()
     next_state = _process_fen(next_fen)
 
-    return state, next_state, probs, np.array([value_prob]), action_probs, np.array([win_prob]), move_embd
+    return state, next_state, probs, np.array([value_prob]), action_probs, np.array([win_prob]), move_embd, legal_actions, actions, policy, weights
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

@@ -70,7 +70,8 @@ def train(
     optimizer = SOAP(
         model.parameters(),
         lr=train_config.learning_rate,
-        weight_decay=train_config.weight_decay
+        weight_decay=train_config.weight_decay,
+        precondition_frequency=30,
     )
 
     if checkpoint is not None and 'optimizer' in checkpoint:
@@ -314,7 +315,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-480-15/',
+        save_checkpoint_path='../checkpoints/layer-16-480-15-28lr/',
     )
     
     # Train model

@@ -146,9 +146,9 @@ def train(
                 # Forward pass
                 value = model(x)
                 
-                # Compute loss
-                losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+            # Compute loss
+            losses = model.losses(value, target)
+            loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
 
             
             # Backward pass
@@ -288,7 +288,7 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=2.8e-4,
+        learning_rate=4e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -315,7 +315,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-480-15-28lr/',
+        save_checkpoint_path='../checkpoints/layer-16-480-15-4lr-plus/',
     )
     
     # Train model

@@ -286,7 +286,6 @@ class ChessTransformer(nn.Module):
                 dim_feedforward=int(config.embedding_dim * config.widening_factor),
                 dropout=config.dropout,
                 activation=self.activation,
-                norm_first=True,
             ) for _ in range(config.num_layers)
         ])
 
@@ -329,6 +328,11 @@ class ChessTransformer(nn.Module):
             nn.GELU(),
             nn.Linear(self.final_num_heads, 3),
         )
+
+        self.q_norm = nn.LayerNorm(config.embedding_dim)
+        self.k_norm = nn.LayerNorm(config.embedding_dim)
+        self.qq_proj = nn.Linear(config.embedding_dim, config.embedding_dim)
+        self.kk_proj = nn.Linear(config.embedding_dim, config.embedding_dim)
         
         
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -339,13 +343,21 @@ class ChessTransformer(nn.Module):
             x = layer(x)
 
 
-        qk = self.final_qk_proj(self.final_ln(x))
-        qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
+        qk = self.final_qk_proj(x)
+        qk = qk.reshape(batch_size, self.seq_len, 2, self.config.embedding_dim)
 
         q, k = qk.unbind(dim=2)
 
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        q = self.qq_proj(F.gelu(q))
+        k = self.kk_proj(F.gelu(k))
+
+        q = q.unflatten(-1, [self.final_num_heads, self.final_head_dim]).transpose(1, 2)
+        k = k.unflatten(-1, [self.final_num_heads, self.final_head_dim]).transpose(1, 2)
+
         attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
-        attn_scores = torch.tanh(attn_scores)
+        attn_scores = F.gelu(attn_scores) ** 2 / 77
 
         attn_scores = attn_scores.permute(0, 2, 3, 1)
 
@@ -396,8 +408,9 @@ class ChessTransformer(nn.Module):
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
+            'valuel': 0.25 *  F.mse_loss(output['value'], target['value']),
             # 'valuel': F.binary_cross_entropy_with_logits(output['valuel'], target['value']),
-            'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
+            'hl': -0.025 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
             'avsl': ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),

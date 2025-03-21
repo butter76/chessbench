@@ -357,7 +357,7 @@ class ChessTransformer(nn.Module):
         k = k.unflatten(-1, [self.final_num_heads, self.final_head_dim]).transpose(1, 2)
 
         attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
-        attn_scores = F.gelu(attn_scores) ** 2 / 77
+        attn_scores = F.tanh(attn_scores)
 
         attn_scores = attn_scores.permute(0, 2, 3, 1)
 

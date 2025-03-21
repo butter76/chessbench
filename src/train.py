@@ -67,11 +67,10 @@ def train(
         model = model.to(device)
 
     # Setup optimizer
-    optimizer = SOAP(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_config.learning_rate,
-        weight_decay=train_config.weight_decay,
-        precondition_frequency=30,
+        weight_decay=train_config.weight_decay
     )
 
     if checkpoint is not None and 'optimizer' in checkpoint:
@@ -242,7 +241,7 @@ def train(
             **{f'{k}': f'{v:.6f}' for k,v in metrics_loss.items()},
             "val_loss": avg_val_loss,
             **{f'val_{k}': f'{v:.6f}' for k,v in val_metrics_loss.items()},
-            'lr': f'{scheduler.get_last_lr()[0]:.5f}',
+            'lr': f'{scheduler.get_last_lr()[0]:.6f}',
             'step': step,
         })
         
@@ -279,9 +278,9 @@ def main():
     
     # Create model config
     model_config = TransformerConfig(
-        embedding_dim=480,
+        embedding_dim=256,
         num_layers=16,
-        num_heads=15,
+        num_heads=16,
         widening_factor=3,
         dropout=0,
     )
@@ -315,7 +314,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-480-15-4lr-plus/',
+        save_checkpoint_path='../checkpoints/layer-16-256-16-4lr-plus/',
     )
     
     # Train model

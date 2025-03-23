@@ -212,9 +212,9 @@ def train(
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
                     value = model(x)
 
-                # Compute loss
-                losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+                    # Compute loss
+                    losses = model.losses(value, target)
+                    loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()
@@ -314,7 +314,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-256-16-4lr-plus/',
+        save_checkpoint_path='../checkpoints/layer-16-256-16-4lr-no-value-reweight-bfloat16-loss/',
     )
     
     # Train model

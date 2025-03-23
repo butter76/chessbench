@@ -67,11 +67,10 @@ def train(
         model = model.to(device)
 
     # Setup optimizer
-    optimizer = SOAP(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_config.learning_rate,
-        weight_decay=train_config.weight_decay,
-        precondition_frequency=30,
+        weight_decay=train_config.weight_decay
     )
 
     if checkpoint is not None and 'optimizer' in checkpoint:
@@ -146,9 +145,9 @@ def train(
                 # Forward pass
                 value = model(x)
                 
-            # Compute loss
-            losses = model.losses(value, target)
-            loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+                # Compute loss
+                losses = model.losses(value, target)
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
 
             
             # Backward pass
@@ -315,7 +314,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-480-15-4lr-plus/',
+        save_checkpoint_path='../checkpoints/layer-16-480-15-4lr-plus-no-soap-no-reweight-bfloat-16-loss-norm-first/',
     )
     
     # Train model

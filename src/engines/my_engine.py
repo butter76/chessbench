@@ -69,7 +69,7 @@ class MyTransformerEngine(engine.Engine):
     def play(self, board: chess.Board) -> chess.Move:
         self.model.eval()
         sorted_legal_moves = engine.get_ordered_legal_moves(board)
-        if True:
+        if False:
             # print(board.fen())
             value = self.analyse(board)['value']
             value = value[:, 0].clone()
@@ -115,7 +115,7 @@ class MyTransformerEngine(engine.Engine):
                 move_values.append((best_res, i))
             (best_value, best_idx) = max(move_values)
             best_move = sorted_legal_moves[best_idx]
-        elif False:
+        elif True:
             move_values = []
             avs = self.analyse_shallow(board)['policy'][0, :, :].clone()
             for (i, move) in enumerate(sorted_legal_moves):

@@ -95,7 +95,7 @@ def train(
     scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1.0,
-        end_factor=0.25,  # 4e-4 -> 1e-4
+        end_factor=1.0,
         total_iters=100,  # Number of epochs for the decay
         last_epoch=-1
     )
@@ -288,7 +288,7 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=2.8e-4,
+        learning_rate=4e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -315,7 +315,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-480-15-28lr/',
+        save_checkpoint_path='../checkpoints/layer-16-480-15-4lr-constant/',
     )
     
     # Train model

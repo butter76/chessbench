@@ -98,7 +98,7 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.nheads = nheads
         self.dropout = dropout
-        self._qkv_same_embed_dim = E_q == E_k and E_q == E_v
+        self._qkv_same_embed_dim = False
         if self._qkv_same_embed_dim:
           self.packed_proj = nn.Linear(E_q, E_total * 3, bias=bias, **factory_kwargs)
         else:
@@ -171,6 +171,41 @@ class MultiHeadAttention(nn.Module):
         attn_output = self.out_proj(attn_output)
 
         return attn_output
+    
+
+class ISAB(nn.Module):
+    def __init__(self, d_model, nhead, num_inducing):
+        super().__init__()
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_inducing = num_inducing
+
+
+        # Learnable inducing points (latent vectors)
+        self.inducing_points = nn.Parameter(torch.randn(1, num_inducing, d_model) * (d_model ** -0.5))
+
+        # First attention: inducing points attend to input
+        self.mab1 = MultiHeadAttention(d_model, d_model, d_model, d_model, nhead)
+        self.ln1 = nn.LayerNorm(d_model, eps=1e-5)
+
+        # Second attention: input attends to inducing points
+        self.mab2 = MultiHeadAttention(d_model, d_model, d_model, d_model, nhead)
+        self.ln2 = nn.LayerNorm(d_model, eps=1e-5)
+
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+
+        inducing_points = self.inducing_points.expand(batch_size, -1, -1)
+
+        # First attention: inducing points attend to input
+        h = self.mab1(inducing_points, x, x)
+        h = self.ln1(h)
+
+        # Second attention: input attends to inducing points
+        out = self.mab2(x, h, h)
+
+        return out
 
 class MyTransformerEncoderLayer(nn.Module):
     def __init__(
@@ -189,16 +224,7 @@ class MyTransformerEncoderLayer(nn.Module):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.d_model = d_model
-        self.self_attn = MultiHeadAttention(
-            d_model,
-            d_model,
-            d_model,
-            d_model,
-            nhead,
-            dropout=dropout,
-            bias=bias,
-            **factory_kwargs,
-        )
+        self.self_attn = ISAB(d_model, nhead, 77)
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
         # self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias, **factory_kwargs)
@@ -213,7 +239,7 @@ class MyTransformerEncoderLayer(nn.Module):
         
 
     def _sa_block(self, x, attn_mask, is_causal):
-        x = self.self_attn(x, x, x, is_causal=is_causal)
+        x = self.self_attn(x)
         return x
 
     def _ff_block(self, x):

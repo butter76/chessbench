@@ -288,7 +288,7 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=4e-4,
+        learning_rate=5.6e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -315,7 +315,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-480-15-4lr-constant/',
+        save_checkpoint_path='../checkpoints/layer-16-480-15-56lr-norm-first/',
     )
     
     # Train model

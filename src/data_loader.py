@@ -135,7 +135,6 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     assert len(move_values) != 0
 
     value_prob = max(win_prob for _, win_prob in move_values)
-    set_policy = False
     for move, win_prob in move_values:
       s1 = utils._parse_square(move[0:2])
       if move[4:] in ['R', 'r']:
@@ -149,9 +148,8 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
         s2 = utils._parse_square(move[2:4])
       legal_actions[s1, s2] = 1
       actions[s1, s2] = win_prob
-      if win_prob == value_prob and not set_policy:
+      if win_prob == value_prob:
         policy[s1, s2] = 1
-        set_policy = True
       
       if win_prob >= value_prob * 0.95:
         weights[s1, s2] = 1
@@ -160,6 +158,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
 
 
     probs = _process_prob(value_prob)
+    policy = policy / policy.sum()
 
     return state, legal_actions, actions, probs, np.array([value_prob]), policy, weights
 

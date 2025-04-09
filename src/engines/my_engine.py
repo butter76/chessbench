@@ -115,7 +115,7 @@ class MyTransformerEngine(engine.Engine):
                 move_values.append((best_res, i))
             (best_value, best_idx) = max(move_values)
             best_move = sorted_legal_moves[best_idx]
-        elif False:
+        elif True:
             move_values = []
             avs = self.analyse_shallow(board)['policy'][0, :, :].clone()
             for (i, move) in enumerate(sorted_legal_moves):
@@ -155,7 +155,7 @@ class MyTransformerEngine(engine.Engine):
                     best_res = 0.5
                 else:
                     av = av.clone()
-                    legal_moves = torch.zeros((77, 77)).to(self.device)
+                    legal_moves = torch.zeros((74, 74)).to(self.device)
                     for next_move in engine.get_ordered_legal_moves(board):
                         board.push(next_move)
                         if board.is_checkmate():

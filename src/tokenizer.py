@@ -15,7 +15,6 @@
 
 """Implements tokenization of FEN strings."""
 
-import jaxtyping as jtp
 import numpy as np
 
 
@@ -56,7 +55,7 @@ _CHARACTERS = [
 # pyfmt: enable
 _CHARACTERS_INDEX = {letter: index for index, letter in enumerate(_CHARACTERS)}
 _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
-SEQUENCE_LENGTH = 77
+SEQUENCE_LENGTH = 74
 
 
 def tokenize(fen: str):
@@ -75,7 +74,9 @@ def tokenize(fen: str):
   # Extracting the relevant information from the FEN.
   board, side, castling, en_passant, halfmoves_last, fullmoves = fen.split(' ')
   board = board.replace('/', '')
-  board = side + board
+  board = board + side
+
+  assert board[-1] in ['w', 'b']
 
   indices = list()
 
@@ -105,11 +106,6 @@ def tokenize(fen: str):
   # ends at 50.
   halfmoves_last += '.' * (3 - len(halfmoves_last))
   indices.extend([_CHARACTERS_INDEX[x] for x in halfmoves_last])
-
-  # Three digits for full moves is enough (no game lasts longer than 999
-  # moves).
-  fullmoves += '.' * (3 - len(fullmoves))
-  indices.extend([_CHARACTERS_INDEX[x] for x in fullmoves])
 
   assert len(indices) == SEQUENCE_LENGTH
 

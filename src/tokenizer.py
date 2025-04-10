@@ -72,15 +72,12 @@ def tokenize(fen: str):
   raw_board, side, castling, en_passant, halfmoves_last, fullmoves = fen.split(' ')
   raw_board = raw_board.replace('/', '')
   board = ''
+  flip = side == 'b'
   for char in raw_board:
     if char in _SPACES_CHARACTERS:
       board += '.' * int(char)
     else:
       board += char
-  if en_passant != '-':
-    en_sq = _parse_square(en_passant)
-    assert board[en_sq] == '.'
-    board = board[:en_sq] + 'x' + board[en_sq + 1:]
   for char in castling:
     if char == 'K':
       white_k_rook = _parse_square("h1")
@@ -98,10 +95,16 @@ def tokenize(fen: str):
       black_q_rook = _parse_square("a8")
       assert board[black_q_rook] == 'r'
       board = board[:black_q_rook] + 'c' + board[black_q_rook + 1:]
-  board = board + side
+  if flip:
+    board = board[56:64] + board[48:56] + board[40:48] + board[32:40] + board[24:32] + board[16:24] + board[8:16] + board[0:8]
+    board = board.swapcase()
+  if en_passant != '-':
+    en_sq = _parse_square(en_passant, flip=flip)
+    assert board[en_sq] == '.'
+    board = board[:en_sq] + 'x' + board[en_sq + 1:]
 
-  assert board[-1] in ['w', 'b']
-
+    
+  board += '.'
   indices = list()
 
   for char in board:

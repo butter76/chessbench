@@ -20,8 +20,12 @@ import math
 import chess
 import numpy as np
 
-def _parse_square(square: str):
-  return chess.square_mirror(chess.parse_square(square))
+def _parse_square(square: str, flip: bool = False):
+  if not flip:
+    return chess.square_mirror(chess.parse_square(square))
+  else:
+    return chess.parse_square(square)
+  
 
 # The lists of the strings of the row and columns of a chess board,
 # traditionally named rank and file.

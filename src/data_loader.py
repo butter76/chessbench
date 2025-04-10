@@ -125,10 +125,10 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
   
     fen, move_values = constants.CODERS['action_values'].decode(element)
     state = _process_fen(fen)
-    legal_actions = np.zeros((72, 72))
-    actions = np.zeros((72, 72))
-    policy = np.zeros((72, 72))
-    weights = np.zeros((72, 72))
+    legal_actions = np.zeros((68, 68))
+    actions = np.zeros((68, 68))
+    policy = np.zeros((68, 68))
+    weights = np.zeros((68, 68))
 
     ## Validation
     # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))

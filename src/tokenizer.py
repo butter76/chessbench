@@ -35,12 +35,14 @@ _CHARACTERS = [
     'b',
     'n',
     'r',
+    'c',
     'k',
     'q',
     'P',
     'B',
     'N',
     'R',
+    'C',
     'Q',
     'K',
     'w',
@@ -50,7 +52,7 @@ _CHARACTERS = [
 # pyfmt: enable
 _CHARACTERS_INDEX = {letter: index for index, letter in enumerate(_CHARACTERS)}
 _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
-SEQUENCE_LENGTH = 72
+SEQUENCE_LENGTH = 68
 
 
 def tokenize(fen: str):
@@ -79,6 +81,23 @@ def tokenize(fen: str):
     en_sq = _parse_square(en_passant)
     assert board[en_sq] == '.'
     board = board[:en_sq] + 'x' + board[en_sq + 1:]
+  for char in castling:
+    if char == 'K':
+      white_k_rook = _parse_square("h1")
+      assert board[white_k_rook] == 'R'
+      board = board[:white_k_rook] + 'C' + board[white_k_rook + 1:]
+    elif char == 'Q':
+      white_q_rook = _parse_square("a1")
+      assert board[white_q_rook] == 'R'
+      board = board[:white_q_rook] + 'C' + board[white_q_rook + 1:]
+    elif char == 'k':
+      black_k_rook = _parse_square("h8")
+      assert board[black_k_rook] == 'r'
+      board = board[:black_k_rook] + 'c' + board[black_k_rook + 1:]
+    elif char == 'q':
+      black_q_rook = _parse_square("a8")
+      assert board[black_q_rook] == 'r'
+      board = board[:black_q_rook] + 'c' + board[black_q_rook + 1:]
   board = board + side
 
   assert board[-1] in ['w', 'b']
@@ -88,14 +107,14 @@ def tokenize(fen: str):
   for char in board:
     indices.append(_CHARACTERS_INDEX[char])
 
-  if castling == '-':
-    indices.extend(4 * [_CHARACTERS_INDEX['.']])
-  else:
-    for char in castling:
-      indices.append(_CHARACTERS_INDEX[char])
-    # Padding castling to have exactly 4 characters.
-    if len(castling) < 4:
-      indices.extend((4 - len(castling)) * [_CHARACTERS_INDEX['.']])
+  # if castling == '-':
+  #   indices.extend(4 * [_CHARACTERS_INDEX['.']])
+  # else:
+  #   for char in castling:
+  #     indices.append(_CHARACTERS_INDEX[char])
+  #   # Padding castling to have exactly 4 characters.
+  #   if len(castling) < 4:
+  #     indices.extend((4 - len(castling)) * [_CHARACTERS_INDEX['.']])
 
   # Three digits for halfmoves (since last capture) is enough since the game
   # ends at 50.

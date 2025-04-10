@@ -113,7 +113,7 @@ from searchless_chess.src.engines.my_engine import MyTransformerEngine
 
 ENGINE_BUILDERS = {
     "my_engine": lambda: MyTransformerEngine(
-        '../checkpoints/seq-len-74/checkpoint_300000.pt',
+        '../checkpoints/seq-len-72-fixed-stm/checkpoint_300000.pt',
         chess.engine.Limit(nodes=1),
     ),
     # 'local': functools.partial(_build_neural_engine, model_name='local'),

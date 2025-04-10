@@ -155,7 +155,7 @@ class MyTransformerEngine(engine.Engine):
                     best_res = 0.5
                 else:
                     av = av.clone()
-                    legal_moves = torch.zeros((74, 74)).to(self.device)
+                    legal_moves = torch.zeros((72, 72)).to(self.device)
                     for next_move in engine.get_ordered_legal_moves(board):
                         board.push(next_move)
                         if board.is_checkmate():

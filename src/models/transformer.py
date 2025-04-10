@@ -363,8 +363,8 @@ class ChessTransformer(nn.Module):
         masked_policy[~legal_moves] = -1e9  
         
         # Reshape for softmax over all possible moves
-        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 74*74]
-        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 74*74]
+        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 72*72]
+        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 72*72]
 
         # Compute cross entropy loss
         policy_loss = F.cross_entropy(masked_policy_flat, target_policy_flat.argmax(dim=1))

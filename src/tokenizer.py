@@ -16,6 +16,7 @@
 """Implements tokenization of FEN strings."""
 
 import numpy as np
+from searchless_chess.src.utils import _parse_square
 
 
 # pyfmt: disable
@@ -30,15 +31,8 @@ _CHARACTERS = [
     '7',
     '8',
     '9',
-    'a',
-    'b',
-    'c',
-    'd',
-    'e',
-    'f',
-    'g',
-    'h',
     'p',
+    'b',
     'n',
     'r',
     'k',
@@ -50,12 +44,13 @@ _CHARACTERS = [
     'Q',
     'K',
     'w',
+    'x',
     '.',
 ]
 # pyfmt: enable
 _CHARACTERS_INDEX = {letter: index for index, letter in enumerate(_CHARACTERS)}
 _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
-SEQUENCE_LENGTH = 74
+SEQUENCE_LENGTH = 72
 
 
 def tokenize(fen: str):
@@ -72,8 +67,18 @@ def tokenize(fen: str):
     fen: The board position in Forsyth-Edwards Notation.
   """
   # Extracting the relevant information from the FEN.
-  board, side, castling, en_passant, halfmoves_last, fullmoves = fen.split(' ')
-  board = board.replace('/', '')
+  raw_board, side, castling, en_passant, halfmoves_last, fullmoves = fen.split(' ')
+  raw_board = raw_board.replace('/', '')
+  board = ''
+  for char in raw_board:
+    if char in _SPACES_CHARACTERS:
+      board += '.' * int(char)
+    else:
+      board += char
+  if en_passant != '-':
+    en_sq = _parse_square(en_passant)
+    assert board[en_sq] == '.'
+    board = board[:en_sq] + 'x' + board[en_sq + 1:]
   board = board + side
 
   assert board[-1] in ['w', 'b']
@@ -81,10 +86,7 @@ def tokenize(fen: str):
   indices = list()
 
   for char in board:
-    if char in _SPACES_CHARACTERS:
-      indices.extend(int(char) * [_CHARACTERS_INDEX['.']])
-    else:
-      indices.append(_CHARACTERS_INDEX[char])
+    indices.append(_CHARACTERS_INDEX[char])
 
   if castling == '-':
     indices.extend(4 * [_CHARACTERS_INDEX['.']])
@@ -94,13 +96,6 @@ def tokenize(fen: str):
     # Padding castling to have exactly 4 characters.
     if len(castling) < 4:
       indices.extend((4 - len(castling)) * [_CHARACTERS_INDEX['.']])
-
-  if en_passant == '-':
-    indices.extend(2 * [_CHARACTERS_INDEX['.']])
-  else:
-    # En passant is a square like 'e3'.
-    for char in en_passant:
-      indices.append(_CHARACTERS_INDEX[char])
 
   # Three digits for halfmoves (since last capture) is enough since the game
   # ends at 50.

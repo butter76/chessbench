@@ -143,7 +143,7 @@ def train(
             
             with autocast(device, dtype=torch.bfloat16):
                 # Forward pass
-                value = model(planes)
+                value = model(planes, legal_actions)
                 
                 # Compute loss
                 losses = model.losses(value, target)
@@ -212,7 +212,7 @@ def train(
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
-                    value = model(planes)
+                    value = model(planes, legal_actions)
 
                 # Compute loss
                 losses = model.losses(value, target)
@@ -316,7 +316,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/new-embed-planes-with-halfmoves-float/',
+        save_checkpoint_path='../checkpoints/new-embed-planes-with-halfmoves-float-legal/',
     )
     
     # Train model

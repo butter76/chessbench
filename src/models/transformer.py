@@ -248,6 +248,9 @@ class ChessTransformer(nn.Module):
         self.seq_len = tokenizer.SEQUENCE_LENGTH
         
         self.embedding = nn.Embedding(17, config.embedding_dim)
+        self.legal_embedding = nn.Linear(self.seq_len * 2, config.embedding_dim)
+        nn.init.uniform_(self.legal_embedding.weight, -0.01, 0.01)
+        self.legal_ln = nn.LayerNorm(config.embedding_dim)
         self.pos_embedding = nn.Parameter(
             torch.randn(1, self.seq_len, config.embedding_dim)
         )
@@ -307,10 +310,16 @@ class ChessTransformer(nn.Module):
         )
         
         
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, legal: torch.Tensor) -> dict[str, torch.Tensor]:
         batch_size = x.size(0)
         x = x @ self.embedding.weight
         x = x + self.pos_embedding
+
+        legal = torch.concat([legal, legal.transpose(-1, -2)], dim=-1)
+        legal = legal @ self.legal_embedding.weight.T
+
+        x = x + legal
+
         for layer in self.transformer:
             x = layer(x)
 

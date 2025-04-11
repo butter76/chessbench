@@ -303,7 +303,7 @@ class ChessTransformer(nn.Module):
             nn.Linear(self.final_num_heads, 
                     self.final_num_heads),
             nn.GELU(),
-            nn.Linear(self.final_num_heads, 3),
+            nn.Linear(self.final_num_heads, 4),
         )
         
         
@@ -349,6 +349,7 @@ class ChessTransformer(nn.Module):
             'avs': torch.sigmoid(avsl),
             'avsl': avsl,
             'policy': attn_scores[:, :, :, 2],
+            'opt_policy': attn_scores[:, :, :, 3],
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -359,15 +360,22 @@ class ChessTransformer(nn.Module):
         batch_size = output['policy'].shape[0]
         # Clone policy logits to avoid modifying the original
         masked_policy = output['policy'].clone()
+        opt_masked_policy = output['opt_policy'].clone()
         # Apply masking - set illegal moves to large negative value
-        masked_policy[~legal_moves] = -1e9  
+        masked_policy[~legal_moves] = -1e9
+
+        policy_downweight = torch.log(target['weights'] + 1e-8)
+        opt_masked_policy = opt_masked_policy + policy_downweight
+        opt_masked_policy[~legal_moves] = -1e9 
         
         # Reshape for softmax over all possible moves
         masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 77*77]
+        opt_masked_policy_flat = opt_masked_policy.view(batch_size, -1)  # [batch_size, 77*77]
         target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 77*77]
 
         # Compute cross entropy loss
         policy_loss = F.cross_entropy(masked_policy_flat, target_policy_flat.argmax(dim=1))
+        opt_policy_loss = F.cross_entropy(opt_masked_policy_flat, target_policy_flat.argmax(dim=1))
 
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
@@ -378,4 +386,5 @@ class ChessTransformer(nn.Module):
             'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
             'avsl': ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
             'policy': policy_loss * 0.1,
+            'opt_policy': opt_policy_loss * 0.005,
         }

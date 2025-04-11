@@ -90,6 +90,9 @@ class MyTransformerEngine(engine.Engine):
         elif False:
             move_values = []
             avs = self.analyse_shallow(board)['avs'][0, :, :].clone()
+            fen = board.fen()
+            stm = fen.split(' ')[1]
+            flip = stm == 'b'
             for (i, move) in enumerate(sorted_legal_moves):
                 board.push(move)
                 if board.is_checkmate():
@@ -101,7 +104,7 @@ class MyTransformerEngine(engine.Engine):
                 else:
                     board.pop()
                     move = move.uci()
-                    s1 = _parse_square(move[0:2])
+                    s1 = utils._parse_square(move[0:2], flip=flip)
                     if move[4:] in ['R', 'r']:
                         s2 = 64
                     elif move[4:] in ['B', 'b']:
@@ -110,7 +113,7 @@ class MyTransformerEngine(engine.Engine):
                         s2 = 66
                     else:
                         assert move[4:] in ['Q', 'q', '']
-                        s2 = utils._parse_square(move[2:4])
+                        s2 = utils._parse_square(move[2:4], flip=flip)
                     best_res = avs[s1, s2].item()
                 move_values.append((best_res, i))
             (best_value, best_idx) = max(move_values)
@@ -118,6 +121,9 @@ class MyTransformerEngine(engine.Engine):
         elif True:
             move_values = []
             avs = self.analyse_shallow(board)['policy'][0, :, :].clone()
+            fen = board.fen()
+            stm = fen.split(' ')[1]
+            flip = stm == 'b'
             for (i, move) in enumerate(sorted_legal_moves):
                 board.push(move)
                 if board.is_checkmate():
@@ -129,7 +135,7 @@ class MyTransformerEngine(engine.Engine):
                 else:
                     board.pop()
                     move = move.uci()
-                    s1 = _parse_square(move[0:2])
+                    s1 = utils._parse_square(move[0:2], flip=flip)
                     if move[4:] in ['R', 'r']:
                         s2 = 64
                     elif move[4:] in ['B', 'b']:
@@ -138,7 +144,7 @@ class MyTransformerEngine(engine.Engine):
                         s2 = 66
                     else:
                         assert move[4:] in ['Q', 'q', '']
-                        s2 = utils._parse_square(move[2:4])
+                        s2 = utils._parse_square(move[2:4], flip=flip)
                     best_res = avs[s1, s2].item()
                 move_values.append((best_res, i))
             (best_value, best_idx) = max(move_values)

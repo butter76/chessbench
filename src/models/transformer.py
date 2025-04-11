@@ -17,6 +17,8 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from searchless_chess.src.models.dense_attention.danet_layers import DANetLayer
 from searchless_chess.src.models.dense_attention.model_config import ModelConfig
 
+S = tokenizer.SEQUENCE_LENGTH
+
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
     """Hyperparameters used in the Transformer architectures."""
@@ -88,17 +90,17 @@ class MultiHeadAttention(nn.Module):
         self.nheads = nheads
         self.dropout = dropout
         self._qkv_same_embed_dim = E_q == E_k and E_q == E_v
-        seq_len = 77
+        seq_len = S
 
         self.flatten = nn.Linear(E_q, 32)
         self.smolgen = nn.Sequential(
-            nn.Linear(32 * 77, 256),
+            nn.Linear(32 * S, 256),
             nn.LayerNorm(256, eps=1e-5),
             nn.Linear(256, 256 * self.nheads),
         )
         self.smolgen_shared = nn.Sequential(
             nn.LayerNorm(256, eps=1e-5),
-            nn.Linear(256, 77 * 77),
+            nn.Linear(256, S * S),
         )
 
         if self._qkv_same_embed_dim:
@@ -145,7 +147,7 @@ class MultiHeadAttention(nn.Module):
         """
         flat = self.flatten(query).view(query.size(0), -1)
         smol = self.smolgen(flat).view(-1, self.nheads, 256)
-        smol_bias = self.smolgen_shared(smol).view(-1, self.nheads, 77, 77)
+        smol_bias = self.smolgen_shared(smol).view(-1, self.nheads, S, S)
 
 
         # Step 1. Apply input projection
@@ -408,8 +410,8 @@ class ChessTransformer(nn.Module):
         masked_policy[~legal_moves] = -1e9  
         
         # Reshape for softmax over all possible moves
-        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 77*77]
-        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 77*77]
+        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, S*S]
+        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, S*S]
 
         # Compute cross entropy loss
         policy_loss = -torch.sum(target_policy_flat * F.log_softmax(masked_policy_flat, dim=-1), dim=-1).mean()

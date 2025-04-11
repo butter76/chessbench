@@ -280,13 +280,22 @@ class ChessTransformer(nn.Module):
 
         # VANILLA ATTENTION
         self.transformer = nn.ModuleList([
-            MyTransformerEncoderLayer(
+            *[MyTransformerEncoderLayer(
                 d_model=config.embedding_dim,
                 nhead=config.num_heads,
                 dim_feedforward=int(config.embedding_dim * config.widening_factor),
                 dropout=config.dropout,
                 activation=self.activation,
-            ) for _ in range(config.num_layers)
+                norm_first=False,
+            ) for _ in range(config.num_layers // 4)],
+            *[MyTransformerEncoderLayer(
+                d_model=config.embedding_dim,
+                nhead=config.num_heads,
+                dim_feedforward=int(config.embedding_dim * config.widening_factor),
+                dropout=config.dropout,
+                activation=self.activation,
+                norm_first=True,
+            ) for _ in range(3 * config.num_layers // 4)],
         ])
 
         # # DENSE ATTENTION
@@ -342,16 +351,16 @@ class ChessTransformer(nn.Module):
         for layer in self.transformer:
             x = layer(x)
 
-
+        x = self.final_ln(x)
         qk = self.final_qk_proj(x)
         qk = qk.reshape(batch_size, self.seq_len, 2, self.config.embedding_dim)
 
         q, k = qk.unbind(dim=2)
 
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-        q = self.qq_proj(F.gelu(q))
-        k = self.kk_proj(F.gelu(k))
+        # q = self.q_norm(q)
+        # k = self.k_norm(k)
+        # q = self.qq_proj(F.gelu(q))
+        # k = self.kk_proj(F.gelu(k))
 
         q = q.unflatten(-1, [self.final_num_heads, self.final_head_dim]).transpose(1, 2)
         k = k.unflatten(-1, [self.final_num_heads, self.final_head_dim]).transpose(1, 2)

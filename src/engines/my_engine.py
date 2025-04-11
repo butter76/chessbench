@@ -20,6 +20,8 @@ from torch.amp.autocast_mode import autocast
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 
+S = tokenizer.SEQUENCE_LENGTH
+
 def _parse_square(square: str):
   return chess.square_mirror(chess.parse_square(square))
 
@@ -155,7 +157,7 @@ class MyTransformerEngine(engine.Engine):
                     best_res = 0.5
                 else:
                     av = av.clone()
-                    legal_moves = torch.zeros((68, 68)).to(self.device)
+                    legal_moves = torch.zeros((S, S)).to(self.device)
                     for next_move in engine.get_ordered_legal_moves(board):
                         board.push(next_move)
                         if board.is_checkmate():

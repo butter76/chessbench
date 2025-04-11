@@ -120,9 +120,10 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, legal_actions, avs, hl, value_prob, policy, weights = next(train_iter)
-                
-            x = x.to(torch.long).to(device)
+            planes, indices, legal_actions, avs, hl, value_prob, policy, weights = next(train_iter)
+
+            planes = planes.to(torch.float32).to(device)
+            indices = indices.to(torch.long).to(device)
             legal_actions = legal_actions.to(torch.float32).to(device)
             avs = avs.to(torch.float32).to(device)
             hl = hl.to(torch.float32).to(device)
@@ -131,7 +132,7 @@ def train(
             weights = weights.to(torch.float32).to(device)
 
             target = {
-                'self': x,
+                'self': indices,
                 'legal': legal_actions,
                 'avs': avs,
                 'hl': hl,
@@ -142,7 +143,7 @@ def train(
             
             with autocast(device, dtype=torch.bfloat16):
                 # Forward pass
-                value = model(x)
+                value = model(planes)
                 
                 # Compute loss
                 losses = model.losses(value, target)
@@ -188,9 +189,11 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, legal_actions, avs, hl, value_prob, policy, weights = next(val_iter)
+                planes, indices, legal_actions, avs, hl, value_prob, policy, weights = next(val_iter)
                 
-                x = x.to(torch.long).to(device)
+
+                planes = planes.to(torch.float32).to(device)
+                indices = indices.to(torch.long).to(device)
                 legal_actions = legal_actions.to(torch.float32).to(device)
                 avs = avs.to(torch.float32).to(device)
                 hl = hl.to(torch.float32).to(device)
@@ -199,7 +202,7 @@ def train(
                 weights = weights.to(torch.float32).to(device)
 
                 target = {
-                    'self': x,
+                    'self': indices,
                     'legal': legal_actions,
                     'avs': avs,
                     'hl': hl,
@@ -209,7 +212,7 @@ def train(
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
-                    value = model(x)
+                    value = model(planes)
 
                 # Compute loss
                 losses = model.losses(value, target)
@@ -313,7 +316,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/seq-len-68-flip-stm/',
+        save_checkpoint_path='../checkpoints/new-embed-planes-with-halfmoves-float/',
     )
     
     # Train model

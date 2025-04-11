@@ -36,6 +36,7 @@ import math
 from scipy.stats import norm
 
 NUM_BINS = 81
+S = tokenizer.SEQUENCE_LENGTH
 
 def _process_prob(
     win_prob: float,
@@ -50,8 +51,8 @@ def _process_prob(
   probs = probs / probs.sum(keepdims=True)
   return probs
 
-def _process_fen(fen: str) -> np.ndarray:
-  return tokenizer.tokenize(fen).astype(np.int32)
+def _process_fen(fen: str):
+  return tokenizer.tokenize(fen)
 
 
 def _process_move(move: str) -> np.ndarray:
@@ -126,11 +127,11 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     fen, move_values = constants.CODERS['action_values'].decode(element)
     stm = fen.split(' ')[1]
     flip = stm == 'b'
-    state = _process_fen(fen)
-    legal_actions = np.zeros((68, 68))
-    actions = np.zeros((68, 68))
-    policy = np.zeros((68, 68))
-    weights = np.zeros((68, 68))
+    planes, state = _process_fen(fen)
+    legal_actions = np.zeros((S, S))
+    actions = np.zeros((S, S))
+    policy = np.zeros((S, S))
+    weights = np.zeros((S, S))
 
     ## Validation
     # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
@@ -163,7 +164,9 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
 
     probs = _process_prob(value_prob)
 
-    return state, legal_actions, actions, probs, np.array([value_prob]), policy, weights
+    # planes = np.concatenate([planes, legal_actions, legal_actions.T], axis=1)
+
+    return planes, state, legal_actions, actions, probs, np.array([value_prob]), policy, weights
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

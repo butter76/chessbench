@@ -247,7 +247,7 @@ class ChessTransformer(nn.Module):
         self.vocab_size = len(tokenizer._CHARACTERS)
         self.seq_len = tokenizer.SEQUENCE_LENGTH
         
-        self.embedding = nn.Embedding(self.vocab_size, config.embedding_dim)
+        self.embedding = nn.Embedding(17, config.embedding_dim)
         self.pos_embedding = nn.Parameter(
             torch.randn(1, self.seq_len, config.embedding_dim)
         )
@@ -309,7 +309,7 @@ class ChessTransformer(nn.Module):
         
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         batch_size = x.size(0)
-        x = self.embedding(x)
+        x = x @ self.embedding.weight
         x = x + self.pos_embedding
         for layer in self.transformer:
             x = layer(x)
@@ -363,8 +363,8 @@ class ChessTransformer(nn.Module):
         masked_policy[~legal_moves] = -1e9  
         
         # Reshape for softmax over all possible moves
-        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 68*68]
-        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 68*68]
+        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, S*S]
+        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, S*S]
 
         # Compute cross entropy loss
         policy_loss = F.cross_entropy(masked_policy_flat, target_policy_flat.argmax(dim=1))

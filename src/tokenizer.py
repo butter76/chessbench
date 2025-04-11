@@ -36,8 +36,8 @@ _CHARACTERS = [
     'n',
     'r',
     'c',
-    'k',
     'q',
+    'k',
     'P',
     'B',
     'N',
@@ -45,7 +45,6 @@ _CHARACTERS = [
     'C',
     'Q',
     'K',
-    'w',
     'x',
     '.',
 ]
@@ -103,27 +102,35 @@ def tokenize(fen: str):
     assert board[en_sq] == '.'
     board = board[:en_sq] + 'x' + board[en_sq + 1:]
 
-    
-  board += '.'
+  board += '.' * 4
   indices = list()
 
   for char in board:
     indices.append(_CHARACTERS_INDEX[char])
 
-  # if castling == '-':
-  #   indices.extend(4 * [_CHARACTERS_INDEX['.']])
-  # else:
-  #   for char in castling:
-  #     indices.append(_CHARACTERS_INDEX[char])
-  #   # Padding castling to have exactly 4 characters.
-  #   if len(castling) < 4:
-  #     indices.extend((4 - len(castling)) * [_CHARACTERS_INDEX['.']])
+  assert len(board) == SEQUENCE_LENGTH
 
-  # Three digits for halfmoves (since last capture) is enough since the game
-  # ends at 50.
-  halfmoves_last += '.' * (3 - len(halfmoves_last))
-  indices.extend([_CHARACTERS_INDEX[x] for x in halfmoves_last])
+  planes = []
+  planes.append(np.array([1 if char == 'p' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'P' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'b' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'B' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'n' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'N' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char in ['r', 'c'] else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char in ['R', 'C'] else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'c' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'C' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'q' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'Q' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'k' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'K' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char == 'x' else 0 for char in board], dtype=np.float32))
+  planes.append(np.array([1 if char in ['.', 'x'] else 0 for char in board], dtype=np.float32))
+  
+  planes.append(np.array([int(halfmoves_last) / 100] * SEQUENCE_LENGTH, dtype=np.float32))
 
+  planes = np.stack(planes).T
   assert len(indices) == SEQUENCE_LENGTH
 
-  return np.asarray(indices, dtype=np.uint8)
+  return planes, np.asarray(indices, dtype=np.int32)

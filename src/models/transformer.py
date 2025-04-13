@@ -371,7 +371,7 @@ class ChessTransformer(nn.Module):
         target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 77*77]
 
         # Compute cross entropy loss
-        policy_loss = F.cross_entropy(masked_policy_flat, target_policy_flat.argmax(dim=1))
+        policy_loss = -torch.sum(target_policy_flat * F.log_softmax(masked_policy_flat, dim=-1), dim=-1).mean()
 
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),

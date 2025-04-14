@@ -64,7 +64,14 @@ class MyTransformerEngine(engine.Engine):
         x = torch.tensor(x, dtype=torch.long, device=self.device)
         with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
             output = self.model(x)
-        return output        
+        return output
+
+    def analyse_all(self, boards: list[chess.Board]):
+        x = np.array([tokenizer.tokenize(board.fen()) for board in boards])
+        x = torch.tensor(x, dtype=torch.long, device=self.device)
+        with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
+            output = self.model(x)
+        return output
 
     def play(self, board: chess.Board) -> chess.Move:
         self.model.eval()
@@ -86,6 +93,61 @@ class MyTransformerEngine(engine.Engine):
             best_ix = cast(int, torch.argmin(value).item())
             best_move = sorted_legal_moves[best_ix]
             best_value = value[best_ix].item()
+            # print(f"Best Move: {best_move} with value {best_value}")
+        elif True:
+
+
+            # print(board.fen())
+            # print(board.fen())
+            values = []
+            for i, move in enumerate(sorted_legal_moves):
+                b = board.copy()
+                print("Move:", move)
+                print("Board:", b.fen())
+                # print(move, av.item())
+                count = 0
+                value = None
+                flip = False
+                while count < 3:
+                    flip = not flip
+                    b.push(move)
+                    analysis = self.analyse_shallow(b)
+                    value = analysis["value"][0, 0].item()
+                    print(f"Value {count}:", value)
+                    if b.is_checkmate():
+                        value = 0
+                        break
+                    if b.is_stalemate():
+                        value = 0.5
+                        break
+                    if count == 3 - 1:
+                        break
+                    av = analysis["avs"][0]
+                    next_moves = engine.get_ordered_legal_moves(b)
+                    best_reses = []
+                    for j, next_move in enumerate(next_moves):
+                        next_uci = next_move.uci()
+                        s1 = _parse_square(next_uci[0:2])
+                        if next_uci[4:] in ['R', 'r']:
+                            s2 = 64
+                        elif next_uci[4:] in ['B', 'b']:
+                            s2 = 65
+                        elif next_uci[4:] in ['N', 'n']:
+                            s2 = 66
+                        else:
+                            assert next_uci[4:] in ['Q', 'q', '']
+                            s2 = utils._parse_square(next_uci[2:4])
+                        best_res = av[s1, s2].item()
+                        best_reses.append((best_res, j))
+                    best_res, best_j = max(best_reses)
+                    move = next_moves[best_j]
+                    count += 1
+                print("Value:", value)
+                values.append(value if not flip else 1 - value)
+            values = torch.tensor(values, dtype=torch.float32, device=self.device)
+            best_ix = cast(int, torch.argmax(values).item())
+            best_move = sorted_legal_moves[best_ix]
+            best_value = values[best_ix].item()
             # print(f"Best Move: {best_move} with value {best_value}")
         elif False:
             move_values = []

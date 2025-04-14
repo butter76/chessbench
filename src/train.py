@@ -278,7 +278,7 @@ def main():
     # Create model config
     model_config = TransformerConfig(
         embedding_dim=256,
-        num_layers=24,
+        num_layers=16,
         num_heads=16,
         widening_factor=3,
         dropout=0,

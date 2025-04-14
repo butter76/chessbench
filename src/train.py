@@ -146,7 +146,7 @@ def train(
                 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2']))
 
             
             # Backward pass
@@ -213,7 +213,7 @@ def train(
 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2']))
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()
@@ -237,9 +237,9 @@ def train(
         print({
             "epoch": epoch + 1,
             "train_loss": avg_loss,
-            **{f'{k}': f'{v:.5f}' for k,v in metrics_loss.items()},
+            **{f'{k}': f'{v:.6f}' for k,v in metrics_loss.items()},
             "val_loss": avg_val_loss,
-            **{f'val_{k}': f'{v:.5f}' for k,v in val_metrics_loss.items()},
+            **{f'val_{k}': f'{v:.6f}' for k,v in val_metrics_loss.items()},
             'lr': f'{scheduler.get_last_lr()[0]:.5f}',
             'step': step,
         })
@@ -278,7 +278,7 @@ def main():
     # Create model config
     model_config = TransformerConfig(
         embedding_dim=256,
-        num_layers=24,
+        num_layers=16,
         num_heads=16,
         widening_factor=3,
         dropout=0,
@@ -313,7 +313,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-24-mixedln/',
+        save_checkpoint_path='../checkpoints/avs2-take2/',
     )
     
     # Train model

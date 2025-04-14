@@ -311,7 +311,7 @@ class ChessTransformer(nn.Module):
             nn.Linear(self.final_num_heads, 
                     self.final_num_heads),
             nn.GELU(),
-            nn.Linear(self.final_num_heads, 3),
+            nn.Linear(self.final_num_heads, 4),
         )
         
         
@@ -346,6 +346,7 @@ class ChessTransformer(nn.Module):
         # valuel = self.value_head(x[:, -1, :])
 
         avsl = attn_scores[:, :, :, 0]
+        avs2l = attn_scores[:, :, :, 3]
 
         return {
             'self': self.self_head(x),
@@ -356,6 +357,8 @@ class ChessTransformer(nn.Module):
             'legal': attn_scores[:, :, :, 1],
             'avs': torch.sigmoid(avsl),
             'avsl': avsl,
+            'avs2': torch.sigmoid(avs2l),
+            'avs2l': avs2l,
             'policy': attn_scores[:, :, :, 2],
         }
     
@@ -384,6 +387,8 @@ class ChessTransformer(nn.Module):
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
-            'avsl': ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'avsl': 0.1 * ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'avs2': ((F.mse_loss(output['avs2'], target['avs'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'avs2l': ((F.binary_cross_entropy_with_logits(output['avs2l'], target['avs'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
             'policy': policy_loss * 0.1,
         }

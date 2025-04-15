@@ -313,7 +313,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/avs2-take2/',
+        save_checkpoint_path='../checkpoints/avs2-opt-policy-split/',
     )
     
     # Train model

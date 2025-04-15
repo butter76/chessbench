@@ -311,7 +311,7 @@ class ChessTransformer(nn.Module):
             nn.Linear(self.final_num_heads, 
                     self.final_num_heads),
             nn.GELU(),
-            nn.Linear(self.final_num_heads, 4),
+            nn.Linear(self.final_num_heads, 6),
         )
         
         
@@ -360,6 +360,8 @@ class ChessTransformer(nn.Module):
             'avs2': torch.sigmoid(avs2l),
             'avs2l': avs2l,
             'policy': attn_scores[:, :, :, 2],
+            'policy_split': attn_scores[:, :, :, 4],
+            'opt_policy_split': attn_scores[:, :, :, 5],
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -370,9 +372,14 @@ class ChessTransformer(nn.Module):
         batch_size = output['policy'].shape[0]
         # Clone policy logits to avoid modifying the original
         masked_policy = output['policy'].clone()
+        opt_masked_policy_split = output['opt_policy_split'].clone()
+        masked_policy_split = output['policy_split'].clone()
+
         # Apply masking - set illegal moves to large negative value
         masked_policy[~legal_moves] = -1e9  
-        
+        opt_masked_policy_split[~legal_moves] = -1e9
+        masked_policy_split[~legal_moves] = -1e9
+
         # Reshape for softmax over all possible moves
         masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 77*77]
         target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 77*77]
@@ -387,8 +394,10 @@ class ChessTransformer(nn.Module):
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             'avs': ((F.mse_loss(output['avs'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
-            'avsl': 0.1 * ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'avsl': 0.5 * ((F.binary_cross_entropy_with_logits(output['avsl'], target['avs'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
             'avs2': ((F.mse_loss(output['avs2'], target['avs'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
-            'avs2l': ((F.binary_cross_entropy_with_logits(output['avs2l'], target['avs'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'avs2l': 0.5 * ((F.binary_cross_entropy_with_logits(output['avs2l'], target['avs'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
             'policy': policy_loss * 0.1,
+            'opt_policy_split': 0.1 * ((F.binary_cross_entropy_with_logits(opt_masked_policy_split, target['policy'], reduction='none') * target['weights']).view(batch_size, -1).sum(dim=-1) / target['weights'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'policy_split': 0.1 * ((F.binary_cross_entropy_with_logits(masked_policy_split, target['policy'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
         }

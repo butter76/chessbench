@@ -313,9 +313,9 @@ def main():
         compile=True,
         max_grad_norm=1.0,
         log_frequency=1,
-        num_steps=1 * 10 * 3,
-        ckpt_frequency=10 * 3,
-        save_frequency=10 * 3,
+        num_steps=100 * 1000 * 3,
+        ckpt_frequency=1000 * 3,
+        save_frequency=1000 * 3,
         save_checkpoint_path='../checkpoints/avs2-opt-policy-split/',
     )
     

@@ -28,6 +28,7 @@ import pandas as pd
 
 from searchless_chess.src.engines import constants
 from searchless_chess.src.engines import engine as engine_lib
+from searchless_chess.src.engines.my_engine import MyTransformerEngine
 
 
 _NUM_PUZZLES = flags.DEFINE_integer(
@@ -36,23 +37,19 @@ _NUM_PUZZLES = flags.DEFINE_integer(
     help='The number of puzzles to evaluate.',
     required=True,
 )
-_AGENT = flags.DEFINE_enum(
-    name='agent',
-    default=None,
+
+_STRATEGY = flags.DEFINE_enum(
+    name='strategy',
+    default='value',
     enum_values=[
-        'local',
-        'my_engine',
-        '9M',
-        '136M',
-        '270M',
-        'stockfish',
-        'stockfish_all_moves',
-        'leela_chess_zero_depth_1',
-        'leela_chess_zero_policy_net',
-        'leela_chess_zero_400_sims',
+        'value',
+        'avs',
+        'avs2',
+        'policy',
+        'policy_split',
+        'opt_policy_split',
     ],
-    help='The agent to evaluate.',
-    required=True,
+    help='The move selection strategy to use for my_engine.',
 )
 
 
@@ -104,7 +101,11 @@ def main(argv: Sequence[str]) -> None:
       '../data/puzzles.csv',
   )
   puzzles = pd.read_csv(puzzles_path, nrows=_NUM_PUZZLES.value)
-  engine = constants.ENGINE_BUILDERS[_AGENT.value]()
+  engine = MyTransformerEngine(
+        '../checkpoints/avs2-opt-policy-split/checkpoint_3000.pt',
+        chess.engine.Limit(nodes=1),
+        strategy=_STRATEGY.value,
+  )
 
   for puzzle_id, puzzle in puzzles.iterrows():
     correct = evaluate_puzzle_from_pandas_row(

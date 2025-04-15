@@ -1,13 +1,10 @@
 from collections.abc import Callable, Sequence
-from typing import cast
+from typing import cast, Union
+from enum import Enum, auto
 
 import chess
 import chess.engine
-import haiku as hk
-import jax
-import jax.nn as jnn
 import numpy as np
-import scipy.special
 
 from searchless_chess.src import constants
 from searchless_chess.src import tokenizer
@@ -23,15 +20,28 @@ torch.set_printoptions(profile="full")
 def _parse_square(square: str):
   return chess.square_mirror(chess.parse_square(square))
 
+class MoveSelectionStrategy(str, Enum):
+    VALUE = "value"
+    AVS = "avs"
+    AVS2 = "avs2"
+    POLICY = "policy"
+    POLICY_SPLIT = "policy_split"
+    OPT_POLICY_SPLIT = "opt_policy_split"
+
 class MyTransformerEngine(engine.Engine):
     def __init__(
         self,
         checkpoint_path: str,
         limit: chess.engine.Limit,
+        strategy: Union[MoveSelectionStrategy, str] = MoveSelectionStrategy.VALUE,
     ) -> None:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._limit = limit
-
+        
+        # Convert string to enum if needed
+        if isinstance(strategy, str):
+            strategy = MoveSelectionStrategy(strategy)
+        self.strategy = strategy
 
         checkpoint = torch.load(checkpoint_path)
         model_config =  checkpoint['model_config']
@@ -69,7 +79,7 @@ class MyTransformerEngine(engine.Engine):
     def play(self, board: chess.Board) -> chess.Move:
         self.model.eval()
         sorted_legal_moves = engine.get_ordered_legal_moves(board)
-        if False:
+        if self.strategy == MoveSelectionStrategy.VALUE:
             # print(board.fen())
             value = self.analyse(board)['value']
             value = value[:, 0].clone()
@@ -80,22 +90,22 @@ class MyTransformerEngine(engine.Engine):
                 if board.is_checkmate():
                     board.pop()
                     return move
-                if board.is_fivefold_repetition() or board.can_claim_threefold_repetition() or board.is_stalemate():
+                if board.is_stalemate():
                     value[i] = 0.5
                 board.pop()
             best_ix = cast(int, torch.argmin(value).item())
             best_move = sorted_legal_moves[best_ix]
             best_value = value[best_ix].item()
             # print(f"Best Move: {best_move} with value {best_value}")
-        elif True:
+        elif self.strategy == MoveSelectionStrategy.AVS or self.strategy == MoveSelectionStrategy.AVS2:
             move_values = []
-            avs = self.analyse_shallow(board)['avs2'][0, :, :].clone()
+            avs = self.analyse_shallow(board)[self.strategy][0, :, :].clone()
             for (i, move) in enumerate(sorted_legal_moves):
                 board.push(move)
                 if board.is_checkmate():
                     board.pop()
                     return move
-                if board.is_fivefold_repetition() or board.can_claim_threefold_repetition() or board.is_stalemate():
+                if board.is_stalemate():
                     best_res = 0.5
                     board.pop()
                 else:
@@ -115,9 +125,9 @@ class MyTransformerEngine(engine.Engine):
                 move_values.append((best_res, i))
             (best_value, best_idx) = max(move_values)
             best_move = sorted_legal_moves[best_idx]
-        elif True:
+        else:
             move_values = []
-            avs = self.analyse_shallow(board)['policy'][0, :, :].clone()
+            avs = self.analyse_shallow(board)[self.strategy][0, :, :].clone()
             for (i, move) in enumerate(sorted_legal_moves):
                 board.push(move)
                 if board.is_checkmate():
@@ -143,49 +153,6 @@ class MyTransformerEngine(engine.Engine):
                 move_values.append((best_res, i))
             (best_value, best_idx) = max(move_values)
             best_move = sorted_legal_moves[best_idx]
-        else:
-            move_values = []
-            avs = self.analyse(board)['avs']
-            for i, (move, av) in enumerate(zip(sorted_legal_moves, avs)):
-                board.push(move)
-                if board.is_checkmate():
-                    board.pop()
-                    return move
-                if board.is_fivefold_repetition() or board.can_claim_threefold_repetition() or board.is_stalemate():
-                    best_res = 0.5
-                else:
-                    av = av.clone()
-                    legal_moves = torch.zeros((77, 77)).to(self.device)
-                    for next_move in engine.get_ordered_legal_moves(board):
-                        board.push(next_move)
-                        if board.is_checkmate():
-                            board.pop()
-                            best_res = 1
-                            break
-                        next_move = next_move.uci()
-                        s1 = _parse_square(next_move[0:2])
-                        if next_move[4:] in ['R', 'r']:
-                            s2 = 64
-                        elif next_move[4:] in ['B', 'b']:
-                            s2 = 65
-                        elif next_move[4:] in ['N', 'n']:
-                            s2 = 66
-                        else:
-                            assert next_move[4:] in ['Q', 'q', '']
-                            s2 = utils._parse_square(next_move[2:4])
-                        if board.is_stalemate():
-                            av[s1, s2] = 0.5
-                        legal_moves[s1, s2] = 1
-                        board.pop()
-                    else:
-                        best_res = torch.max(av[legal_moves == 1]).item()
-                move_values.append((1 - best_res, i))
-                board.pop()
-            (best_value, best_idx) = max(move_values)
-            best_move = sorted_legal_moves[best_idx]
-            
-                
-
         return best_move
 
 

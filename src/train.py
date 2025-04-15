@@ -4,6 +4,8 @@ from itertools import cycle
 import os
 from typing import Any, cast
 
+import chess
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,7 +16,8 @@ torch.set_printoptions(profile="full")
 from tqdm import tqdm
 
 from searchless_chess.src import config as config_lib
-
+from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTransformerEngine
+from searchless_chess.src.puzzles import evaluate_puzzle_from_pandas_row
 from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
 
@@ -310,9 +313,9 @@ def main():
         compile=True,
         max_grad_norm=1.0,
         log_frequency=1,
-        num_steps=60000 * 3 * 10,
-        ckpt_frequency=1000 * 3,
-        save_frequency=1000 * 3,
+        num_steps=1 * 10 * 3,
+        ckpt_frequency=10 * 3,
+        save_frequency=10 * 3,
         save_checkpoint_path='../checkpoints/avs2-opt-policy-split/',
     )
     
@@ -321,8 +324,33 @@ def main():
         train_config=train_config,
         model_config=model_config,
     )
+
+    puzzles_path = os.path.join(
+        os.getcwd(),
+        '../data/puzzles.csv',
+    )
+    puzzles = pd.read_csv(puzzles_path, nrows=10000)
+    for strategy in [MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.POLICY_SPLIT, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
+        engine = MyTransformerEngine(
+            f'{train_config.save_checkpoint_path}checkpoint_{train_config.num_steps}.pt',
+            chess.engine.Limit(nodes=1),
+            strategy=strategy,
+        )
+        with open(f'puzzles-{strategy}.txt', 'w') as f:
+            num_correct = 0
+            for puzzle_id, puzzle in puzzles.iterrows():
+                correct = evaluate_puzzle_from_pandas_row(
+                    puzzle=puzzle,
+                    engine=engine,
+                )
+                num_correct += correct
+                f.write(str({'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}) + '\n')
+            print(f'{strategy}: {num_correct / len(puzzles):.2%}')
+
     
     print("Training completed!")
+
+
     return model
 
 

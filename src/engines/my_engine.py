@@ -12,13 +12,12 @@ from searchless_chess.src import utils
 from searchless_chess.src.engines import engine
 from searchless_chess.src.models.transformer import ChessTransformer
 
+from searchless_chess.src.utils import _parse_square
+
 import torch
 from torch.amp.autocast_mode import autocast
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
-
-def _parse_square(square: str):
-  return chess.square_mirror(chess.parse_square(square))
 
 class MoveSelectionStrategy(str, Enum):
     VALUE = "value"

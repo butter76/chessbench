@@ -28,7 +28,7 @@ import pandas as pd
 
 from searchless_chess.src.engines import constants
 from searchless_chess.src.engines import engine as engine_lib
-from searchless_chess.src.engines.my_engine import MyTransformerEngine
+from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTransformerEngine
 
 
 _NUM_PUZZLES = flags.DEFINE_integer(
@@ -103,20 +103,23 @@ def main(argv: Sequence[str]) -> None:
       '../data/puzzles.csv',
   )
   puzzles = pd.read_csv(puzzles_path, nrows=_NUM_PUZZLES.value)
-  engine = MyTransformerEngine(
-        '../checkpoints/avs2-opt-policy-split/checkpoint_300000.pt',
-        chess.engine.Limit(nodes=1),
-        strategy=_STRATEGY.value,
-  )
 
-  for puzzle_id, puzzle in puzzles.iterrows():
-    correct = evaluate_puzzle_from_pandas_row(
-        puzzle=puzzle,
-        engine=engine,
+  for strategy in [MoveSelectionStrategy.VALUE, MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
+    engine = MyTransformerEngine(
+        '../checkpoints/p1-standard/checkpoint_300000.pt',
+        chess.engine.Limit(nodes=1),
+        strategy=strategy,
     )
-    print(
-        {'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}
-    )
+    with open(f'puzzles-{strategy}.txt', 'w') as f:
+        num_correct = 0
+        for puzzle_id, puzzle in puzzles.iterrows():
+            correct = evaluate_puzzle_from_pandas_row(
+                puzzle=puzzle,
+                engine=engine,
+            )
+            num_correct += correct
+            f.write(str({'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}) + '\n')
+        print(f'{strategy}: {num_correct / len(puzzles):.2%}')
 
 
 if __name__ == '__main__':

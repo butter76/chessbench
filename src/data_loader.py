@@ -33,8 +33,22 @@ import torch
 import chess
 import random
 import math
+from scipy.stats import norm
 
 NUM_BINS = 81
+
+def _process_prob(
+    win_prob: float,
+) -> np.ndarray:
+  bin_width = 1.0 / NUM_BINS
+  sigma = bin_width * 0.75
+  bin_starts = np.arange(0.0, 1.0, bin_width)
+  bin_ends = bin_starts + bin_width
+
+  probs = norm.cdf(bin_ends, loc=win_prob, scale=sigma) - norm.cdf(bin_starts, loc=win_prob, scale=sigma)
+  # Normalize the probabilities
+  probs = probs / probs.sum(keepdims=True)
+  return probs
 
 def _process_fen(fen: str) -> np.ndarray:
   return tokenizer.tokenize(fen).astype(np.int32)
@@ -145,13 +159,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
         weights[s1, s2] = 1 / (1 + math.e ** (4 - 4 * (win_prob / (value_prob + 0.01))))
 
 
-    bin_width = 1.0 / (NUM_BINS - 1)
-    sigma = bin_width * 0.75
-    bin_centers = np.arange(0.0, 1.0 + bin_width, bin_width)
-
-    diffs = value_prob - bin_centers
-    probs = np.exp(-0.5 * (diffs / sigma) ** 2)
-    probs = probs / probs.sum(keepdims=True)
+    probs = _process_prob(value_prob)
 
     return state, legal_actions, actions, probs, np.array([value_prob]), policy, weights
 

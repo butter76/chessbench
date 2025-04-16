@@ -4,6 +4,8 @@ from itertools import cycle
 import os
 from typing import Any, cast
 
+import chess
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,7 +16,8 @@ torch.set_printoptions(profile="full")
 from tqdm import tqdm
 
 from searchless_chess.src import config as config_lib
-
+from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTransformerEngine
+from searchless_chess.src.puzzles import evaluate_puzzle_from_pandas_row
 from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
 
@@ -146,7 +149,7 @@ def train(
                 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2']))
 
             
             # Backward pass
@@ -213,7 +216,7 @@ def train(
 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2']))
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()
@@ -237,9 +240,9 @@ def train(
         print({
             "epoch": epoch + 1,
             "train_loss": avg_loss,
-            **{f'{k}': f'{v:.5f}' for k,v in metrics_loss.items()},
+            **{f'{k}': f'{v:.6f}' for k,v in metrics_loss.items()},
             "val_loss": avg_val_loss,
-            **{f'val_{k}': f'{v:.5f}' for k,v in val_metrics_loss.items()},
+            **{f'val_{k}': f'{v:.6f}' for k,v in val_metrics_loss.items()},
             'lr': f'{scheduler.get_last_lr()[0]:.5f}',
             'step': step,
         })
@@ -278,7 +281,7 @@ def main():
     # Create model config
     model_config = TransformerConfig(
         embedding_dim=256,
-        num_layers=8,
+        num_layers=16,
         num_heads=16,
         widening_factor=3,
         dropout=0,
@@ -310,10 +313,10 @@ def main():
         compile=True,
         max_grad_norm=1.0,
         log_frequency=1,
-        num_steps=60000 * 3 * 10,
+        num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/av-new-standard/',
+        save_checkpoint_path='../checkpoints/avs2-opt-policy-split/',
     )
     
     # Train model
@@ -321,8 +324,33 @@ def main():
         train_config=train_config,
         model_config=model_config,
     )
+
+    puzzles_path = os.path.join(
+        os.getcwd(),
+        '../data/puzzles.csv',
+    )
+    puzzles = pd.read_csv(puzzles_path, nrows=10000)
+    for strategy in [MoveSelectionStrategy.VALUE, MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.POLICY_SPLIT, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
+        engine = MyTransformerEngine(
+            f'{train_config.save_checkpoint_path}checkpoint_{train_config.num_steps}.pt',
+            chess.engine.Limit(nodes=1),
+            strategy=strategy,
+        )
+        with open(f'puzzles-{strategy}.txt', 'w') as f:
+            num_correct = 0
+            for puzzle_id, puzzle in puzzles.iterrows():
+                correct = evaluate_puzzle_from_pandas_row(
+                    puzzle=puzzle,
+                    engine=engine,
+                )
+                num_correct += correct
+                f.write(str({'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}) + '\n')
+            print(f'{strategy}: {num_correct / len(puzzles):.2%}')
+
     
     print("Training completed!")
+
+
     return model
 
 

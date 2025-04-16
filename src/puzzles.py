@@ -48,6 +48,8 @@ _STRATEGY = flags.DEFINE_enum(
         'policy',
         'policy_split',
         'opt_policy_split',
+        'negamax',
+        'alpha_beta',
     ],
     help='The move selection strategy to use for my_engine.',
 )
@@ -102,7 +104,7 @@ def main(argv: Sequence[str]) -> None:
   )
   puzzles = pd.read_csv(puzzles_path, nrows=_NUM_PUZZLES.value)
   engine = MyTransformerEngine(
-        '../checkpoints/avs2-opt-policy-split/checkpoint_3000.pt',
+        '../checkpoints/avs2-opt-policy-split/checkpoint_300000.pt',
         chess.engine.Limit(nodes=1),
         strategy=_STRATEGY.value,
   )

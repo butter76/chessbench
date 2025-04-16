@@ -330,7 +330,7 @@ def main():
         '../data/puzzles.csv',
     )
     puzzles = pd.read_csv(puzzles_path, nrows=10000)
-    for strategy in [MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.POLICY_SPLIT, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
+    for strategy in [MoveSelectionStrategy.VALUE, MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.POLICY_SPLIT, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
         engine = MyTransformerEngine(
             f'{train_config.save_checkpoint_path}checkpoint_{train_config.num_steps}.pt',
             chess.engine.Limit(nodes=1),

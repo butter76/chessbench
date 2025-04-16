@@ -36,6 +36,7 @@ import math
 from scipy.stats import norm
 
 NUM_BINS = 81
+S = tokenizer.SEQUENCE_LENGTH
 
 def _process_prob(
     win_prob: float,
@@ -124,20 +125,21 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
   ):
   
     fen, move_values = constants.CODERS['action_values'].decode(element)
+    stm = fen.split(' ')[1]
+    flip = stm == 'b'
     state = _process_fen(fen)
-    legal_actions = np.zeros((77, 77))
-    actions = np.zeros((77, 77))
-    policy = np.zeros((77, 77))
-    weights = np.zeros((77, 77))
+    legal_actions = np.zeros((S, S))
+    actions = np.zeros((S, S))
+    policy = np.zeros((S, S))
+    weights = np.zeros((S, S))
 
     ## Validation
     # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
     assert len(move_values) != 0
 
     value_prob = max(win_prob for _, win_prob in move_values)
-    set_policy = False
     for move, win_prob in move_values:
-      s1 = utils._parse_square(move[0:2])
+      s1 = utils._parse_square(move[0:2], flip)
       if move[4:] in ['R', 'r']:
         s2 = 64
       elif move[4:] in ['B', 'b']:
@@ -146,12 +148,11 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
         s2 = 66
       else:
         assert move[4:] in ['Q', 'q', '']
-        s2 = utils._parse_square(move[2:4])
+        s2 = utils._parse_square(move[2:4], flip)
       legal_actions[s1, s2] = 1
       actions[s1, s2] = win_prob
-      if win_prob == value_prob and not set_policy:
+      if win_prob == value_prob:
         policy[s1, s2] = 1
-        set_policy = True
       
       if win_prob >= value_prob * 0.95:
         weights[s1, s2] = 1
@@ -160,6 +161,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
 
 
     probs = _process_prob(value_prob)
+    policy = policy / policy.sum()
 
     return state, legal_actions, actions, probs, np.array([value_prob]), policy, weights
 

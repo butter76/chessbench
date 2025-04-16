@@ -15,8 +15,8 @@
 
 """Implements tokenization of FEN strings."""
 
-import jaxtyping as jtp
 import numpy as np
+from searchless_chess.src.utils import _parse_square
 
 
 # pyfmt: disable
@@ -31,32 +31,27 @@ _CHARACTERS = [
     '7',
     '8',
     '9',
-    'a',
-    'b',
-    'c',
-    'd',
-    'e',
-    'f',
-    'g',
-    'h',
     'p',
+    'b',
     'n',
     'r',
+    'c',
     'k',
     'q',
     'P',
     'B',
     'N',
     'R',
+    'C',
     'Q',
     'K',
-    'w',
+    'x',
     '.',
 ]
 # pyfmt: enable
 _CHARACTERS_INDEX = {letter: index for index, letter in enumerate(_CHARACTERS)}
 _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
-SEQUENCE_LENGTH = 77
+SEQUENCE_LENGTH = 68
 
 
 def tokenize(fen: str):
@@ -73,43 +68,60 @@ def tokenize(fen: str):
     fen: The board position in Forsyth-Edwards Notation.
   """
   # Extracting the relevant information from the FEN.
-  board, side, castling, en_passant, halfmoves_last, fullmoves = fen.split(' ')
-  board = board.replace('/', '')
-  board = side + board
+  raw_board, side, castling, en_passant, halfmoves_last, fullmoves = fen.split(' ')
+  raw_board = raw_board.replace('/', '')
+  board = ''
+  flip = side == 'b'
+  for char in raw_board:
+    if char in _SPACES_CHARACTERS:
+      board += '.' * int(char)
+    else:
+      board += char
+  for char in castling:
+    if char == 'K':
+      white_k_rook = _parse_square("h1")
+      assert board[white_k_rook] == 'R'
+      board = board[:white_k_rook] + 'C' + board[white_k_rook + 1:]
+    elif char == 'Q':
+      white_q_rook = _parse_square("a1")
+      assert board[white_q_rook] == 'R'
+      board = board[:white_q_rook] + 'C' + board[white_q_rook + 1:]
+    elif char == 'k':
+      black_k_rook = _parse_square("h8")
+      assert board[black_k_rook] == 'r'
+      board = board[:black_k_rook] + 'c' + board[black_k_rook + 1:]
+    elif char == 'q':
+      black_q_rook = _parse_square("a8")
+      assert board[black_q_rook] == 'r'
+      board = board[:black_q_rook] + 'c' + board[black_q_rook + 1:]
+  if flip:
+    board = board[56:64] + board[48:56] + board[40:48] + board[32:40] + board[24:32] + board[16:24] + board[8:16] + board[0:8]
+    board = board.swapcase()
+  if en_passant != '-':
+    en_sq = _parse_square(en_passant, flip=flip)
+    assert board[en_sq] == '.'
+    board = board[:en_sq] + 'x' + board[en_sq + 1:]
 
+    
+  board += '.'
   indices = list()
 
   for char in board:
-    if char in _SPACES_CHARACTERS:
-      indices.extend(int(char) * [_CHARACTERS_INDEX['.']])
-    else:
-      indices.append(_CHARACTERS_INDEX[char])
+    indices.append(_CHARACTERS_INDEX[char])
 
-  if castling == '-':
-    indices.extend(4 * [_CHARACTERS_INDEX['.']])
-  else:
-    for char in castling:
-      indices.append(_CHARACTERS_INDEX[char])
-    # Padding castling to have exactly 4 characters.
-    if len(castling) < 4:
-      indices.extend((4 - len(castling)) * [_CHARACTERS_INDEX['.']])
-
-  if en_passant == '-':
-    indices.extend(2 * [_CHARACTERS_INDEX['.']])
-  else:
-    # En passant is a square like 'e3'.
-    for char in en_passant:
-      indices.append(_CHARACTERS_INDEX[char])
+  # if castling == '-':
+  #   indices.extend(4 * [_CHARACTERS_INDEX['.']])
+  # else:
+  #   for char in castling:
+  #     indices.append(_CHARACTERS_INDEX[char])
+  #   # Padding castling to have exactly 4 characters.
+  #   if len(castling) < 4:
+  #     indices.extend((4 - len(castling)) * [_CHARACTERS_INDEX['.']])
 
   # Three digits for halfmoves (since last capture) is enough since the game
   # ends at 50.
   halfmoves_last += '.' * (3 - len(halfmoves_last))
   indices.extend([_CHARACTERS_INDEX[x] for x in halfmoves_last])
-
-  # Three digits for full moves is enough (no game lasts longer than 999
-  # moves).
-  fullmoves += '.' * (3 - len(fullmoves))
-  indices.extend([_CHARACTERS_INDEX[x] for x in fullmoves])
 
   assert len(indices) == SEQUENCE_LENGTH
 

@@ -316,7 +316,7 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/avs2-opt-policy-split/',
+        save_checkpoint_path='../checkpoints/p1-standard/',
     )
     
     # Train model
@@ -330,7 +330,7 @@ def main():
         '../data/puzzles.csv',
     )
     puzzles = pd.read_csv(puzzles_path, nrows=10000)
-    for strategy in [MoveSelectionStrategy.VALUE, MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.POLICY_SPLIT, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
+    for strategy in [MoveSelectionStrategy.VALUE, MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
         engine = MyTransformerEngine(
             f'{train_config.save_checkpoint_path}checkpoint_{train_config.num_steps}.pt',
             chess.engine.Limit(nodes=1),

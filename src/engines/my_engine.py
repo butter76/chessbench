@@ -25,7 +25,6 @@ class MoveSelectionStrategy(str, Enum):
     AVS = "avs"
     AVS2 = "avs2"
     POLICY = "policy"
-    POLICY_SPLIT = "policy_split"
     OPT_POLICY_SPLIT = "opt_policy_split"
     NEGAMAX = "negamax"
     ALPHA_BETA = "alpha_beta"
@@ -66,10 +65,10 @@ class MyTransformerEngine(engine.Engine):
 
         self.model.load_state_dict(checkpoint['model'])
 
-    def _move_to_indices(self, move: chess.Move) -> tuple[int, int]:
+    def _move_to_indices(self, move: chess.Move, flip: bool) -> tuple[int, int]:
         """Converts a chess.Move object to source and target indices for policy/AVS heads."""
         move_uci = move.uci()
-        s1 = _parse_square(move_uci[0:2])
+        s1 = _parse_square(move_uci[0:2], flip)
         
         # Handle promotions
         promotion = move.promotion
@@ -81,7 +80,7 @@ class MyTransformerEngine(engine.Engine):
             s2 = 66
         else:
             # Regular move
-            s2 = _parse_square(move_uci[2:4])
+            s2 = _parse_square(move_uci[2:4], flip)
         return s1, s2
 
     def _get_ordered_moves(self, board: chess.Board, ordering_strategy: MoveSelectionStrategy | None) -> list[chess.Move]:
@@ -93,14 +92,13 @@ class MyTransformerEngine(engine.Engine):
         # Use the specified policy/AVS head for ordering if provided
         assert ordering_strategy and ordering_strategy in [
             MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2,
-            MoveSelectionStrategy.POLICY, MoveSelectionStrategy.POLICY_SPLIT,
-            MoveSelectionStrategy.OPT_POLICY_SPLIT]
+            MoveSelectionStrategy.POLICY, MoveSelectionStrategy.OPT_POLICY_SPLIT]
         
         output_tensor = self.analyse_shallow(board)[ordering_strategy.value][0, :, :].clone()
         move_scores = []
         
         for move in board.legal_moves:
-            s1, s2 = self._move_to_indices(move)
+            s1, s2 = self._move_to_indices(move, flip=board.turn == chess.BLACK)
             score = output_tensor[s1, s2].item()
             move_scores.append(score)
             
@@ -256,13 +254,12 @@ class MyTransformerEngine(engine.Engine):
                     board.pop()
                 else:
                     board.pop()
-                    s1, s2 = self._move_to_indices(move)
+                    s1, s2 = self._move_to_indices(move, flip=board.turn == chess.BLACK)
                     best_res = avs[s1, s2].item()
                 move_values.append((best_res, i))
             (best_value, best_idx) = max(move_values)
             best_move = list(board.legal_moves)[best_idx]
         elif self.strategy == MoveSelectionStrategy.POLICY or \
-             self.strategy == MoveSelectionStrategy.POLICY_SPLIT or \
              self.strategy == MoveSelectionStrategy.OPT_POLICY_SPLIT:
             move_values = []
             policy = self.analyse_shallow(board)[self.strategy][0, :, :].clone()
@@ -273,7 +270,7 @@ class MyTransformerEngine(engine.Engine):
                     return move
                 board.pop()
                 
-                s1, s2 = self._move_to_indices(move)
+                s1, s2 = self._move_to_indices(move, flip=board.turn == chess.BLACK)
                 best_res = policy[s1, s2].item()
 
                 move_values.append((best_res, i))

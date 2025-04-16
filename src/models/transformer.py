@@ -322,8 +322,9 @@ class ChessTransformer(nn.Module):
         for layer in self.transformer:
             x = layer(x)
 
+        x = self.final_ln(x)
 
-        qk = self.final_qk_proj(self.final_ln(x))
+        qk = self.final_qk_proj(x)
         qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
 
         q, k = qk.unbind(dim=2)
@@ -378,11 +379,11 @@ class ChessTransformer(nn.Module):
         opt_masked_policy_split[~legal_moves] = -1e9
 
         # Reshape for softmax over all possible moves
-        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, 77*77]
-        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, 77*77]
+        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, S*S]
+        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, S*S]
 
         # Compute cross entropy loss
-        policy_loss = F.cross_entropy(masked_policy_flat, target_policy_flat.argmax(dim=1))
+        policy_loss = -torch.sum(target_policy_flat * F.log_softmax(masked_policy_flat, dim=-1), dim=-1).mean()
 
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),

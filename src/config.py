@@ -83,6 +83,12 @@ class TrainConfig:
   # Compile the model
   compile: bool = False
 
+  # SWA parameters
+  use_swa: bool = False
+  swa_start_step: int = 0 # Step to start SWA updates
+  swa_lr: float = 5e-5 # Learning rate for SWA phase
+  swa_update_freq: int = 10 # How often (in steps) to update the SWA model
+
 
 @dataclasses.dataclass(kw_only=True)
 class EvalConfig:

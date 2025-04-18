@@ -68,6 +68,17 @@ def scaled_dot_product_attention(query, key, value, attn_mask=None,
     attn_weight = torch.softmax(attn_weight, dim=-1)
     return attn_weight @ value
 
+class Expert(nn.Module):
+    def __init__(self, d_model, dim_feedforward, activation, bias=True, device=None, dtype=None):
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
+        self.activation = activation
+        self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias, **factory_kwargs)
+
+    def forward(self, x):
+        return self.linear2(self.activation(self.linear1(x)))
+
 class MultiHeadAttention(nn.Module):
     """
     Computes multi-head attention. Supports nested or padded tensors.
@@ -183,6 +194,9 @@ class MyTransformerEncoderLayer(nn.Module):
         layer_norm_eps=1e-5,
         norm_first=False,
         bias=True,
+        use_moe: bool = False,
+        num_experts: int = 8,
+        top_k: int = 1,
         device=None,
         dtype=None,
     ):
@@ -199,18 +213,27 @@ class MyTransformerEncoderLayer(nn.Module):
             bias=bias,
             **factory_kwargs,
         )
-        self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
-        # self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias, **factory_kwargs)
-
+        
         self.norm_first = norm_first
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
-
-        # self.dropout1 = nn.Dropout(dropout)
-        # self.dropout2 = nn.Dropout(dropout)
-        self.activation = activation
         
+        self.activation = activation
+        self.use_moe = use_moe
+        self.num_experts = num_experts
+        self.top_k = top_k
+
+        if use_moe:
+            self.experts = nn.ModuleList([Expert(d_model, dim_feedforward, activation, bias, **factory_kwargs) for _ in range(num_experts)])
+            # Shared expert always runs
+            self.shared_expert = Expert(d_model, dim_feedforward, activation, bias, **factory_kwargs)
+            # Router determines weights for the experts (not the shared one)
+            self.router = nn.Linear(d_model, num_experts, bias=False, **factory_kwargs)
+        else:
+            # Standard FFN layers if not using MoE
+            self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
+            self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias, **factory_kwargs)
+
 
     def _sa_block(self, x, attn_mask, is_causal):
         x = self.self_attn(x, x, x, is_causal=is_causal)
@@ -219,6 +242,55 @@ class MyTransformerEncoderLayer(nn.Module):
     def _ff_block(self, x):
         x = self.linear2(self.activation(self.linear1(x)))
         return x
+
+    def _moe_block(self, ffn_input: torch.Tensor) -> torch.Tensor:
+        """Applies the Mixture of Experts block with sequence-level routing."""
+        batch_size, seq_len, d_model = ffn_input.shape
+        # Use first token representation for sequence-level routing
+        sequence_repr = ffn_input[:, 0, :] # Shape: [B, D]
+        router_logits = self.router(sequence_repr) # Shape: [B, num_experts]
+
+        # Select Top-K experts per sequence
+        top_k_logits, top_k_indices = torch.topk(router_logits, self.top_k, dim=-1) # Shape: [B, top_k]
+        gates = F.softmax(top_k_logits, dim=-1) # Shape: [B, top_k]
+
+        # Initialize output tensor for the selected experts' contribution
+        moe_output = torch.zeros_like(ffn_input)
+
+        # Iterate over the K selected experts for each sequence
+        for k in range(self.top_k):
+            # Get the index of the k-th expert for each sequence in the batch
+            expert_indices_k = top_k_indices[:, k] # Shape: [B]
+            # Get the gate value for the k-th expert for each sequence
+            gate_values_k = gates[:, k].unsqueeze(-1).unsqueeze(-1) # Shape: [B, 1, 1]
+
+            # Process each expert that was selected by at least one sequence as their k-th choice
+            for expert_idx in range(self.num_experts):
+                # Find which sequences in the batch selected this 'expert_idx' as their k-th choice
+                batch_indices = torch.where(expert_indices_k == expert_idx)[0]
+
+                if batch_indices.numel() > 0:
+                    # Select the input sequences for this expert at this k-th position
+                    expert_input = ffn_input[batch_indices] # Shape: [num_selected, S, D]
+
+                    # Compute the output of the selected expert
+                    expert_output = self.experts[expert_idx](expert_input) # Shape: [num_selected, S, D]
+
+                    # Apply the corresponding gates for the k-th expert choice
+                    # We need gate_values_k specific to the selected batch_indices
+                    weighted_output = expert_output * gate_values_k[batch_indices] # Shape: [num_selected, S, D]
+
+                    # Add (accumulate) the weighted output to the final MoE output tensor
+                    # index_add_ handles adding contributions if an expert is chosen multiple times (though not possible with top_k=1)
+                    # and correctly places results for the selected batch items.
+                    moe_output.index_add_(0, batch_indices, weighted_output)
+
+        # Compute output of the shared expert (applied to all sequences)
+        shared_output = self.shared_expert(ffn_input)
+
+        # Combine MoE output (sum of top-k weighted experts) and shared expert output
+        ff_output = moe_output + shared_output
+        return ff_output
 
     def forward(self, src, src_mask=None, is_causal=False):
         '''
@@ -229,11 +301,35 @@ class MyTransformerEncoderLayer(nn.Module):
         '''
         x = src
         if self.norm_first:
-            x = x + self._sa_block(self.norm1(x), src_mask, is_causal)
-            x = x + self._ff_block(self.norm2(x))
-        else:
-            x = self.norm1(x + self._sa_block(x, src_mask, is_causal))
-            x = self.norm2(x + self._ff_block(x))
+            # --- Self-Attention (Pre-LN) ---
+            attn_output = self._sa_block(self.norm1(x), src_mask, is_causal)
+            x = x + attn_output # Residual 1
+
+            # --- FFN / MoE (Pre-LN) ---
+            ffn_input = self.norm2(x) # Norm before FFN/MoE
+            if self.use_moe:
+                 ff_output = self._moe_block(ffn_input)
+            else:
+                 # Original FFN block if MoE is not used
+                 ff_output = self._ff_block(ffn_input)
+
+            x = x + ff_output # Residual 2
+
+        else: # Not norm_first (Post-LN)
+            # --- Self-Attention (Post-LN) ---
+            attn_output = self._sa_block(x, src_mask, is_causal)
+            x = self.norm1(x + attn_output) # Residual 1 + Norm 1
+
+            # --- FFN / MoE (Post-LN) ---
+            ffn_input = x # Input to FFN/MoE is the output of the first block
+            if self.use_moe:
+                ff_output = self._moe_block(ffn_input)
+            else:
+                 # Original FFN block if MoE is not used
+                 ff_output = self._ff_block(ffn_input)
+
+            x = self.norm2(x + ff_output) # Residual 2 + Norm 2
+
         return x
 
 class ChessTransformer(nn.Module):
@@ -271,7 +367,15 @@ class ChessTransformer(nn.Module):
                 dropout=config.dropout,
                 activation=self.activation,
                 norm_first=True,
-            ) for _ in range(3 * config.num_layers // 4)]
+            ) for _ in range(3 * config.num_layers // 4 - 2)],
+            *[MyTransformerEncoderLayer(
+                d_model=config.embedding_dim,
+                nhead=config.num_heads,
+                dim_feedforward=int(config.embedding_dim * config.widening_factor * 2),
+                dropout=config.dropout,
+                activation=self.activation,
+                norm_first=True,
+            ) for _ in range(2)],
         ])
 
         # # DENSE ATTENTION

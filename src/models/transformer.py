@@ -249,6 +249,7 @@ class MyTransformerEncoderLayer(nn.Module):
         # Use first token representation for sequence-level routing
         sequence_repr = ffn_input[:, 0, :] # Shape: [B, D]
         router_logits = self.router(sequence_repr) # Shape: [B, num_experts]
+        router_probs = F.softmax(router_logits, dim=-1)
 
         # Select Top-K experts per sequence
         top_k_logits, top_k_indices = torch.topk(router_logits, self.top_k, dim=-1) # Shape: [B, top_k]
@@ -288,9 +289,13 @@ class MyTransformerEncoderLayer(nn.Module):
         # Compute output of the shared expert (applied to all sequences)
         shared_output = self.shared_expert(ffn_input)
 
+        # Calculate load balance metric
+        mean_router_probs = torch.mean(router_probs, dim=0)
+        load_balancing_loss = self.num_experts * torch.sum(mean_router_probs * mean_router_probs)
+
         # Combine MoE output (sum of top-k weighted experts) and shared expert output
         ff_output = moe_output + shared_output
-        return ff_output
+        return ff_output, load_balancing_loss
 
     def forward(self, src, src_mask=None, is_causal=False):
         '''
@@ -308,10 +313,11 @@ class MyTransformerEncoderLayer(nn.Module):
             # --- FFN / MoE (Pre-LN) ---
             ffn_input = self.norm2(x) # Norm before FFN/MoE
             if self.use_moe:
-                 ff_output = self._moe_block(ffn_input)
+                 ff_output, load_balancing_loss = self._moe_block(ffn_input)
             else:
                  # Original FFN block if MoE is not used
                  ff_output = self._ff_block(ffn_input)
+                 load_balancing_loss = None
 
             x = x + ff_output # Residual 2
 
@@ -323,14 +329,14 @@ class MyTransformerEncoderLayer(nn.Module):
             # --- FFN / MoE (Post-LN) ---
             ffn_input = x # Input to FFN/MoE is the output of the first block
             if self.use_moe:
-                ff_output = self._moe_block(ffn_input)
+                ff_output, load_balancing_loss = self._moe_block(ffn_input)
             else:
                  # Original FFN block if MoE is not used
                  ff_output = self._ff_block(ffn_input)
-
+                 load_balancing_loss = None
             x = self.norm2(x + ff_output) # Residual 2 + Norm 2
 
-        return x
+        return x, load_balancing_loss
 
 class ChessTransformer(nn.Module):
     """PyTorch implementation of the transformer model."""
@@ -371,10 +377,13 @@ class ChessTransformer(nn.Module):
             *[MyTransformerEncoderLayer(
                 d_model=config.embedding_dim,
                 nhead=config.num_heads,
-                dim_feedforward=int(config.embedding_dim * config.widening_factor * 2),
+                dim_feedforward=int(config.embedding_dim * config.widening_factor),
                 dropout=config.dropout,
                 activation=self.activation,
                 norm_first=True,
+                use_moe=True,
+                num_experts=8,
+                top_k=1,
             ) for _ in range(2)],
         ])
 
@@ -423,8 +432,12 @@ class ChessTransformer(nn.Module):
         batch_size = x.size(0)
         x = self.embedding(x)
         x = x + self.pos_embedding
+
+        total_aux_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
         for layer in self.transformer:
-            x = layer(x)
+            x, aux_loss = layer(x)
+            if aux_loss is not None:
+                total_aux_loss += aux_loss
 
         x = self.final_ln(x)
 
@@ -455,6 +468,7 @@ class ChessTransformer(nn.Module):
 
         return {
             'self': self.self_head(x),
+            'aux_loss': total_aux_loss,
             # 'hl': hl,
             'value': value,
             'hl': hl,
@@ -491,6 +505,7 @@ class ChessTransformer(nn.Module):
 
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
+            'aux_loss': output['aux_loss'] * 0.01,
             'value': F.mse_loss(output['value'], target['value']),
             # 'valuel': F.binary_cross_entropy_with_logits(output['valuel'], target['value']),
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),

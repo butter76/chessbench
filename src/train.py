@@ -92,12 +92,10 @@ def train(
     #     eta_min=train_config.learning_rate / 100  # Minimum learning rate
     # )
 
-    scheduler = torch.optim.lr_scheduler.LinearLR(
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        start_factor=1.0,
-        end_factor=1.0,
-        total_iters=100,  # Number of epochs for the decay
-        last_epoch=-1
+        T_max=170,  # Total number of steps for one cosine cycle
+        eta_min=train_config.learning_rate / 10  # Minimum learning rate (1/10th of initial)
     )
 
     if checkpoint is not None and 'scheduler' in checkpoint:

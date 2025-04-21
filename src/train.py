@@ -77,7 +77,8 @@ def train(
     if checkpoint is not None and 'optimizer' in checkpoint:
         print("Loading Optimizer from checkpoint...")
         optimizer.load_state_dict(checkpoint['optimizer'])
-
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = train_config.learning_rate
 
     scaler = GradScaler(device)
     if checkpoint is not None and 'scaler' in checkpoint:
@@ -92,17 +93,34 @@ def train(
     #     eta_min=train_config.learning_rate / 100  # Minimum learning rate
     # )
 
-    scheduler = torch.optim.lr_scheduler.LinearLR(
+    # Define the two schedulers
+    initial_steps = 90
+    total_steps = 170
+    end_lr_phase1 = 5e-4
+    initial_lr = train_config.learning_rate # Should be 6.5e-4 now
+
+    # Scheduler 1: Linear decay for the first `initial_steps`
+    scheduler1 = torch.optim.lr_scheduler.LinearLR(
         optimizer,
-        start_factor=1.0,
-        end_factor=1.0,
-        total_iters=100,  # Number of epochs for the decay
-        last_epoch=-1
+        start_factor=1.0, # Start at the base LR (6.5e-4)
+        end_factor=end_lr_phase1 / initial_lr, # Decay to 5e-4
+        total_iters=initial_steps
     )
 
-    if checkpoint is not None and 'scheduler' in checkpoint:
-        print("Loading Scheduler from checkpoint...")
-        scheduler.load_state_dict(checkpoint['scheduler'])
+    # Scheduler 2: Cosine Annealing for the remaining steps
+    # The base LR for this scheduler will be the LR at the end of scheduler1 (5e-4)
+    scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=total_steps - initial_steps, # Number of steps for cosine cycle
+        eta_min=end_lr_phase1 / 10  # Minimum learning rate (1/8th of 5e-4)
+    )
+
+    # Combine schedulers sequentially
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[scheduler1, scheduler2],
+        milestones=[initial_steps]
+    )
 
     train_iter = train_dataloader.__iter__()
 
@@ -288,7 +306,7 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=5.6e-4,
+        learning_rate=6.5e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -315,7 +333,7 @@ def main():
         num_steps=60000 * 3 * 10,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/layer-16-480-15-56lr-better-policy-mixed-norm-no-nla/',
+        save_checkpoint_path='../checkpoints/layer-16-480-15-56lr-new-annealing/',
     )
     
     # Train model

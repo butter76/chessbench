@@ -281,7 +281,7 @@ def main():
     # Create model config
     model_config = TransformerConfig(
         embedding_dim=256,
-        num_layers=16,
+        num_layers=40,
         num_heads=16,
         widening_factor=3,
         dropout=0,
@@ -316,7 +316,7 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p1-standard/',
+        save_checkpoint_path='../checkpoints/p1-standard-smolgen-40l/',
     )
     
     # Train model

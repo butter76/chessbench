@@ -17,6 +17,8 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from searchless_chess.src.models.dense_attention.danet_layers import DANetLayer
 from searchless_chess.src.models.dense_attention.model_config import ModelConfig
 
+S = tokenizer.SEQUENCE_LENGTH
+
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
     """Hyperparameters used in the Transformer architectures."""
@@ -42,29 +44,14 @@ class TransformerConfig:
     apply_post_ln: bool = True
 
 # Efficient implementation equivalent to the following:
-def scaled_dot_product_attention(query, key, value, attn_mask=None,
+def scaled_dot_product_attention(query, key, value, bias, attn_mask=None,
         is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
     L, S = query.size(-2), key.size(-2)
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
-    if is_causal:
-        assert attn_mask is None
-        temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
-        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-        attn_bias.to(query.dtype)
 
-    if attn_mask is not None:
-        if attn_mask.dtype == torch.bool:
-            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
-        else:
-            attn_bias = attn_mask + attn_bias
-
-    if enable_gqa:
-        key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
-        value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
-
-    attn_weight = query @ key.transpose(-2, -1) * scale_factor
-    attn_weight += attn_bias
+    product = query @ key.transpose(-1, -2)
+    
+    attn_weight = (product) * scale_factor + bias
     attn_weight = torch.softmax(attn_weight, dim=-1)
     return attn_weight @ value
 
@@ -99,6 +86,20 @@ class MultiHeadAttention(nn.Module):
         self.nheads = nheads
         self.dropout = dropout
         self._qkv_same_embed_dim = E_q == E_k and E_q == E_v
+
+        seq_len = S
+
+        self.flatten = nn.Linear(E_q, 32)
+        self.smolgen = nn.Sequential(
+            nn.Linear(32 * S, 256),
+            nn.LayerNorm(256, eps=1e-5),
+            nn.Linear(256, 256 * self.nheads),
+        )
+        self.smolgen_shared = nn.Sequential(
+            nn.LayerNorm(256, eps=1e-5),
+            nn.Linear(256, S * S),
+        )
+
         if self._qkv_same_embed_dim:
           self.packed_proj = nn.Linear(E_q, E_total * 3, bias=bias, **factory_kwargs)
         else:
@@ -129,6 +130,10 @@ class MultiHeadAttention(nn.Module):
         Returns:
             attn_output (torch.Tensor): output of shape (N, L_t, E_q)
         """
+        flat = self.flatten(query).view(query.size(0), -1)
+        smol = self.smolgen(flat).view(-1, self.nheads, 256)
+        smol_bias = self.smolgen_shared(smol).view(-1, self.nheads, S, S)
+
         # Step 1. Apply input projection
         if self._qkv_same_embed_dim:
             if query is key and key is value:
@@ -161,8 +166,8 @@ class MultiHeadAttention(nn.Module):
         # with torch.nn.attention.sdpa_kernel(
         #     SDPBackend.CUDNN_ATTENTION
         # ):
-        attn_output = F.scaled_dot_product_attention(
-            query, key, value, is_causal=is_causal)
+        attn_output = scaled_dot_product_attention(
+            query, key, value, is_causal=is_causal, bias=smol_bias)
         # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)
 
@@ -263,7 +268,7 @@ class ChessTransformer(nn.Module):
                 dropout=config.dropout,
                 activation=self.activation,
                 norm_first=False,
-            ) for _ in range(config.num_layers // 4)],
+            ) for _ in range(8)],
             *[MyTransformerEncoderLayer(
                 d_model=config.embedding_dim,
                 nhead=config.num_heads,
@@ -271,7 +276,7 @@ class ChessTransformer(nn.Module):
                 dropout=config.dropout,
                 activation=self.activation,
                 norm_first=True,
-            ) for _ in range(3 * config.num_layers // 4)]
+            ) for _ in range(config.num_layers - 8)]
         ])
 
         # # DENSE ATTENTION

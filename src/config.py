@@ -78,6 +78,8 @@ class TrainConfig:
   save_checkpoint_path: str
   # A checkpoint to resume from (if `None`, training starts from scratch).
   checkpoint_path: str | None = None
+  # The path to the teacher checkpoint.
+  teacher_checkpoint_path: str | None = None
   # For AdamW
   weight_decay: float = 0.01
   # Compile the model

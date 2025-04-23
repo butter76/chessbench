@@ -6,7 +6,6 @@ import chess
 import chess.engine
 import numpy as np
 
-from searchless_chess.src import constants
 from searchless_chess.src import tokenizer
 from searchless_chess.src import utils
 from searchless_chess.src.engines import engine

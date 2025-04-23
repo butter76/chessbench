@@ -9,6 +9,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 torch.set_default_dtype(torch.float32)
@@ -20,6 +21,7 @@ from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTran
 from searchless_chess.src.puzzles import evaluate_puzzle_from_pandas_row
 from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
+from searchless_chess.src.models.teacher import ChessTransformer as Teacher
 
 
 def train(
@@ -43,6 +45,7 @@ def train(
     checkpoint_path = train_config.checkpoint_path
     checkpoint = None
     compiled = False
+    teacher = None
     if checkpoint_path is not None and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path)
         model_config =  checkpoint['model_config']
@@ -68,6 +71,18 @@ def train(
             compiled = True
         model = model.to(device)
 
+    if train_config.teacher_checkpoint_path is not None and os.path.exists(train_config.teacher_checkpoint_path):
+        teacher_checkpoint = torch.load(train_config.teacher_checkpoint_path)
+        teacher_model_config = teacher_checkpoint['model_config']
+        teacher = Teacher(config=teacher_model_config).to(device)
+
+        if teacher_checkpoint['compiled']:
+            teacher = cast(Teacher, torch.compile(teacher))
+
+        teacher.load_state_dict(teacher_checkpoint['model'])
+        print(f"Loaded teacher from checkpoint: {train_config.teacher_checkpoint_path}")
+
+        teacher.eval()
     # Setup optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -132,6 +147,15 @@ def train(
             value_prob = value_prob.to(torch.float32).to(device)
             policy = policy.to(torch.float32).to(device)
             weights = weights.to(torch.float32).to(device)
+
+            if teacher is not None:
+                with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
+                    lesson = teacher(x)
+                avs = F.sigmoid(lesson['avs']).clone()
+                hl = F.softmax(lesson['hl'], dim=-1).clone()
+                policy = lesson['policy'].clone()
+                policy[~legal_actions.bool()] = -1e5
+                policy = F.softmax(policy.view(-1, 68 * 68), dim=-1).view(-1, 68, 68)
 
             target = {
                 'self': x,
@@ -316,7 +340,8 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p1-standard/',
+        save_checkpoint_path='../checkpoints/p1-distillation/',
+        teacher_checkpoint_path='../checkpoints/teacher/teacher.pt',
     )
     
     # Train model

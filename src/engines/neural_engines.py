@@ -18,7 +18,6 @@
 from collections.abc import Callable, Sequence
 
 import chess
-import haiku as hk
 import jax
 import jax.nn as jnn
 import numpy as np
@@ -190,8 +189,8 @@ class BCEngine(NeuralEngine):
 
 
 def wrap_predict_fn(
-    predictor: constants.Predictor,
-    params: hk.Params,
+    predictor,
+    params,
     batch_size: int = 32,
 ) -> PredictFn:
   """Returns a simple prediction function from a predictor and parameters.

@@ -22,7 +22,6 @@ from typing import Any, NamedTuple, Protocol
 
 from apache_beam import coders
 from grain import python as pygrain
-import haiku as hk
 import jaxtyping as jtp
 
 from searchless_chess.src import config as config_lib
@@ -43,14 +42,6 @@ Predictions = Marginals | Conditionals
 LossMask = jtp.Bool[jtp.Array, 'B T']
 
 
-@dataclasses.dataclass
-class Predictor:
-  """Defines the predictor interface."""
-
-  initial_params: Callable[..., hk.MutableParams]
-  predict: Callable[..., Predictions]
-
-
 class DataLoaderBuilder(Protocol):
 
   def __call__(self, config: config_lib.DataConfig) -> pygrain.DataLoader:
@@ -62,27 +53,11 @@ class Evaluator(abc.ABC):
   """Defines the interface of the evaluator that evaluates a predictor."""
 
   @abc.abstractmethod
-  def step(self, params: hk.Params, step: int) -> Mapping[str, Any]:
+  def step(self, params, step: int) -> Mapping[str, Any]:
     """Returns the results of evaluating the predictor with `params`."""
     ...
 
 
-class EvaluatorBuilder(Protocol):
-
-  def __call__(
-      self,
-      predictor: Predictor,
-      config: config_lib.EvalConfig,
-  ) -> Evaluator:
-    """Returns an evaluator for the `predictor` and `config`.
-
-    Args:
-      predictor: The predictor to be evaluated. The training loop continuously
-        saves the predictor's parameters, which are then loaded in the
-        evaluation loop and passed to the evaluator's step method.
-      config: The configuration of the evaluator.
-    """
-    ...
 
 
 CODERS = {

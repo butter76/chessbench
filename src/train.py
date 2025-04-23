@@ -20,6 +20,7 @@ from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTran
 from searchless_chess.src.puzzles import evaluate_puzzle_from_pandas_row
 from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
+from searchless_chess.src.optimizer.soap import SOAP
 
 
 def train(
@@ -68,11 +69,11 @@ def train(
             compiled = True
         model = model.to(device)
 
-    # Setup optimizer
-    optimizer = torch.optim.AdamW(
+    optimizer = SOAP(
         model.parameters(),
         lr=train_config.learning_rate,
-        weight_decay=train_config.weight_decay
+        weight_decay=train_config.weight_decay,
+        precondition_frequency=30,
     )
 
     if checkpoint is not None and 'optimizer' in checkpoint:
@@ -93,12 +94,10 @@ def train(
     #     eta_min=train_config.learning_rate / 100  # Minimum learning rate
     # )
 
-    scheduler = torch.optim.lr_scheduler.LinearLR(
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        start_factor=1.0,
-        end_factor=0.25,  # 4e-4 -> 1e-4
-        total_iters=100,  # Number of epochs for the decay
-        last_epoch=-1
+        T_max=170,  # Total number of steps for one cosine cycle
+        eta_min=train_config.learning_rate / 10  # Minimum learning rate (1/10th of initial)
     )
 
     if checkpoint is not None and 'scheduler' in checkpoint:
@@ -289,7 +288,7 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=4e-4,
+        learning_rate=5.6e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -316,7 +315,7 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p1-standard-smolgen-40l/',
+        save_checkpoint_path='../checkpoints/p1-standard-smolgen-40l-full/',
     )
     
     # Train model

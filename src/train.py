@@ -138,24 +138,19 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, legal_actions, avs, hl, value_prob, policy, weights = next(train_iter)
+            x, legal_actions = next(train_iter)
                 
             x = x.to(torch.long).to(device)
             legal_actions = legal_actions.to(torch.float32).to(device)
-            avs = avs.to(torch.float32).to(device)
-            hl = hl.to(torch.float32).to(device)
-            value_prob = value_prob.to(torch.float32).to(device)
-            policy = policy.to(torch.float32).to(device)
-            weights = weights.to(torch.float32).to(device)
 
-            if teacher is not None:
-                with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
-                    lesson = teacher(x)
-                avs = F.sigmoid(lesson['avs']).clone()
-                hl = F.softmax(lesson['hl'], dim=-1).clone()
-                policy = lesson['policy'].clone()
-                policy[~legal_actions.bool()] = -1e5
-                policy = F.softmax(policy.view(-1, 68 * 68), dim=-1).view(-1, 68, 68)
+            with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
+                lesson = teacher(x)
+            avs = lesson['avs'].clone()
+            hl = F.softmax(lesson['hl'], dim=-1).clone()
+            value_prob = lesson['value'].clone()
+            policy = lesson['policy'].clone()
+            policy[~legal_actions.bool()] = -1e5
+            policy = F.softmax(policy.view(-1, 68 * 68), dim=-1).view(-1, 68, 68)
 
             target = {
                 'self': x,
@@ -164,7 +159,6 @@ def train(
                 'hl': hl,
                 'value': value_prob,
                 'policy': policy,
-                'weights': weights,
             }
             
             with autocast(device, dtype=torch.bfloat16):
@@ -215,15 +209,19 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, legal_actions, avs, hl, value_prob, policy, weights = next(val_iter)
+                x, legal_actions = next(val_iter)
                 
                 x = x.to(torch.long).to(device)
                 legal_actions = legal_actions.to(torch.float32).to(device)
-                avs = avs.to(torch.float32).to(device)
-                hl = hl.to(torch.float32).to(device)
-                value_prob = value_prob.to(torch.float32).to(device)
-                policy = policy.to(torch.float32).to(device)
-                weights = weights.to(torch.float32).to(device)
+
+                with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
+                    lesson = teacher(x)
+                avs = lesson['avs'].clone()
+                hl = F.softmax(lesson['hl'], dim=-1).clone()
+                value_prob = lesson['value'].clone()
+                policy = lesson['policy'].clone()
+                policy[~legal_actions.bool()] = -1e5
+                policy = F.softmax(policy.view(-1, 68 * 68), dim=-1).view(-1, 68, 68)
 
                 target = {
                     'self': x,
@@ -232,7 +230,6 @@ def train(
                     'hl': hl,
                     'value': value_prob,
                     'policy': policy,
-                    'weights': weights,
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
@@ -340,7 +337,7 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p1-distillation/',
+        save_checkpoint_path='../checkpoints/p1-distillation-simple/',
         teacher_checkpoint_path='../checkpoints/teacher/teacher.pt',
     )
     

@@ -129,15 +129,11 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     flip = stm == 'b'
     state = _process_fen(fen)
     legal_actions = np.zeros((S, S))
-    actions = np.zeros((S, S))
-    policy = np.zeros((S, S))
-    weights = np.zeros((S, S))
 
     ## Validation
     # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
     assert len(move_values) != 0
 
-    value_prob = max(win_prob for _, win_prob in move_values)
     for move, win_prob in move_values:
       s1 = utils._parse_square(move[0:2], flip)
       if move[4:] in ['R', 'r']:
@@ -150,20 +146,8 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
         assert move[4:] in ['Q', 'q', '']
         s2 = utils._parse_square(move[2:4], flip)
       legal_actions[s1, s2] = 1
-      actions[s1, s2] = win_prob
-      if win_prob == value_prob:
-        policy[s1, s2] = 1
-      
-      if win_prob >= value_prob * 0.95:
-        weights[s1, s2] = 1
-      else:
-        weights[s1, s2] = 1 / (1 + math.e ** (4 - 4 * (win_prob / (value_prob + 0.01))))
 
-
-    probs = _process_prob(value_prob)
-    policy = policy / policy.sum()
-
-    return state, legal_actions, actions, probs, np.array([value_prob]), policy, weights
+    return state, legal_actions
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

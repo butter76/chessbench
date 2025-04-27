@@ -147,7 +147,37 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
         s2 = utils._parse_square(move[2:4], flip)
       legal_actions[s1, s2] = 1
 
-    return state, legal_actions
+    board = chess.Board(fen)
+    
+    # Pick a random move and push it
+    random_move, _ = random.choice(move_values)
+    board.push_uci(random_move)
+
+    next_fen = board.fen()
+    next_state = _process_fen(next_fen)
+
+    next_moves = engine.get_ordered_legal_moves(board)
+    next_legal_actions = np.zeros((S, S))
+    flip = board.turn == chess.BLACK
+    for move in next_moves:
+      move = move.uci()
+      s1 = utils._parse_square(move[0:2], flip)
+      if move[4:] in ['R', 'r']:
+        s2 = 64
+      elif move[4:] in ['B', 'b']:
+        s2 = 65
+      elif move[4:] in ['N', 'n']:
+        s2 = 66
+      else:
+        assert move[4:] in ['Q', 'q', '']
+        s2 = utils._parse_square(move[2:4], flip)
+      next_legal_actions[s1, s2] = 1
+
+    if len(next_moves) == 0:
+      next_state = state.copy()
+      next_legal_actions = legal_actions.copy()
+
+    return state, legal_actions, next_state, next_legal_actions
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

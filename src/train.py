@@ -138,19 +138,29 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, legal_actions = next(train_iter)
+            x, legal_actions, next_x, next_legal_actions = next(train_iter)
                 
             x = x.to(torch.long).to(device)
             legal_actions = legal_actions.to(torch.float32).to(device)
+            next_x = next_x.to(torch.long).to(device)
+            next_legal_actions = next_legal_actions.to(torch.float32).to(device)
 
             with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
                 lesson = teacher(x)
+                next_lesson = teacher(next_x)
             avs = lesson['avs'].clone()
             hl = F.softmax(lesson['hl'], dim=-1).clone()
             value_prob = lesson['value'].clone()
             policy = lesson['policy'].clone()
             policy[~legal_actions.bool()] = -1e5
             policy = F.softmax(policy.view(-1, 68 * 68), dim=-1).view(-1, 68, 68)
+
+            next_avs = next_lesson['avs'].clone()
+            next_hl = F.softmax(next_lesson['hl'], dim=-1).clone()
+            next_value_prob = next_lesson['value'].clone()
+            next_policy = next_lesson['policy'].clone()
+            next_policy[~next_legal_actions.bool()] = -1e5
+            next_policy = F.softmax(next_policy.view(-1, 68 * 68), dim=-1).view(-1, 68, 68)
 
             target = {
                 'self': x,
@@ -159,15 +169,21 @@ def train(
                 'hl': hl,
                 'value': value_prob,
                 'policy': policy,
+                'next_self': next_x,
+                'next_legal': next_legal_actions,
+                'next_avs': next_avs,
+                'next_hl': next_hl,
+                'next_value': next_value_prob,
+                'next_policy': next_policy,
             }
             
             with autocast(device, dtype=torch.bfloat16):
                 # Forward pass
-                value = model(x)
+                value = model(x, next_x)
                 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2', 'next_value', 'next_avs', 'next_avs2']))
 
             
             # Backward pass
@@ -209,19 +225,29 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, legal_actions = next(val_iter)
+                x, legal_actions, next_x, next_legal_actions = next(val_iter)
                 
                 x = x.to(torch.long).to(device)
                 legal_actions = legal_actions.to(torch.float32).to(device)
+                next_x = next_x.to(torch.long).to(device)
+                next_legal_actions = next_legal_actions.to(torch.float32).to(device)
 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
                     lesson = teacher(x)
+                    next_lesson = teacher(next_x)
                 avs = lesson['avs'].clone()
                 hl = F.softmax(lesson['hl'], dim=-1).clone()
                 value_prob = lesson['value'].clone()
                 policy = lesson['policy'].clone()
                 policy[~legal_actions.bool()] = -1e5
                 policy = F.softmax(policy.view(-1, 68 * 68), dim=-1).view(-1, 68, 68)
+
+                next_avs = next_lesson['avs'].clone()
+                next_hl = F.softmax(next_lesson['hl'], dim=-1).clone()
+                next_value_prob = next_lesson['value'].clone()
+                next_policy = next_lesson['policy'].clone()
+                next_policy[~next_legal_actions.bool()] = -1e5
+                next_policy = F.softmax(next_policy.view(-1, 68 * 68), dim=-1).view(-1, 68, 68)
 
                 target = {
                     'self': x,
@@ -230,14 +256,20 @@ def train(
                     'hl': hl,
                     'value': value_prob,
                     'policy': policy,
+                    'next_self': next_x,
+                    'next_legal': next_legal_actions,
+                    'next_avs': next_avs,
+                    'next_hl': next_hl,
+                    'next_value': next_value_prob,
+                    'next_policy': next_policy,
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
-                    value = model(x)
+                    value = model(x, next_x)
 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2', 'next_value', 'next_avs', 'next_avs2']))
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()
@@ -337,7 +369,7 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p1-distillation-simple/',
+        save_checkpoint_path='../checkpoints/p1-distillation-simple-next-take2/',
         teacher_checkpoint_path='../checkpoints/teacher/teacher.pt',
     )
     

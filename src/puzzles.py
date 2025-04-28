@@ -46,7 +46,7 @@ import searchless_chess.src.utils as utils
 
 _NUM_PUZZLES = flags.DEFINE_integer(
     name='num_puzzles',
-    default=10000,
+    default=None,
     help='The number of puzzles to evaluate.',
     required=True,
 )
@@ -126,13 +126,18 @@ def validate_lc0_policy():
 
     val_iter = iter(bag_source)
 
+    explore = False
     for i in range(1000000):
         element = next(val_iter)
-        if (i % 100 != 0):
+        if (i % 100 == 0):
+            explore = True
+        if not explore:
             continue
         fen, move_values = CODERS['action_values'].decode(element)
         policy = np.zeros((77, 77))
         value_prob = max(win_prob for _, win_prob in move_values)
+        if value_prob > 0.75 or value_prob < 0.25:
+            continue
         for move, win_prob in move_values:
             s1 = utils._parse_square(move[0:2])
             if move[4:] in ['R', 'r']:
@@ -165,6 +170,7 @@ def validate_lc0_policy():
             best_s2 = utils._parse_square(best_move[2:4])
         total_positions += 1
         total_top1_match += policy[best_s1, best_s2]
+        explore = False
 
     
     # Report final results
@@ -191,13 +197,19 @@ def validate_my_engine_policy(checkpoint_path: str):
 
     val_iter = iter(bag_source)
 
+    explore = False
     for i in range(1000000):
         element = next(val_iter)
-        if (i % 100 != 0):
+        if (i % 100 == 0):
+            explore = True
+        if not explore:
             continue
+
         fen, move_values = CODERS['action_values'].decode(element)
         policy = np.zeros((77, 77))
         value_prob = max(win_prob for _, win_prob in move_values)
+        if value_prob > 0.75 or value_prob < 0.25:
+            continue
         for move, win_prob in move_values:
             s1 = utils._parse_square(move[0:2])
             if move[4:] in ['R', 'r']:
@@ -226,6 +238,7 @@ def validate_my_engine_policy(checkpoint_path: str):
             best_s2 = utils._parse_square(best_move[2:4])
         total_positions += 1
         total_top1_match += policy[best_s1, best_s2]
+        explore = False
 
     
     # Report final results

@@ -40,7 +40,7 @@ class Lc0Engine(engine.Engine):
     # We use the biggest available network.
     weights_path = os.path.join(
         os.getcwd(),
-        '../lc0/build/release/768x15x24h-t82-swa-7464000.pb',
+        '../lc0/build/release/t3-512x15x16h-distill-swa-2767500.pb',
     )
     options = [f'--weights={weights_path}']
     self._raw_engine = chess.engine.SimpleEngine.popen_uci(

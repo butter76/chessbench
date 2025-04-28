@@ -149,7 +149,7 @@ def train(
                 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2', 'avs_accuracy', 'avs2_accuracy', 'policy_accuracy']))
 
             
             # Backward pass
@@ -216,7 +216,7 @@ def train(
 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2', 'avs_accuracy', 'avs2_accuracy', 'policy_accuracy']))
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()

@@ -43,6 +43,14 @@ from searchless_chess.src import config as config_lib
 from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.constants import CODERS
 import searchless_chess.src.utils as utils
+from apache_beam import coders
+
+lichess_coder = coders.TupleCoder([
+    coders.StrUtf8Coder(),
+    coders.StrUtf8Coder(),
+    coders.FloatCoder(),
+])
+
 
 _NUM_PUZZLES = flags.DEFINE_integer(
     name='num_puzzles',
@@ -106,78 +114,7 @@ def evaluate_puzzle_from_board(
     board.push(chess.Move.from_uci(move))
   return True
 
-def validate_lc0_policy():
-    """Sample positions from validation set and compare LC0 policy with dataset policy."""
-    print("Validating LC0 policy against dataset policy...")
-    
-    # Create validation dataloader
-
-    bag_source = bagz.BagDataSource('../data/output/validation.bag')
-    
-    # Initialize LC0 policy net engine
-    lc0_engine = AllMovesLc0Engine(chess.engine.Limit(depth=1))
-    
-    # Track metrics
-    total_positions = 0
-    total_top1_match = 0.0
-    
-    # Sample positions
-    sample_size = min(10000, 1_000_000)
-
-    val_iter = iter(bag_source)
-
-    explore = False
-    for i in range(1000000):
-        element = next(val_iter)
-        if (i % 100 == 0):
-            explore = True
-        if not explore:
-            continue
-        fen, move_values = CODERS['action_values'].decode(element)
-        policy = np.zeros((77, 77))
-        value_prob = max(win_prob for _, win_prob in move_values)
-        if value_prob > 0.75 or value_prob < 0.25:
-            continue
-        for move, win_prob in move_values:
-            s1 = utils._parse_square(move[0:2])
-            if move[4:] in ['R', 'r']:
-                s2 = 64
-            elif move[4:] in ['B', 'b']:
-                s2 = 65
-            elif move[4:] in ['N', 'n']:
-                s2 = 66
-            else:
-                assert move[4:] in ['Q', 'q', '']
-                s2 = utils._parse_square(move[2:4])
-            policy[s1, s2] = win_prob
-            if win_prob == value_prob:
-                policy[s1, s2] = 1
-
-        board = chess.Board(fen)
-        lc0_result = lc0_engine.analyse(board)
-        lc0_policy = {move: score for move, score in lc0_result.get('scores', [])}
-        
-        # Find the move with highest score in lc0_policy
-        best_move = max(lc0_policy.items(), key=lambda x: x[1])[0].uci()
-        best_s1 = utils._parse_square(best_move[0:2])
-        if best_move[4:] in ['R', 'r']:
-            best_s2 = 64
-        elif best_move[4:] in ['B', 'b']:
-            best_s2 = 65
-        elif best_move[4:] in ['N', 'n']:
-            best_s2 = 66
-        else:
-            best_s2 = utils._parse_square(best_move[2:4])
-        total_positions += 1
-        total_top1_match += policy[best_s1, best_s2]
-        explore = False
-
-    
-    # Report final results
-    print(f"Final results over {total_positions} positions:")
-    print(f"Top-1 move match rate: {total_top1_match/total_positions:.4f}")
-
-def validate_my_engine_policy(checkpoint_path: str):
+def validate_chessbench_policy(engine: engine_lib.Engine):
     """Sample positions from validation set and compare MyEngine policy with dataset policy."""
     print("Validating MyEngine policy against dataset policy...")
 
@@ -185,9 +122,6 @@ def validate_my_engine_policy(checkpoint_path: str):
 
     bag_source = bagz.BagDataSource('../data/output/validation.bag')
     
-    # Initialize MyEngine
-    engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(depth=1))
-    
     # Track metrics
     total_positions = 0
     total_top1_match = 0.0
@@ -208,7 +142,7 @@ def validate_my_engine_policy(checkpoint_path: str):
         fen, move_values = CODERS['action_values'].decode(element)
         policy = np.zeros((77, 77))
         value_prob = max(win_prob for _, win_prob in move_values)
-        if value_prob > 0.75 or value_prob < 0.25:
+        if value_prob > 0.75 or value_prob < 0.25 or 0.47 < value_prob < 0.53:
             continue
         for move, win_prob in move_values:
             s1 = utils._parse_square(move[0:2])
@@ -242,15 +176,52 @@ def validate_my_engine_policy(checkpoint_path: str):
 
     
     # Report final results
-    print(f"Final results over {total_positions} positions:")
-    print(f"Top-1 move match rate: {total_top1_match/total_positions:.4f}")
+    print(f"Chessbench Top-1 move match rate: {total_top1_match/total_positions:.4f}")
+
+
+def validate_lichess_policy(engine: engine_lib.Engine):
+    """Sample positions from validation set and compare MyEngine policy with dataset policy."""
+    print("Validating MyEngine policy against dataset policy...")
+
+    # Create validation dataloader
+    bag_source = bagz.BagDataSource('../data/lichess_data.bag')
+
+    val_iter = iter(bag_source)
+
+    # Track metrics
+    total_positions = 0
+    total_top1_match = 0.0
+
+    explore = False
+    for i in range(1000000):
+        if (i % 100 == 0):
+            explore = True
+        if not explore:
+            continue
+
+        element = next(val_iter)
+        fen, move, win_prob = lichess_coder.decode(element)
+        if win_prob > 0.75 or win_prob < 0.25 or 0.47 < win_prob < 0.53:
+            continue
+        board = chess.Board(fen)
+        best_move = engine.play(board).uci()
+        if move == best_move:
+            total_top1_match += 1
+        total_positions += 1
+        explore = False
+
+    print(f"Lichess Top-1 move match rate: {total_top1_match/total_positions:.4f}")
 
 
 def main(argv: Sequence[str]) -> None:
     if len(argv) > 1:
         raise app.UsageError('Too many command-line arguments.')
     checkpoint_path = '../checkpoints/p1-standard/checkpoint_300000.pt'
-    validate_my_engine_policy(checkpoint_path)
+    engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(nodes=1))
+    # engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1))
+    validate_lichess_policy(engine)
+    validate_chessbench_policy(engine)
+
 
     puzzles_path = os.path.join(
         os.getcwd(),

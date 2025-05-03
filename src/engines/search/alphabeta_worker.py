@@ -29,7 +29,9 @@ SELF_PLAY_CODER = coders.TupleCoder((
 class AlphaBetaWorker(utils.SearchWorker):
     """Alpha-Beta search worker that uses parallel evaluation."""
     
-    def __init__(self, initial_board: chess.Board, evaluation_queue: utils.EvaluationQueue, 
+    def __init__(self, evaluation_queue: utils.EvaluationQueue, 
+                 game_logger: utils.GameLogger,
+                 search_manager: utils.SearchManager,
                  max_depth: int = 4):
         """Initialize alpha-beta worker.
         
@@ -38,8 +40,7 @@ class AlphaBetaWorker(utils.SearchWorker):
             evaluation_queue: Queue for submitting positions for evaluation
             max_depth: Maximum depth of the search tree
         """
-        super().__init__(evaluation_queue)
-        self.initial_board = initial_board.copy()
+        super().__init__(evaluation_queue, game_logger, search_manager)
         self.max_depth = max_depth
         self.reset()
 
@@ -57,7 +58,7 @@ class AlphaBetaWorker(utils.SearchWorker):
                 self.root.value,
                 terminal_reward,
                 move_count,
-                [(move.uci(), self.root.children[i].value) for i, move in enumerate(self.root.moves)]
+                [(move.uci(), self.root.children[i].value) for i, move in enumerate(self.root.moves)] if last_move is not None else []
             )))
             if self.root.parent is None:
                 break
@@ -67,7 +68,9 @@ class AlphaBetaWorker(utils.SearchWorker):
         return log
         
     def reset(self):
-        self.root = utils.Node(self.initial_board, None, -1, None, False)
+        # Get a board from the opening book if available, otherwise use the initial board
+        board = self.fetch_board()
+        self.root = utils.Node(board, None, -1, None, False)
         self.transposition_table = {}
         self.increment_tt(self.root.board)
 
@@ -110,7 +113,6 @@ class AlphaBetaWorker(utils.SearchWorker):
             if self.get_outcome(self.root.board) is not None:
                 game_log = self.transcribe_game()
                 # Send each encoded position to the game logger
-                print("SENDING GAME LOG")
                 for encoded_position in game_log:
                     self.transmit_game(encoded_position)
                 self.reset()

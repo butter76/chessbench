@@ -7,6 +7,7 @@ and process the results to generate new positions for evaluation.
 
 import concurrent.futures
 import queue
+import random
 import threading
 import time
 from typing import Dict, List, Optional, Tuple, Callable, Any, Union
@@ -20,7 +21,9 @@ import datetime
 from searchless_chess.src import tokenizer
 from searchless_chess.src.engines.utils.node import Node
 from searchless_chess.src import bagz
+from searchless_chess.src.constants import CODERS
 
+import grain as pygrain
 
 class GameLogger:
     """Logger for recording game data to a .bag file."""
@@ -265,7 +268,7 @@ class GPUEvaluator:
             start_time = time.time()
             
             # Evaluate batch on GPU
-            policy_batch, values_batch = self.model_predict_fn(tokenized_batch)
+            values_batch, policy_batch = self.model_predict_fn(tokenized_batch)
             
             # Update timing metrics
             eval_time = time.time() - start_time
@@ -273,7 +276,6 @@ class GPUEvaluator:
             
             # Process and distribute results
             for i, position in enumerate(batch):
-                
                 # Create and distribute result
                 result = EvaluationResult(
                     search_id=position.search_id,
@@ -291,12 +293,13 @@ class GPUEvaluator:
 class SearchWorker:
     """Base class for search algorithm workers."""
     
-    def __init__(self, evaluation_queue: EvaluationQueue, game_logger: Optional[GameLogger] = None):
+    def __init__(self, evaluation_queue: EvaluationQueue, game_logger: Optional[GameLogger] = None, search_manager: Optional['SearchManager'] = None):
         """Initialize search worker.
         
         Args:
             evaluation_queue: Queue for submitting positions for evaluation
             game_logger: Optional logger for recording games
+            search_manager: Optional search manager for accessing shared resources
         """
         self.evaluation_queue = evaluation_queue
         self.ack_queue = EvaluationQueue(1)
@@ -305,6 +308,17 @@ class SearchWorker:
         self.running = False
         self.thread = None
         self.game_logger = game_logger
+        self.search_manager = search_manager
+        
+    def fetch_board(self) -> chess.Board:
+        """Fetch a board from the opening book master.
+        
+        Returns:
+            A chess board position from the opening book
+        """
+        if self.search_manager and hasattr(self.search_manager, 'fetch_opening_board'):
+            return self.search_manager.fetch_opening_board()
+        return chess.Board()  # Return default starting position if no search manager
         
     def register(self, result_distributor: ResultDistributor):
         """Register with result distributor to receive evaluation results.
@@ -375,140 +389,6 @@ class SearchWorker:
             self.process_result(result)
 
 
-class SearchMetrics:
-    """Tracks performance metrics for the parallel search system."""
-    
-    def __init__(self):
-        """Initialize search metrics tracker."""
-        self.start_time = time.time()
-        
-        # Position metrics
-        self.positions_submitted = 0
-        self.positions_evaluated = 0
-        
-        # Batch metrics
-        self.batches_processed = 0
-        self.min_batch_size = float('inf')
-        self.max_batch_size = 0
-        self.avg_batch_size = 0.0
-        
-        # Timing metrics
-        self.total_gpu_time = 0.0
-        
-        # Thread metrics
-        self.worker_metrics = {}  # search_id -> metrics dict
-        
-        # Cache recent metrics for rate calculations
-        self.recent_positions = collections.deque(maxlen=100)  # (timestamp, count)
-        
-    def record_position_submitted(self):
-        """Record a position submitted for evaluation."""
-        self.positions_submitted += 1
-        self.recent_positions.append((time.time(), 1))
-        
-    def record_batch_evaluated(self, batch_size: int, eval_time: float):
-        """Record a batch evaluation.
-        
-        Args:
-            batch_size: Size of the batch
-            eval_time: Time taken to evaluate the batch
-        """
-        self.batches_processed += 1
-        self.positions_evaluated += batch_size
-        self.total_gpu_time += eval_time
-        
-        # Update batch size stats
-        if batch_size < self.min_batch_size:
-            self.min_batch_size = batch_size
-        if batch_size > self.max_batch_size:
-            self.max_batch_size = batch_size
-            
-        # Update average batch size
-        self.avg_batch_size = ((self.avg_batch_size * (self.batches_processed - 1)) + batch_size) / self.batches_processed
-        
-    def register_worker(self, search_id: str, algorithm_type: str):
-        """Register a new search worker.
-        
-        Args:
-            search_id: ID of the search worker
-            algorithm_type: Type of search algorithm
-        """
-        self.worker_metrics[search_id] = {
-            'algorithm_type': algorithm_type,
-            'positions_submitted': 0,
-            'results_processed': 0,
-        }
-        
-    def record_worker_submitted_position(self, search_id: str):
-        """Record a position submitted by a worker.
-        
-        Args:
-            search_id: ID of the search worker
-        """
-        if search_id in self.worker_metrics:
-            self.worker_metrics[search_id]['positions_submitted'] += 1
-            
-    def record_worker_processed_result(self, search_id: str):
-        """Record a result processed by a worker.
-        
-        Args:
-            search_id: ID of the search worker
-        """
-        if search_id in self.worker_metrics:
-            self.worker_metrics[search_id]['results_processed'] += 1
-            
-    def get_positions_per_second(self) -> float:
-        """Calculate the recent positions evaluated per second.
-        
-        Returns:
-            Positions evaluated per second
-        """
-        if not self.recent_positions:
-            return 0.0
-            
-        now = time.time()
-        # Filter to positions evaluated in the last 5 seconds
-        recent = [p for p in self.recent_positions if now - p[0] < 5.0]
-        
-        if not recent:
-            return 0.0
-            
-        total_positions = sum(count for _, count in recent)
-        earliest_time = min(t for t, _ in recent)
-        time_span = now - earliest_time
-        
-        if time_span < 0.001:  # Avoid division by near-zero
-            return 0.0
-            
-        return total_positions / time_span
-        
-    def get_summary(self) -> Dict[str, Any]:
-        """Get a summary of all metrics.
-        
-        Returns:
-            Dictionary of metrics
-        """
-        elapsed_time = time.time() - self.start_time
-        
-        return {
-            'elapsed_time': elapsed_time,
-            'elapsed_time_formatted': str(datetime.timedelta(seconds=int(elapsed_time))),
-            
-            'positions_submitted': self.positions_submitted,
-            'positions_evaluated': self.positions_evaluated,
-            'positions_per_second': self.get_positions_per_second(),
-            'avg_positions_per_second': self.positions_evaluated / elapsed_time if elapsed_time > 0 else 0,
-            
-            'batches_processed': self.batches_processed,
-            'min_batch_size': self.min_batch_size if self.min_batch_size != float('inf') else 0,
-            'max_batch_size': self.max_batch_size,
-            'avg_batch_size': self.avg_batch_size,
-            
-            'gpu_utilization': (self.total_gpu_time / elapsed_time) if elapsed_time > 0 else 0,
-            'worker_metrics': self.worker_metrics,
-        }
-
-
 class SearchManager:
     """Manages parallel search workers and GPU evaluation."""
     
@@ -516,7 +396,8 @@ class SearchManager:
                  model_predict_fn: Callable[[np.ndarray], Tuple[np.ndarray, np.ndarray]],
                  max_batch_size: int = 64,
                  timeout: float = 0.01,
-                 game_log_file: Optional[str] = None):
+                 game_log_file: Optional[str] = None,
+                 opening_book: Optional[str] = None):
         """Initialize search manager.
         
         Args:
@@ -524,6 +405,7 @@ class SearchManager:
             max_batch_size: Maximum batch size for GPU evaluation
             timeout: Time to wait for batch to fill before sending partial batch
             game_log_file: Optional path to file for logging games
+            opening_book: Optional path to file containing opening book
         """
         self.evaluation_queue = EvaluationQueue(max_batch_size=max_batch_size, timeout=timeout)
         self.result_distributor = ResultDistributor()
@@ -539,13 +421,25 @@ class SearchManager:
         if game_log_file:
             self.game_logger = GameLogger(game_log_file)
         
-        # Set up metrics tracking
-        self.metrics = SearchMetrics()
+        # Set up opening book master if provided
+        if opening_book:
+            with open(opening_book, 'r') as f:
+                lines = f.read().splitlines()
+            dataset = pygrain.MapDataset.source(lines)
+            self.opening_book = iter(dataset.shuffle(seed=random.randint(0, 100000)).repeat())
+        else:
+            self.opening_book = None
+            
+    
+    def fetch_opening_board(self) -> chess.Board:
+        """Fetch a board from the opening book master.
         
-        # Monitor thread for periodic logging
-        self.monitor_thread = None
-        self.monitor_running = False
-        self.log_metrics_interval = 5.0  # seconds
+        Returns:
+            A chess board position from the opening book
+        """
+        if self.opening_book:
+            return chess.Board(next(self.opening_book))
+        return chess.Board()  # Return default starting position if no opening book master
         
     def add_worker(self, worker: SearchWorker):
         """Add a search worker.
@@ -556,37 +450,14 @@ class SearchManager:
         # Set the game logger for the worker
         worker.game_logger = self.game_logger
         
+        # Set the search manager for the worker
+        worker.search_manager = self
+        
         worker.register(self.result_distributor)
         self.search_workers.append(worker)
         
-        # Register worker in metrics system
-        algorithm_type = type(worker).__name__
-        self.metrics.register_worker(worker.search_id, algorithm_type)
-        
-        # Wrap worker's submit_position method to track metrics
-        original_submit = worker.submit_position
-        
-        def submit_with_metrics(board, node_id):
-            self.metrics.record_position_submitted()
-            self.metrics.record_worker_submitted_position(worker.search_id)
-            return original_submit(board, node_id)
-            
-        worker.submit_position = submit_with_metrics
-        
-        # Wrap worker's process_result method to track metrics
-        original_process = worker.process_result
-        
-        def process_with_metrics(result):
-            self.metrics.record_worker_processed_result(worker.search_id)
-            return original_process(result)
-            
-        worker.process_result = process_with_metrics
-        
     def start(self):
         """Start all components."""
-        # Reset metrics
-        self.metrics = SearchMetrics()
-        
         # Start game logger if available
         if self.game_logger:
             self.game_logger.start()
@@ -598,14 +469,8 @@ class SearchManager:
         for worker in self.search_workers:
             worker.start()
             
-        # Start metrics monitor
-        self.start_metrics_monitor()
-            
     def stop(self):
         """Stop all components."""
-        # Stop metrics monitor
-        self.stop_metrics_monitor()
-        
         # Stop workers
         for worker in self.search_workers:
             worker.stop()
@@ -616,9 +481,6 @@ class SearchManager:
         # Stop game logger if available
         if self.game_logger:
             self.game_logger.stop()
-        
-        # Final metrics summary
-        self.log_metrics_summary()
         
     def wait_for_workers(self, timeout: Optional[float] = None):
         """Wait for all search workers to complete.
@@ -632,61 +494,3 @@ class SearchManager:
             if all_done:
                 break
             time.sleep(0.01)
-            
-    def start_metrics_monitor(self):
-        """Start the metrics monitoring thread."""
-        self.monitor_running = True
-        self.monitor_thread = threading.Thread(target=self._metrics_monitor_loop)
-        self.monitor_thread.daemon = True
-        self.monitor_thread.start()
-        
-    def stop_metrics_monitor(self):
-        """Stop the metrics monitoring thread."""
-        self.monitor_running = False
-        if self.monitor_thread:
-            self.monitor_thread.join(timeout=1.0)
-            
-    def _metrics_monitor_loop(self):
-        """Monitor loop that periodically logs metrics."""
-        last_log_time = time.time()
-        
-        while self.monitor_running:
-            now = time.time()
-            
-            # Update metrics from GPU evaluator
-            self.metrics.record_batch_evaluated(
-                batch_size=self.gpu_evaluator.total_positions_evaluated,
-                eval_time=self.gpu_evaluator.total_evaluation_time
-            )
-            
-            # Log periodically
-            if now - last_log_time >= self.log_metrics_interval:
-                self.log_metrics_summary()
-                last_log_time = now
-                
-            time.sleep(0.1)
-            
-    def log_metrics_summary(self):
-        """Log a summary of the current metrics."""
-        metrics = self.metrics.get_summary()
-        
-        print(f"\n--- Search Metrics Summary (Elapsed: {metrics['elapsed_time_formatted']}) ---")
-        print(f"Positions: {metrics['positions_evaluated']} evaluated, {metrics['positions_per_second']:.1f} pos/sec")
-        print(f"Batches: {metrics['batches_processed']} processed, avg size: {metrics['avg_batch_size']:.1f}")
-        print(f"GPU Utilization: {metrics['gpu_utilization']*100:.1f}%")
-        
-        # Worker-specific stats
-        print("\nWorker Stats:")
-        for search_id, worker_metrics in metrics['worker_metrics'].items():
-            worker_type = worker_metrics['algorithm_type']
-            positions = worker_metrics['positions_submitted']
-            results = worker_metrics['results_processed']
-            print(f"  {worker_type} (ID: {search_id[:6]}): {positions} submitted, {results} processed")
-            
-    def get_metrics(self) -> Dict[str, Any]:
-        """Get the current metrics.
-        
-        Returns:
-            Dictionary of current metrics
-        """
-        return self.metrics.get_summary()

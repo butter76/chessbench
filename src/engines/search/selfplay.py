@@ -7,8 +7,8 @@ import torch.nn.functional as F
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 
-from src.engines.search.alphabeta_worker import AlphaBetaWorker
-from src.engines.search.utils import SearchManager
+from searchless_chess.src.engines.search.alphabeta_worker import AlphaBetaWorker
+from searchless_chess.src.engines.search.utils import SearchManager
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 import numpy as np
@@ -19,10 +19,10 @@ from searchless_chess.src.models.transformer import ChessTransformer, Transforme
 
 if __name__ == "__main__":
 
-    checkpoint_path = "checkpoints/self-play/T0/gen0.pt"
+    checkpoint_path = "../checkpoints/self-play/T0/gen0.pt"
     checkpoint = torch.load(checkpoint_path)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     model_config = checkpoint['model_config']
 
@@ -44,31 +44,32 @@ if __name__ == "__main__":
             output = model(x)
         values = output['value'][:, 0] * 2.0 - 1.0
         is_legal = output['legal'] > 0 # Rather than manually checking if the move is legal, just use the model's prediction of legality
-        policies = output['policy']
+        policies = output['policy'].clone()
         policies[~is_legal] = float('-inf')
         policies = torch.nn.functional.softmax(policies.view(N, -1), dim=-1).view(N, is_legal.shape[1], -1)
-        return values.cpu().numpy(), policies.cpu().numpy()
-
-    # Create initial board
-    board = chess.Board()
+        return values.float().cpu().numpy(), policies.float().cpu().numpy()
 
     # Create search manager with our  model
     search_manager = SearchManager(
         model_predict_fn=evaluate,
-        max_batch_size=48,
+        max_batch_size=16,
         timeout=0.01,
-        game_log_file="../data/self-play/gen0-selfplay.bag"
+        game_log_file="../data/self-play/gen0-selfplay.bag",
+        opening_book="../data/opening_book.txt",
     )
 
-    for i in range(96):
+    for i in range(32):
         alpha_beta_worker = AlphaBetaWorker(
-            initial_board=board,
             evaluation_queue=search_manager.evaluation_queue,
+            game_logger=search_manager.game_logger,
+            search_manager=search_manager,
             max_depth=3
         )
         search_manager.add_worker(alpha_beta_worker)
 
-    time.sleep(60 * 15)
+    search_manager.start()
+
+    time.sleep(60 * 60 * 8)
 
     search_manager.stop()
 

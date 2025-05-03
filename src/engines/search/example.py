@@ -48,30 +48,31 @@ def run_example(search_time: float = 10.0, verbose: bool = True):
         model_predict_fn=dummy_model_predict_fn,
         max_batch_size=48,
         timeout=0.01,
-        game_log_file="../data/self-play/gen0-selfplay.bag"
+        game_log_file="../data/self-play/gen0-selfplay.bag",
+        opening_book="../data/opening_book.txt"
     )
-    
-    # Set metrics logging interval based on verbosity
-    search_manager.log_metrics_interval = 2.0 if verbose else float('inf')
     
     # Create AlphaBeta workers with different parameters
     alpha_beta_worker1 = AlphaBetaWorker(
-        initial_board=board,
         evaluation_queue=search_manager.evaluation_queue,
+        game_logger=search_manager.game_logger,
+        search_manager=search_manager,
         max_depth=3
     )
     search_manager.add_worker(alpha_beta_worker1)
     
     alpha_beta_worker2 = AlphaBetaWorker(
-        initial_board=board,
         evaluation_queue=search_manager.evaluation_queue,
+        game_logger=search_manager.game_logger,
+        search_manager=search_manager,
         max_depth=4
     )
     search_manager.add_worker(alpha_beta_worker2)
 
     alpha_beta_worker3 = AlphaBetaWorker(
-        initial_board=board,
         evaluation_queue=search_manager.evaluation_queue,
+        game_logger=search_manager.game_logger,
+        search_manager=search_manager,
         max_depth=5
     )
     search_manager.add_worker(alpha_beta_worker3)
@@ -84,38 +85,12 @@ def run_example(search_time: float = 10.0, verbose: bool = True):
     # Wait for search time
     time.sleep(search_time)
     
-    # Stop all search components (will print final metrics)
+    # Stop all search components
     search_manager.stop()
-    
-    # Get final metrics for reporting
-    final_metrics = search_manager.get_metrics()
     
     # Print results
     print(f"\n=== Search Results ===")
     print(f"Total search time: {time.time() - start_time:.2f} seconds")
-    
-    # Performance summary
-    print(f"\nPerformance Summary:")
-    print(f"  Total positions evaluated: {final_metrics['positions_evaluated']}")
-    print(f"  Average evaluation rate: {final_metrics['avg_positions_per_second']:.1f} positions/sec")
-    print(f"  Peak evaluation rate: {final_metrics['positions_per_second']:.1f} positions/sec")
-    print(f"  GPU utilization: {final_metrics['gpu_utilization']*100:.1f}%")
-    print(f"  Average batch size: {final_metrics['avg_batch_size']:.2f}")
-            
-    # Print detailed worker stats if verbose
-    if verbose:
-        print("\nDetailed Worker Stats:")
-        for search_id, worker_metrics in final_metrics['worker_metrics'].items():
-            print(f"  Worker {search_id[:6]} ({worker_metrics['algorithm_type']}):")
-            print(f"    Positions submitted: {worker_metrics['positions_submitted']}")
-            print(f"    Results processed: {worker_metrics['results_processed']}")
-            
-        print("\nBatch Size Stats:")
-        print(f"  Min: {final_metrics['min_batch_size']}")
-        print(f"  Max: {final_metrics['max_batch_size']}")
-        print(f"  Avg: {final_metrics['avg_batch_size']:.2f}")
-    
-    return final_metrics
 
 
 if __name__ == "__main__":
@@ -127,4 +102,4 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    metrics = run_example(search_time=args.time, verbose=args.verbose) 
+    run_example(search_time=args.time, verbose=args.verbose) 

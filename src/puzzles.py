@@ -203,10 +203,10 @@ def validate_lichess_policy(engine: engine_lib.Engine):
 def main(argv: Sequence[str]) -> None:
     if len(argv) > 1:
         raise app.UsageError('Too many command-line arguments.')
-    checkpoint_path = '../checkpoints/p1/checkpoint_480000.pt'
-    # engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(nodes=1), strategy=MoveSelectionStrategy.POLICY)
+    checkpoint_path = '../checkpoints/p1-standard/checkpoint_300000.pt'
+    engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(nodes=1), strategy=MoveSelectionStrategy.POLICY)
     # engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1))
-    engine = Lc0Engine(chess.engine.Limit(nodes=1))
+    # engine = Lc0Engine(chess.engine.Limit(nodes=1))
     validate_lichess_policy(engine)
     validate_chessbench_policy(engine)
 

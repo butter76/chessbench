@@ -134,6 +134,8 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
     assert len(move_values) != 0
 
+    weights = []
+    value_prob = max(win_prob for _, win_prob in move_values)
     for move, win_prob in move_values:
       s1 = utils._parse_square(move[0:2], flip)
       if move[4:] in ['R', 'r']:
@@ -146,14 +148,118 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
         assert move[4:] in ['Q', 'q', '']
         s2 = utils._parse_square(move[2:4], flip)
       legal_actions[s1, s2] = 1
+      if win_prob >= value_prob * 0.95:
+        weights.append(1)
+      else:
+        weights.append(1)
+
+    # Select a random move weighted by the weights
+    next_move, next_win_prob = random.choices(move_values, weights=weights, k=1)[0]
+    board = chess.Board(fen)
+    board.push_uci(next_move)
+    next_fen = board.fen()
+    next_state = _process_fen(next_fen)
+
+    next_moves = engine.get_ordered_legal_moves(board)
+    next_legal_actions = np.zeros((S, S))
+    flip = board.turn == chess.BLACK
+    for move in next_moves:
+      move = move.uci()
+      s1 = utils._parse_square(move[0:2], flip)
+      if move[4:] in ['R', 'r']:
+        s2 = 64
+      elif move[4:] in ['B', 'b']:
+        s2 = 65
+      elif move[4:] in ['N', 'n']:
+        s2 = 66
+      else:
+        assert move[4:] in ['Q', 'q', '']
+        s2 = utils._parse_square(move[2:4], flip)
+      next_legal_actions[s1, s2] = 1
+
+    if len(next_moves) == 0:
+      next_state = state.copy()
+      next_legal_actions = legal_actions.copy()
+
 
     return state, legal_actions
+  
+
+class ConvertActionValuesWithPolicyDataToSequence(ConvertToSequence):
+  """Converts the fen, move, and win probability into a sequence of integers."""
+  def map(
+    self, element: bytes
+  ):
+  
+    fen, move_values, policy_vectors, teacher_value = constants.CODERS['action_values_with_policy'].decode(element)
+    stm = fen.split(' ')[1]
+    flip = stm == 'b'
+    state = _process_fen(fen)
+    legal_actions = np.zeros((S, S))
+
+    ## Validation
+    # assert len(move_values) == len(engine.get_ordered_legal_moves(chess.Board(fen)))
+    assert len(move_values) != 0
+
+    weights = []
+    value_prob = max(win_prob for _, win_prob in move_values)
+    for move, win_prob in move_values:
+      s1 = utils._parse_square(move[0:2], flip)
+      if move[4:] in ['R', 'r']:
+        s2 = 64
+      elif move[4:] in ['B', 'b']:
+        s2 = 65
+      elif move[4:] in ['N', 'n']:
+        s2 = 66
+      else:
+        assert move[4:] in ['Q', 'q', '']
+        s2 = utils._parse_square(move[2:4], flip)
+      legal_actions[s1, s2] = 1
+      # Find the policy vector for this move
+      matching_policy = next(
+          (p for p in policy_vectors if p[0] == s1 and p[1] == s2),
+          None
+      )
+      assert matching_policy is not None
+      weights.append(matching_policy[3])
+
+    # Select a random move weighted by the weights
+    next_move, next_win_prob = random.choices(move_values, weights=weights, k=1)[0]
+    board = chess.Board(fen)
+    board.push_uci(next_move)
+    next_fen = board.fen()
+    next_state = _process_fen(next_fen)
+
+    next_moves = engine.get_ordered_legal_moves(board)
+    next_legal_actions = np.zeros((S, S))
+    flip = board.turn == chess.BLACK
+    for move in next_moves:
+      move = move.uci()
+      s1 = utils._parse_square(move[0:2], flip)
+      if move[4:] in ['R', 'r']:
+        s2 = 64
+      elif move[4:] in ['B', 'b']:
+        s2 = 65
+      elif move[4:] in ['N', 'n']:
+        s2 = 66
+      else:
+        assert move[4:] in ['Q', 'q', '']
+        s2 = utils._parse_square(move[2:4], flip)
+      next_legal_actions[s1, s2] = 1
+
+    if len(next_moves) == 0:
+      next_state = state.copy()
+      next_legal_actions = legal_actions.copy()
+
+
+    return next_state, next_legal_actions
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,
     'action_value': ConvertActionValueDataToSequence,
     'action_values': ConvertActionValuesDataToSequence,
     'state_value': ConvertStateValueDataToSequence,
+    'action_values_with_policy': ConvertActionValuesWithPolicyDataToSequence,
 }
 
 # Follows the base_constants.DataLoaderBuilder protocol.

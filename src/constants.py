@@ -108,5 +108,22 @@ CODERS['action_values'] = coders.TupleCoder((
   )
 ))
 
+POLICY_VECTOR_CODER = coders.TupleCoder([
+    coders.BigIntegerCoder(),  # from_square
+    coders.BigIntegerCoder(),  # to_square
+    coders.FloatCoder(),  # probability
+    coders.FloatCoder(),  # probability_2 (opt_policy_split)
+])
+
+# Add to the CODERS dictionary for our new data type
+CODERS['action_values_with_policy'] = coders.TupleCoder([
+    CODERS['fen'],
+    coders.IterableCoder(
+        coders.TupleCoder([CODERS['move'], CODERS['win_prob']])
+    ),
+    coders.IterableCoder(POLICY_VECTOR_CODER),
+    coders.FloatCoder(),  # teacher_value
+])
+
 def encode_action_values(data: ActionValuesData) -> bytes:
   return CODERS['action_values'].encode((data.fen, data.move_values))

@@ -297,7 +297,7 @@ def main():
     """Main training function."""
     # Set constants
     num_return_buckets = 128
-    policy = 'action_values'
+    policy = 'action_values_with_policy'
     
     # Create model config
     model_config = TransformerConfig(
@@ -319,7 +319,7 @@ def main():
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='train',
-            dataset_path='../data/output/new@24.bag',
+            dataset_path='../data/policy/policy_new@24.bag',
         ),
         eval_data=config_lib.DataConfig(
             batch_size=2048,
@@ -328,7 +328,7 @@ def main():
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='test',
-            dataset_path='../data/output/validation.bag',
+            dataset_path='../data/policy/policy_validation.bag',
             num_records=1_000_000
         ),
         compile=True,
@@ -337,7 +337,7 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p1-distillation-simple/',
+        save_checkpoint_path='../checkpoints/p1-distillation-next-move-opt-policy-weighted/',
         teacher_checkpoint_path='../checkpoints/teacher/teacher.pt',
     )
     

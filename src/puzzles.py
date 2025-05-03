@@ -106,7 +106,7 @@ def main(argv: Sequence[str]) -> None:
 
   for strategy in [MoveSelectionStrategy.VALUE, MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
     engine = MyTransformerEngine(
-        '../checkpoints/layer-16-480-15-56lr-flip-stm/checkpoint_465000.pt',
+        '../checkpoints/p1-new-scheduler/checkpoint_495000.pt',
         chess.engine.Limit(nodes=1),
         strategy=strategy,
     )

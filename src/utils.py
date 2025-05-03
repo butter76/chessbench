@@ -26,6 +26,26 @@ def _parse_square(square: str, flip: bool = False):
   else:
     return chess.parse_square(square)
 
+def move_to_indices(move: chess.Move, flip: bool) -> tuple[int, int]:
+  """Converts a chess.Move object to source and target indices for policy/AVS heads."""
+  move_uci = move.uci()
+  s1 = _parse_square(move_uci[0:2], flip)
+  
+  # Handle promotions
+  promotion = move.promotion
+  if promotion == chess.ROOK:
+    s2 = 64
+  elif promotion == chess.BISHOP:
+    s2 = 65
+  elif promotion == chess.KNIGHT:
+    s2 = 66
+  else:
+    # Regular move
+    s2 = _parse_square(move_uci[2:4], flip)
+  return s1, s2
+
+
+
 # The lists of the strings of the row and columns of a chess board,
 # traditionally named rank and file.
 _CHESS_FILE = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']

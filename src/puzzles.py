@@ -18,7 +18,6 @@
 from collections.abc import Sequence
 import io
 import os
-from typing import cast
 
 from absl import app
 from absl import flags
@@ -28,19 +27,10 @@ import chess.pgn
 import numpy as np
 import pandas as pd
 import bagz
-import torch
-from torch.amp.autocast_mode import autocast
 
-from searchless_chess.src.models.transformer import ChessTransformer
-torch.set_default_dtype(torch.float32)
-torch.set_printoptions(profile="full")
-
-from searchless_chess.src.engines import constants
 from searchless_chess.src.engines import engine as engine_lib
-from searchless_chess.src.engines.lc0_engine import AllMovesLc0Engine
+from searchless_chess.src.engines.lc0_engine import AllMovesLc0Engine, Lc0Engine
 from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTransformerEngine
-from searchless_chess.src import config as config_lib
-from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.constants import CODERS
 import searchless_chess.src.utils as utils
 from apache_beam import coders
@@ -81,10 +71,7 @@ def evaluate_puzzle_from_pandas_row(
     engine: engine_lib.Engine,
 ) -> bool:
   """Returns True if the `engine` solves the puzzle and False otherwise."""
-  game = chess.pgn.read_game(io.StringIO(puzzle['PGN']))
-  if game is None:
-    raise ValueError(f'Failed to read game from PGN {puzzle["PGN"]}.')
-  board = game.end().board()
+  board = chess.Board(puzzle['FEN'])
   return evaluate_puzzle_from_board(
       board=board,
       moves=puzzle['Moves'].split(' '),
@@ -201,7 +188,7 @@ def validate_lichess_policy(engine: engine_lib.Engine):
 
         element = next(val_iter)
         fen, move, win_prob = lichess_coder.decode(element)
-        if win_prob > 0.75 or win_prob < 0.25 or 0.47 < win_prob < 0.53:
+        if not (0.564 < win_prob < 0.65):
             continue
         board = chess.Board(fen)
         best_move = engine.play(board).uci()
@@ -216,16 +203,17 @@ def validate_lichess_policy(engine: engine_lib.Engine):
 def main(argv: Sequence[str]) -> None:
     if len(argv) > 1:
         raise app.UsageError('Too many command-line arguments.')
-    checkpoint_path = '../checkpoints/p1-standard/checkpoint_300000.pt'
-    engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(nodes=1))
+    checkpoint_path = '../checkpoints/p1/checkpoint_480000.pt'
+    # engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(nodes=1), strategy=MoveSelectionStrategy.POLICY)
     # engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1))
+    engine = Lc0Engine(chess.engine.Limit(nodes=1))
     validate_lichess_policy(engine)
     validate_chessbench_policy(engine)
 
 
     puzzles_path = os.path.join(
         os.getcwd(),
-        '../data/puzzles.csv',
+        '../data/high_rated_puzzles.csv',
     )
     puzzles = pd.read_csv(puzzles_path, nrows=_NUM_PUZZLES.value)
 
@@ -234,7 +222,7 @@ def main(argv: Sequence[str]) -> None:
             checkpoint_path,
             chess.engine.Limit(nodes=1),
             strategy=strategy,
-        ) 
+        )
 
         with open(f'puzzles-{strategy}.txt', 'w') as f:
             num_correct = 0

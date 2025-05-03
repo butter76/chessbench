@@ -8,14 +8,14 @@ import numpy as np
 
 from searchless_chess.src import constants
 from searchless_chess.src import tokenizer
-from searchless_chess.src import utils
 from searchless_chess.src.engines import engine
 from searchless_chess.src.models.transformer import ChessTransformer
-
-from searchless_chess.src.utils import _parse_square
-
+from searchless_chess.src.engines.utils.node import Node
+from searchless_chess.src.utils import move_to_indices
 import torch
 from torch.amp.autocast_mode import autocast
+
+from searchless_chess.src.engines.utils.nnutils import get_policy
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 
@@ -64,24 +64,6 @@ class MyTransformerEngine(engine.Engine):
 
         self.model.load_state_dict(checkpoint['model'])
 
-    def _move_to_indices(self, move: chess.Move, flip: bool) -> tuple[int, int]:
-        """Converts a chess.Move object to source and target indices for policy/AVS heads."""
-        move_uci = move.uci()
-        s1 = _parse_square(move_uci[0:2], flip)
-        
-        # Handle promotions
-        promotion = move.promotion
-        if promotion == chess.ROOK:
-            s2 = 64
-        elif promotion == chess.BISHOP:
-            s2 = 65
-        elif promotion == chess.KNIGHT:
-            s2 = 66
-        else:
-            # Regular move
-            s2 = _parse_square(move_uci[2:4], flip)
-        return s1, s2
-
     def _get_ordered_moves(self, board: chess.Board, ordering_strategy: MoveSelectionStrategy | None) -> list[chess.Move]:
         """
         Gets legal moves ordered by the specified strategy head's output,
@@ -97,7 +79,7 @@ class MyTransformerEngine(engine.Engine):
         move_scores = []
         
         for move in board.legal_moves:
-            s1, s2 = self._move_to_indices(move, flip=board.turn == chess.BLACK)
+            s1, s2 = move_to_indices(move, flip=board.turn == chess.BLACK)
             score = output_tensor[s1, s2].item()
             move_scores.append(score)
             
@@ -122,7 +104,41 @@ class MyTransformerEngine(engine.Engine):
         x = torch.tensor(x, dtype=torch.long, device=self.device)
         with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
             output = self.model(x)
-        return output        
+        return output
+    
+    def batch_analyze(self, boards: list[tuple[Node, chess.Move]], construct_node, postprocess_child):
+        # Input is a list of [parent_node, move], output is evaluation of the move added to the parent node
+        # We need to tokenize the boards and moves, and then pass them to the model
+        N = len(boards)
+        x = []
+        child_boards = []
+        for parent_node, move in boards:
+            child_board = parent_node.board.copy().push(move)
+            x.append(tokenizer.tokenize(child_board.fen()))
+            child_boards.append(child_board)
+        x = np.array(x)
+        x = torch.tensor(x, dtype=torch.long, device=self.device)
+        with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
+            output = self.model(x)
+        values = output['value'][:, 0] * 2.0 - 1.0 # Move from [0, 1] to [-1, 1]
+        is_legal = output['legal'] > 0 # Rather than manually checking if the move is legal, just use the model's prediction of legality
+        policies = output['policy']
+        policies[~is_legal] = float('-inf')
+        policies = torch.nn.functional.softmax(policies.view(N, -1), dim=-1).view(N, is_legal.shape[1], -1)
+
+        values = values.cpu().numpy()
+        policies = policies.cpu().numpy()
+        
+        for i, (parent_node, move) in enumerate(boards):
+            child_board = child_boards[i]
+            value = values[i]
+            policy = get_policy(child_board, policies[i])
+            # Construct the child node, which is likely a subclass of Node
+            child = construct_node(child_board, parent=parent_node, value=value, policy=policy)
+            parent_node.add_child(child)
+            # Postprocess the child node, which is likely a subclass of Node
+            postprocess_child(child)
+        return
 
     def _static_evaluate(self, board: chess.Board) -> float:
         """
@@ -253,7 +269,7 @@ class MyTransformerEngine(engine.Engine):
                     board.pop()
                 else:
                     board.pop()
-                    s1, s2 = self._move_to_indices(move, flip=board.turn == chess.BLACK)
+                    s1, s2 = move_to_indices(move, flip=board.turn == chess.BLACK)
                     best_res = avs[s1, s2].item()
                 move_values.append((best_res, i))
             (best_value, best_idx) = max(move_values)
@@ -269,7 +285,7 @@ class MyTransformerEngine(engine.Engine):
                     return move
                 board.pop()
                 
-                s1, s2 = self._move_to_indices(move, flip=board.turn == chess.BLACK)
+                s1, s2 = move_to_indices(move, flip=board.turn == chess.BLACK)
                 best_res = policy[s1, s2].item()
 
                 move_values.append((best_res, i))

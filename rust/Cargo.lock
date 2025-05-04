@@ -90,6 +90,7 @@ dependencies = [
  "async-channel",
  "futures",
  "numpy",
+ "once_cell",
  "parking_lot",
  "pyo3",
  "shakmaty",

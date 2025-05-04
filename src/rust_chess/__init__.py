@@ -3,14 +3,14 @@ Rust-powered Chess Engine Python bindings
 """
 import numpy as np
 try:
-    from .chess_bindings import PyChessEngine, __version__
+    from .chess_bindings import PyChessEngine, PyEngineManager, __version__
 except ImportError:
     raise ImportError(
         "Failed to import Rust chess bindings. "
         "Make sure to build the Rust package first using maturin."
     )
 
-__all__ = ["ChessEngine", "__version__"]
+__all__ = ["ChessEngine", "EngineManager", "__version__"]
 
 
 class ChessEngine:
@@ -95,3 +95,125 @@ class ChessEngine:
                       - 'position': The evaluated position as FEN
         """
         self._engine.register_on_eval_callback(callback)
+
+
+class EngineManager:
+    """
+    Manager for multiple chess engines running in separate threads
+    """
+    
+    def __init__(self, max_concurrent=None):
+        """
+        Initialize a new engine manager
+        
+        Args:
+            max_concurrent: Maximum number of engines that can run concurrently.
+                           If None, defaults to the number of CPU cores.
+        """
+        self._manager = PyEngineManager(max_concurrent)
+        self._engines = {}
+    
+    def create_engine(self, fen=None, on_move=None, on_game_end=None, on_eval=None):
+        """
+        Create a new engine instance
+        
+        Args:
+            fen: Optional FEN string for starting position
+            on_move: Callback for move events
+            on_game_end: Callback for game end events
+            on_eval: Callback for evaluation events
+            
+        Returns:
+            int: Engine ID that can be used to reference this engine later
+        """
+        engine_id = self._manager.create_engine(fen, on_move, on_game_end, on_eval)
+        self._engines[engine_id] = engine_id
+        return engine_id
+    
+    def make_move(self, engine_id, move):
+        """
+        Make a move on the specified engine
+        
+        Args:
+            engine_id: ID of the engine
+            move: Move in UCI format (e.g., "e2e4")
+            
+        Raises:
+            ValueError: If the engine ID is invalid or the move is illegal
+        """
+        return self._manager.make_move(engine_id, move)
+    
+    def get_fen(self, engine_id):
+        """
+        Get the current position from the specified engine
+        
+        Args:
+            engine_id: ID of the engine
+            
+        Returns:
+            str: FEN string representing the position
+        """
+        return self._manager.get_fen(engine_id)
+    
+    def get_legal_moves(self, engine_id):
+        """
+        Get legal moves from the specified engine
+        
+        Args:
+            engine_id: ID of the engine
+            
+        Returns:
+            list: Legal moves in UCI format
+        """
+        return self._manager.get_legal_moves(engine_id)
+    
+    def notify_eval(self, engine_id, score, depth):
+        """
+        Trigger the evaluation callback on the specified engine
+        
+        Args:
+            engine_id: ID of the engine
+            score: Evaluation score
+            depth: Search depth
+        """
+        return self._manager.notify_eval(engine_id, score, depth)
+    
+    def notify_game_end(self, engine_id, result, reason):
+        """
+        Trigger the game end callback on the specified engine
+        
+        Args:
+            engine_id: ID of the engine
+            result: Game result (e.g., "1-0")
+            reason: Reason for game end (e.g., "checkmate")
+        """
+        return self._manager.notify_game_end(engine_id, result, reason)
+    
+    def stop_engine(self, engine_id):
+        """
+        Stop the specified engine
+        
+        Args:
+            engine_id: ID of the engine to stop
+        """
+        if engine_id in self._engines:
+            self._manager.stop_engine(engine_id)
+            del self._engines[engine_id]
+    
+    def stop_all(self):
+        """Stop all engines managed by this manager"""
+        for engine_id in list(self._engines.keys()):
+            self.stop_engine(engine_id)
+    
+    def active_engines(self):
+        """
+        Get the number of active engines
+        
+        Returns:
+            int: Number of active engines
+        """
+        return self._manager.active_engines()
+    
+    def __del__(self):
+        """Clean up resources when the manager is deleted"""
+        self.stop_all()

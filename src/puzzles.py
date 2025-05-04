@@ -207,8 +207,8 @@ def main(argv: Sequence[str]) -> None:
     checkpoint_path = '../checkpoints/p1-standard/checkpoint_300000.pt'
     # engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(nodes=1), strategy=MoveSelectionStrategy.POLICY)
     # engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1))
-    # engine = Lc0Engine(chess.engine.Limit(nodes=1))
-    engine = StockfishEngine(chess.engine.Limit(nodes=1000_000))
+    engine = Lc0Engine(chess.engine.Limit(nodes=400))
+    # engine = StockfishEngine(chess.engine.Limit(nodes=1000_000))
     validate_lichess_policy(engine)
     validate_chessbench_policy(engine)
 

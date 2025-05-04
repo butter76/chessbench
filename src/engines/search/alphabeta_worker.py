@@ -50,21 +50,19 @@ class AlphaBetaWorker(utils.SearchWorker):
             raise ValueError("Game is not terminal")
         log = []
         move_count = 0
-        last_move = None
-        while True:
-            log.append(SELF_PLAY_CODER.encode((
-                self.root.board.fen(),
-                last_move.uci() if last_move is not None else "",
-                self.root.value,
-                terminal_reward,
-                move_count,
-                [(move.uci(), self.root.children[i].value) for i, move in enumerate(self.root.moves)] if last_move is not None else []
-            )))
-            if self.root.parent is None:
-                break
+        while self.root.parent is not None:
             last_move = self.root.board.peek()
             self.root = self.root.parent
             move_count += 1
+            terminal_reward *= -1
+            log.append(SELF_PLAY_CODER.encode((
+                self.root.board.fen(),
+                last_move.uci(),
+                self.root.value,
+                terminal_reward,
+                move_count,
+                [(move.uci(), self.root.children[i].value) for i, move in enumerate(self.root.moves)]
+            )))
         return log
         
     def reset(self):

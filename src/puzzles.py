@@ -30,6 +30,7 @@ import bagz
 
 from searchless_chess.src.engines import engine as engine_lib
 from searchless_chess.src.engines.lc0_engine import AllMovesLc0Engine, Lc0Engine
+from searchless_chess.src.engines.stockfish_engine import StockfishEngine
 from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTransformerEngine
 from searchless_chess.src.constants import CODERS
 import searchless_chess.src.utils as utils
@@ -204,9 +205,10 @@ def main(argv: Sequence[str]) -> None:
     if len(argv) > 1:
         raise app.UsageError('Too many command-line arguments.')
     checkpoint_path = '../checkpoints/p1-standard/checkpoint_300000.pt'
-    engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(nodes=1), strategy=MoveSelectionStrategy.POLICY)
+    # engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(nodes=1), strategy=MoveSelectionStrategy.POLICY)
     # engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1))
     # engine = Lc0Engine(chess.engine.Limit(nodes=1))
+    engine = StockfishEngine(chess.engine.Limit(nodes=1000_000))
     validate_lichess_policy(engine)
     validate_chessbench_policy(engine)
 
@@ -218,11 +220,11 @@ def main(argv: Sequence[str]) -> None:
     puzzles = pd.read_csv(puzzles_path, nrows=_NUM_PUZZLES.value)
 
     for strategy in [MoveSelectionStrategy.VALUE, MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
-        engine = MyTransformerEngine(
-            checkpoint_path,
-            chess.engine.Limit(nodes=1),
-            strategy=strategy,
-        )
+        # engine = MyTransformerEngine(
+        #     checkpoint_path,
+        #     chess.engine.Limit(nodes=1),
+        #     strategy=strategy,
+        # )
 
         with open(f'puzzles-{strategy}.txt', 'w') as f:
             num_correct = 0

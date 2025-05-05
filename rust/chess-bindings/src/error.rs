@@ -21,6 +21,9 @@ pub enum ChessError {
 
     #[error("UCI move error: {0}")]
     UciMoveError(#[from] IllegalUciMoveError),
+
+    #[error("Runtime error: {0}")]
+    RuntimeError(String),
 } 
 
 // Implement automatic conversion from ChessError to PyErr

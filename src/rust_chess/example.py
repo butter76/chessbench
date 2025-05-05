@@ -1,143 +1,141 @@
 """
-Example usage of the Rust chess engine
+Example usage of the Rust chess engine with the new SearchThread implementation
 """
 
 import time
-from rust_chess import ChessEngine, EngineManager
+from rust_chess import ChessEngine
 
-def on_move(move_info):
-    """Callback function for move events"""
-    print(f"\nMove callback triggered: {move_info['move']}")
-    # time.sleep(0.5)  # Simulate some processing work
-    return {"status": "received", "message": "Move processed by Python"}
-
-def on_game_end(end_info):
-    """Callback function for game end events"""
-    print(f"\nGame end callback triggered:")
-    print(f"  Result: {end_info['result']}")
-    print(f"  Reason: {end_info['reason']}")
-    print(f"  Final position: {end_info['final_position']}")
-    time.sleep(0.5)  # Simulate some processing work
-    return {"status": "received", "message": "Game end processed by Python"}
-
-def on_eval(eval_info):
-    """Callback function for evaluation events"""
-    print(f"\nEvaluation callback triggered:")
-    print(f"  Score: {eval_info['score']}")
-    print(f"  Depth: {eval_info['depth']}")
-    print(f"  Position: {eval_info['position']}")
-    time.sleep(0.5)  # Simulate some processing work
-    return {"status": "received", "message": "Evaluation processed by Python"}
-
-def standard_engine_example():
-    """Example using the standard single-threaded engine"""
-    print("\n=== Standard Engine Example ===")
-    # Create a new chess engine
+def single_engine_example():
+    """Example using a single chess engine"""
+    print("\n=== Chess Engine Example with SearchThread ===")
+    
+    # Create a new chess engine with starting position
     engine = ChessEngine()
+
+
+    def on_move(move_info):
+        """Callback function for move events"""
+        print(f"\nMove callback triggered: {move_info}")
+        time.sleep(0.5)  # Simulate some processing work
+        return {"status": "received", "message": "Move processed by Python"}
+
+    def on_eval(eval_info):
+        """Callback function for evaluation events"""
+        print(f"\nEvaluation callback triggered:")
+        print(f"  Position: {eval_info}")
+        time.sleep(0.5)  # Simulate some processing work
+        # Don't call submit_eval from within the callback!
+        print("\nReceived evaluation request, will reply separately")
+        return {"status": "received", "message": "Evaluation processed by Python"}
+
+    def on_fen(fen_info):
+        """Callback function for FEN position updates"""
+        print(f"\nFEN callback triggered:")
+        print(f"  New position: {fen_info}")
+        time.sleep(0.5)  # Simulate some processing work
+        return {"status": "received", "message": "Position update processed by Python"}
     
     # Register callbacks
     engine.register_on_move_callback(on_move)
-    engine.register_on_game_end_callback(on_game_end)
     engine.register_on_eval_callback(on_eval)
+    engine.register_on_fen_callback(on_fen)
     
-    # Print the starting position
-    print("Starting position (FEN):", engine.get_fen())
-    
-    # Get legal moves
-    legal_moves = engine.get_legal_moves()
-    print(f"Legal moves ({len(legal_moves)}):", legal_moves)
-    
-    # Make a move (this will trigger the on_move callback)
-    move = "e2e4"  # King's pawn opening
-    print(f"Making move: {move}")
-    engine.make_move(move)
-    
-    # Get the new position and legal moves
-    print("New position (FEN):", engine.get_fen())
-    legal_moves = engine.get_legal_moves()
-    print(f"Legal moves ({len(legal_moves)}):", legal_moves)
+    # Set a new position
+    sicilian_defense = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6 0 2"
+    print(f"\nSetting new position: Sicilian Defense")
+    engine.set_position(sicilian_defense)
 
-def threaded_engine_example():
-    """Example using the multithreaded engine manager"""
-    print("\n=== Threaded Engine Manager Example ===")
+    # Start the engine
+    print("Starting engine...")
+    engine.start()
     
-    # Create an engine manager
-    manager = EngineManager()
-    print(f"Created engine manager")
+    # Give time for callbacks to process
+    time.sleep(1)
     
-    # Create multiple engine instances
-    positions = [
+    # Submit an evaluation separately (not from within the callback)
+    print("\nSubmitting evaluation response")
+    engine.submit_eval(0.5, [("d2d4", 0.8), ("c2c4", 0.2)])
+    
+    # Give more time for processing
+    time.sleep(1)
+    
+    # Check engine status
+    print(f"\nEngine status:")
+    print(f"  Running: {engine.is_running()}")
+    print(f"  Evaluating: {engine.is_evaluating()}")
+    print(f"  Waiting: {engine.is_waiting()}")
+    
+    # Stop the engine
+    print("\nStopping engine...")
+    engine.stop()
+
+def multiple_engine_example():
+    """Example showing how to use multiple engines simultaneously"""
+    print("\n=== Multiple Chess Engines Example ===")
+    
+    # Create engines with different starting positions
+    starting_positions = [
         None,  # Default starting position
         "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6 0 2",  # Sicilian Defense
         "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",  # King's Pawn Opening
     ]
     
-    engine_ids = []
-    for i, fen in enumerate(positions):
-        name = f"Engine {i+1}" + (f" (Default)" if fen is None else f" (Custom)")
+    engines = []
+    for i, pos in enumerate(starting_positions):
+        name = f"Engine {i+1}" + (" (Default)" if pos is None else " (Custom)")
         print(f"Creating {name}")
-        engine_id = manager.create_engine(
-            fen=fen,
-            on_move=on_move,
-            on_game_end=on_game_end,
-            on_eval=on_eval
-        )
-        engine_ids.append(engine_id)
-        print(f"  Engine ID: {engine_id}")
-        print(f"  Position: {manager.get_fen(engine_id)}")
-    
-    print(f"\nActive engines: {manager.active_engines()}")
-    
-    # Make moves on all engines concurrently
-    print("\nMaking moves on all engines concurrently")
-    # This demonstrates that even though callbacks take time (sleep 0.5s),
-    # they don't block other engines
-    start_time = time.time()
-    
-    for i, engine_id in enumerate(engine_ids):
-        moves = [
-            "g1f3" if i != 0 else "d2d4",  # Different first moves
-            # "g1f3",  # Knight to f3
-        ]
+        engine = ChessEngine(fen=pos)
         
-        for move in moves:
-            print(f"Engine {i+1}: Making move {move}")
-            manager.make_move(engine_id, move)
-            # No sleep here - the engines should process concurrently
+        # Create a closure that stores engine index but doesn't call submit_eval
+        def make_callback(idx):
+            def callback(data):
+                print(f"Engine {idx+1} evaluation request: {data}")
+                return {"status": "received"}
+            return callback
+        
+        engine.register_on_eval_callback(make_callback(i))
+        engines.append(engine)
     
-    elapsed = time.time() - start_time
-    print(f"\nAll moves completed in {elapsed:.2f} seconds")
+    # Start all engines
+    print("\nStarting all engines...")
+    for i, engine in enumerate(engines):
+        engine.start()
+        print(f"Engine {i+1} started: {engine.is_running()}")
     
-    # If this were truly sequential, it would take:
-    # 3 engines × 2 moves × 0.5s sleep = 3 seconds minimum
-    # Concurrent execution should be faster
+    # Make different moves on each engine
+    moves = [
+        "e2e4",  # King's pawn
+        "g1f3",  # Knight to f3
+        "d2d4",  # Queen's pawn
+    ]
     
-    # Trigger evaluation callbacks
-    print("\nTriggering evaluation callbacks")
-    for i, engine_id in enumerate(engine_ids):
-        score = 0.1 * (i + 1)  # Different scores for each engine
-        manager.notify_eval(engine_id, score, 10)
+    print("\nMaking moves on all engines...")
+    for i, engine in enumerate(engines):
+        move = moves[i % len(moves)]
+        print(f"Engine {i+1}: Making move {move}")
+        engine.make_move(move)
     
-    # Trigger game end callbacks
-    print("\nTriggering game end callbacks")
-    results = ["1-0", "0-1", "1/2-1/2"]
-    reasons = ["checkmate", "resignation", "draw by agreement"]
+    # Wait for evaluation requests to be processed
+    time.sleep(1)
     
-    for i, engine_id in enumerate(engine_ids):
-        result = results[i % len(results)]
-        reason = reasons[i % len(reasons)]
-        manager.notify_game_end(engine_id, result, reason)
-
-    time.sleep(5)
+    # Submit evaluations to all engines separately (not from callbacks)
+    print("\nSubmitting evaluations...")
+    for i, engine in enumerate(engines):
+        value = 0.1 * (i + 1)
+        engine.submit_eval(value)
+    
+    # Give time for callbacks to process
+    time.sleep(2)
     
     # Stop all engines
-    print("\nStopping all engines")
-    manager.stop_all()
-    print(f"Active engines after stopping: {manager.active_engines()}")
+    print("\nStopping all engines...")
+    for i, engine in enumerate(engines):
+        engine.stop()
+        print(f"Engine {i+1} stopped: not running = {not engine.is_running()}")
 
 def main():
-    # standard_engine_example()
-    threaded_engine_example()
+    single_engine_example()
+    # multiple_engine_example()
 
 if __name__ == "__main__":
     main() 

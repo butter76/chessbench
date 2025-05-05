@@ -1,6 +1,4 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
-use numpy::{IntoPyArray, PyArray1};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashMap;
@@ -15,8 +13,10 @@ use std::num::NonZeroUsize;
 // Import error module and ChessEngine
 mod error;
 mod engine;
-use crate::engine::ChessEngine;
-
+use crate::engine::AlphaBetaEngine;
+use crate::engine::SearchThread;
+use crate::engine::{EvalRequest, EvalResponse};
+use crate::error::ChessError;
 // Global runtime accessible via once_cell
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 
@@ -32,186 +32,43 @@ fn get_runtime() -> &'static Runtime {
 }
 
 // Commands that can be sent to an engine task
-enum EngineCommand {
-    MakeMove(String),
-    GetFen,
-    GetLegalMoves,
-    EvaluatePosition(f32, i32), // score, depth
-    GameEnd(String, String),    // result, reason
+enum SearchThreadCommand {
+    IsRunning,
+    IsEvaluating,
+    IsWaiting,
+    ReceiveMove(String),
+    ReceiveEval(EvalResponse),
+    ReceiveFen(String),
+    Start,
     Stop,
 }
 
 // Responses from engine tasks
-enum EngineResponse {
-    MoveMade(Result<(), PyErr>),
-    Fen(String),
-    LegalMoves(Vec<String>),
+enum ThreadResponse {
+    Running(bool),
+    Evaluating(bool),
+    Waiting(bool),
     Stopped,
     Error(PyErr),
 }
 
 // A handle to an engine task
-struct EngineHandle {
+struct ThreadHandle {
     id: usize,
-    command_tx: Sender<EngineCommand>,
-    response_rx: Receiver<EngineResponse>,
+    command_tx: Sender<SearchThreadCommand>,
+    response_rx: Receiver<ThreadResponse>,
     _task: JoinHandle<()>,
-}
-
-/// A Python wrapper for the Rust ChessEngine
-#[pyclass(unsendable)]
-struct PyChessEngine {
-    engine: ChessEngine,
-    running: bool,
-    on_move_callback: Option<Py<PyAny>>,
-    on_game_end_callback: Option<Py<PyAny>>,
-    on_eval_callback: Option<Py<PyAny>>,
-}
-
-#[pymethods]
-impl PyChessEngine {
-    /// Create a new chess engine with default starting position
-    #[new]
-    fn new() -> Self {
-        Self {
-            engine: ChessEngine::new(),
-            running: false,
-            on_move_callback: None,
-            on_game_end_callback: None,
-            on_eval_callback: None,
-        }
-    }
-
-    /// Create a chess engine from a FEN string
-    #[staticmethod]
-    fn from_fen(fen: &str) -> PyResult<Self> {
-        let engine = ChessEngine::from_fen(fen)?;
-        Ok(Self { 
-            engine,
-            running: false,
-            on_move_callback: None,
-            on_game_end_callback: None,
-            on_eval_callback: None,
-        })
-    }
-
-    /// Register a callback function that will be called when a move is made
-    fn register_on_move_callback(&mut self, callback: Py<PyAny>) -> PyResult<()> {
-        self.on_move_callback = Some(callback);
-        Ok(())
-    }
-
-    /// Register a callback function that will be called when the game ends
-    fn register_on_game_end_callback(&mut self, callback: Py<PyAny>) -> PyResult<()> {
-        self.on_game_end_callback = Some(callback);
-        Ok(())
-    }
-
-    /// Register a callback function that will be called when a position is evaluated
-    fn register_on_eval_callback(&mut self, callback: Py<PyAny>) -> PyResult<()> {
-        self.on_eval_callback = Some(callback);
-        Ok(())
-    }
-
-    /// Get the current position as FEN string
-    fn get_fen(&self) -> String {
-        self.engine.get_fen()
-    }
-    
-    /// Get legal moves for the current position in UCI format
-    fn get_legal_moves(&self) -> Vec<String> {
-        self.engine.get_legal_moves()
-            .into_iter()
-            .map(|m| m.to_string())
-            .collect()
-    }
-    
-    /// Make a move on the board using UCI format
-    fn make_move(&mut self, uci_move: &str) -> PyResult<()> {
-        let chess_move = self.engine.convert_uci_to_move(uci_move)?;
-        self.engine.make_move(&chess_move)?;
-        self.notify_move(uci_move)
-    }
-
-    /// Start the engine
-    fn start(&mut self) -> PyResult<()> {
-        self.running = true;
-        Ok(())
-    }
-
-    /// Stop the engine
-    fn stop(&mut self) -> PyResult<()> {
-        self.running = false;
-        Ok(())
-    }
-
-    fn make_array<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        let rust_vec = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        rust_vec.into_pyarray(py)
-    }
-}
-
-// Private implementations not exposed to Python
-impl PyChessEngine {
-    /// Private method to notify the Python callback about a move
-    fn notify_move(&self, uci_move: &str) -> PyResult<()> {
-        Python::with_gil(|py| {
-            if let Some(callback) = &self.on_move_callback {
-                // Create a dictionary with move information
-                let locals = PyDict::new(py);
-                locals.set_item("move", uci_move)?;
-                
-                // Call the callback
-                let _ = callback.call1(py, (locals,));
-            }
-            Ok(())
-        })
-    }
-
-    /// Private method to notify the Python callback about game end
-    fn notify_game_end(&self, result: &str, reason: &str) -> PyResult<()> {
-        Python::with_gil(|py| {
-            if let Some(callback) = &self.on_game_end_callback {
-                // Create a dictionary with game end information
-                let locals = PyDict::new(py);
-                locals.set_item("result", result)?;
-                locals.set_item("reason", reason)?;
-                locals.set_item("final_position", self.engine.get_fen())?;
-                
-                // Call the callback
-                let _ = callback.call1(py, (locals,));
-            }
-            Ok(())
-        })
-    }
-
-    /// Private method to notify the Python callback about position evaluation
-    fn notify_eval(&self, eval_score: f32, depth: i32) -> PyResult<()> {
-        Python::with_gil(|py| {
-            if let Some(callback) = &self.on_eval_callback {
-                // Create a dictionary with evaluation information
-                let locals = PyDict::new(py);
-                locals.set_item("score", eval_score)?;
-                locals.set_item("depth", depth)?;
-                locals.set_item("position", self.engine.get_fen())?;
-                
-                // Call the callback
-                let _ = callback.call1(py, (locals,));
-            }
-            Ok(())
-        })
-    }
 }
 
 // Engine Manager to handle multiple engine instances
 #[pyclass]
-struct PyEngineManager {
-    engines: Arc<Mutex<HashMap<usize, EngineHandle>>>,
+struct ThreadManager {
+    engines: Arc<Mutex<HashMap<usize, ThreadHandle>>>,
     next_id: AtomicUsize,
 }
 
 #[pymethods]
-impl PyEngineManager {
+impl ThreadManager {
     #[new]
     fn new() -> Self {
         // Initialize the tokio runtime if not already done
@@ -224,11 +81,11 @@ impl PyEngineManager {
     }
     
     /// Create a new engine instance and return its ID
-    fn create_engine(
+    fn create_thread(
         &self, 
         fen: Option<String>,
         on_move_callback: Option<Py<PyAny>>,
-        on_game_end_callback: Option<Py<PyAny>>,
+        on_fen_callback: Option<Py<PyAny>>,
         on_eval_callback: Option<Py<PyAny>>
     ) -> PyResult<usize> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -238,18 +95,15 @@ impl PyEngineManager {
         let (response_tx, response_rx) = bounded(32);
         
         // Create the engine
-        let mut engine = match fen {
-            Some(fen_str) => PyChessEngine::from_fen(&fen_str)?,
-            _ => PyChessEngine::new(),
-        };
+        let mut engine = AlphaBetaEngine::new(fen, 1)?;
         
         // Register callbacks
         if let Some(callback) = on_move_callback {
             engine.register_on_move_callback(callback)?;
         }
         
-        if let Some(callback) = on_game_end_callback {
-            engine.register_on_game_end_callback(callback)?;
+        if let Some(callback) = on_fen_callback {
+            engine.register_on_fen_callback(callback)?;
         }
         
         if let Some(callback) = on_eval_callback {
@@ -257,7 +111,7 @@ impl PyEngineManager {
         }
         
         // Wrap engine in thread-safe containers
-        let engine = Arc::new(Mutex::new(engine));
+        let engine: Arc<Mutex<Box<dyn SearchThread>>> = Arc::new(Mutex::new(Box::new(engine)));
         
         // Spawn the engine task
         let task = get_runtime().spawn(async move {
@@ -266,7 +120,7 @@ impl PyEngineManager {
         });
         
         // Store the handle
-        let handle = EngineHandle {
+        let handle = ThreadHandle {
             id,
             command_tx,
             response_rx,
@@ -278,90 +132,28 @@ impl PyEngineManager {
         Ok(id)
     }
     
-    /// Make a move on the specified engine instance
-    fn make_move(&self, engine_id: usize, uci_move: String) -> PyResult<()> {
-        let engines = self.engines.lock();
-        let handle = engines.get(&engine_id).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
-        })?;
-        
-        // Send the command
-        let tx = handle.command_tx.clone();
-        let rx = handle.response_rx.clone();
-        
-        // Drop the lock before awaiting
-        drop(engines);
-        
-        // Execute the command in the runtime
-        let result = get_runtime().spawn(async move {
-            // Send command
-            tx.send(EngineCommand::MakeMove(uci_move)).await
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send command"))?;
-            
-            // Wait for response
-            match rx.recv().await {
-                Ok(EngineResponse::MoveMade(result)) => result,
-                Ok(EngineResponse::Error(err)) => Err(err),
-                Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Unexpected response")),
-                Err(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Engine task has stopped")),
-            }
-        });
-        
-        Ok(())
-    }
-    
-    /// Get the FEN string from a specific engine
-    fn get_fen(&self, engine_id: usize) -> PyResult<String> {
+    /// Start a specific thread
+    fn start_thread(&self, engine_id: usize) -> PyResult<()> {
         let engines = self.engines.lock();
         let handle = engines.get(&engine_id).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
         })?;
         
         let tx = handle.command_tx.clone();
-        let rx = handle.response_rx.clone();
         
+        // Release the lock
         drop(engines);
         
         get_runtime().block_on(async move {
-            tx.send(EngineCommand::GetFen).await
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send command"))?;
+            tx.send(SearchThreadCommand::Start).await
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send start command"))?;
             
-            match rx.recv().await {
-                Ok(EngineResponse::Fen(fen)) => Ok(fen),
-                Ok(EngineResponse::Error(err)) => Err(err),
-                Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Unexpected response")),
-                Err(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Engine task has stopped")),
-            }
+            Ok(())
         })
     }
     
-    /// Get legal moves from a specific engine
-    fn get_legal_moves(&self, engine_id: usize) -> PyResult<Vec<String>> {
-        let engines = self.engines.lock();
-        let handle = engines.get(&engine_id).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
-        })?;
-        
-        let tx = handle.command_tx.clone();
-        let rx = handle.response_rx.clone();
-        
-        drop(engines);
-        
-        get_runtime().block_on(async move {
-            tx.send(EngineCommand::GetLegalMoves).await
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send command"))?;
-            
-            match rx.recv().await {
-                Ok(EngineResponse::LegalMoves(moves)) => Ok(moves),
-                Ok(EngineResponse::Error(err)) => Err(err),
-                Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Unexpected response")),
-                Err(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Engine task has stopped")),
-            }
-        })
-    }
-    
-    /// Stop a specific engine
-    fn stop_engine(&self, engine_id: usize) -> PyResult<()> {
+    /// Stop a specific thread
+    fn stop_thread(&self, engine_id: usize) -> PyResult<()> {
         let mut engines = self.engines.lock();
         let handle = engines.get(&engine_id).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
@@ -373,42 +165,10 @@ impl PyEngineManager {
         drop(engines);
         
         get_runtime().block_on(async move {
-            tx.send(EngineCommand::Stop).await
+            tx.send(SearchThreadCommand::Stop).await
                 .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send stop command"))?;
             
             Ok(())
-        })
-    }
-    
-    /// Trigger the evaluation callback
-    fn notify_eval(&self, engine_id: usize, score: f32, depth: i32) -> PyResult<()> {
-        let engines = self.engines.lock();
-        let handle = engines.get(&engine_id).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
-        })?;
-        
-        let tx = handle.command_tx.clone();
-        drop(engines);
-        
-        get_runtime().block_on(async move {
-            tx.send(EngineCommand::EvaluatePosition(score, depth)).await
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send eval command"))
-        })
-    }
-    
-    /// Trigger the game end callback
-    fn notify_game_end(&self, engine_id: usize, result: String, reason: String) -> PyResult<()> {
-        let engines = self.engines.lock();
-        let handle = engines.get(&engine_id).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
-        })?;
-        
-        let tx = handle.command_tx.clone();
-        drop(engines);
-        
-        get_runtime().block_on(async move {
-            tx.send(EngineCommand::GameEnd(result, reason)).await
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send game end command"))
         })
     }
 
@@ -416,83 +176,256 @@ impl PyEngineManager {
     fn active_engines(&self) -> usize {
         self.engines.lock().len()
     }
+
+    /// Check if the thread is running
+    fn is_running(&self, engine_id: usize) -> PyResult<bool> {
+        let engines = self.engines.lock();
+        let handle = engines.get(&engine_id).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
+        })?;
+        
+        let tx = handle.command_tx.clone();
+        let rx = handle.response_rx.clone();
+        
+        drop(engines);
+        
+        get_runtime().block_on(async move {
+            tx.send(SearchThreadCommand::IsRunning).await
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send command"))?;
+            
+            match rx.recv().await {
+                Ok(ThreadResponse::Running(is_running)) => Ok(is_running),
+                Ok(ThreadResponse::Error(err)) => Err(err),
+                Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Unexpected response")),
+                Err(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Engine task has stopped")),
+            }
+        })
+    }
+    
+    /// Check if the thread is evaluating
+    fn is_evaluating(&self, engine_id: usize) -> PyResult<bool> {
+        let engines = self.engines.lock();
+        let handle = engines.get(&engine_id).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
+        })?;
+        
+        let tx = handle.command_tx.clone();
+        let rx = handle.response_rx.clone();
+        
+        drop(engines);
+        
+        get_runtime().block_on(async move {
+            tx.send(SearchThreadCommand::IsEvaluating).await
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send command"))?;
+            
+            match rx.recv().await {
+                Ok(ThreadResponse::Evaluating(is_evaluating)) => Ok(is_evaluating),
+                Ok(ThreadResponse::Error(err)) => Err(err),
+                Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Unexpected response")),
+                Err(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Engine task has stopped")),
+            }
+        })
+    }
+    
+    /// Check if the thread is waiting
+    fn is_waiting(&self, engine_id: usize) -> PyResult<bool> {
+        let engines = self.engines.lock();
+        let handle = engines.get(&engine_id).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
+        })?;
+        
+        let tx = handle.command_tx.clone();
+        let rx = handle.response_rx.clone();
+        
+        drop(engines);
+        
+        get_runtime().block_on(async move {
+            tx.send(SearchThreadCommand::IsWaiting).await
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send command"))?;
+            
+            match rx.recv().await {
+                Ok(ThreadResponse::Waiting(is_waiting)) => Ok(is_waiting),
+                Ok(ThreadResponse::Error(err)) => Err(err),
+                Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Unexpected response")),
+                Err(_) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Engine task has stopped")),
+            }
+        })
+    }
+    
+    /// Send a move to the thread
+    fn receive_move(&self, engine_id: usize, uci_move: String) -> PyResult<()> {
+        let engines = self.engines.lock();
+        let handle = engines.get(&engine_id).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
+        })?;
+        
+        let tx = handle.command_tx.clone();
+        
+        drop(engines);
+        
+        get_runtime().block_on(async move {
+            tx.send(SearchThreadCommand::ReceiveMove(uci_move)).await
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send move command"))
+        })
+    }
+    
+    /// Send an evaluation to the thread
+    fn receive_eval(&self, engine_id: usize, value: f32, policy: Vec<(String, f32)>) -> PyResult<()> {
+        let engines = self.engines.lock();
+        let handle = engines.get(&engine_id).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
+        })?;
+        
+        let tx = handle.command_tx.clone();
+        
+        drop(engines);
+        
+        let eval = EvalResponse {
+            value,
+            policy,
+        };
+        
+        get_runtime().block_on(async move {
+            tx.send(SearchThreadCommand::ReceiveEval(eval)).await
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send eval command"))
+        })
+    }
+    
+    /// Send a FEN string to the thread
+    fn receive_fen(&self, engine_id: usize, fen: String) -> PyResult<()> {
+        let engines = self.engines.lock();
+        let handle = engines.get(&engine_id).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Engine ID {} not found", engine_id))
+        })?;
+        
+        let tx = handle.command_tx.clone();
+        
+        drop(engines);
+        
+        get_runtime().block_on(async move {
+            tx.send(SearchThreadCommand::ReceiveFen(fen)).await
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send fen command"))
+        })
+    }
 }
 
 // Implementation of the engine task
 async fn run_engine_task(
-    engine: Arc<Mutex<PyChessEngine>>,
-    command_rx: Receiver<EngineCommand>,
-    response_tx: Sender<EngineResponse>,
+    engine: Arc<Mutex<Box<dyn SearchThread>>>,
+    command_rx: Receiver<SearchThreadCommand>,
+    response_tx: Sender<ThreadResponse>,
 ) {
     while let Ok(command) = command_rx.recv().await {
         match command {
-            EngineCommand::MakeMove(uci_move) => {
-                let result = tokio::task::spawn_blocking({
-                    let engine = engine.clone();
-                    move || {
-                        let mut engine = engine.lock();
-                        engine.make_move(&uci_move)
+            SearchThreadCommand::IsRunning => {
+                let engine_clone = engine.clone();
+                let is_running = tokio::task::spawn_blocking(move || {
+                    let engine = engine_clone.lock();
+                    engine.is_running()
+                }).await.unwrap_or(false); // Default to false on error
+                
+                let _ = response_tx.send(ThreadResponse::Running(is_running)).await;
+            },
+            
+            SearchThreadCommand::IsEvaluating => {
+                let engine_clone = engine.clone();
+                let is_evaluating = tokio::task::spawn_blocking(move || {
+                    let engine = engine_clone.lock();
+                    engine.is_evaluating()
+                }).await.unwrap_or(false); // Default to false on error
+                
+                let _ = response_tx.send(ThreadResponse::Evaluating(is_evaluating)).await;
+            },
+            
+            SearchThreadCommand::IsWaiting => {
+                let engine_clone = engine.clone();
+                let is_waiting = tokio::task::spawn_blocking(move || {
+                    let engine = engine_clone.lock();
+                    engine.is_waiting()
+                }).await.unwrap_or(false); // Default to false on error
+                
+                let _ = response_tx.send(ThreadResponse::Waiting(is_waiting)).await;
+            },
+            
+            SearchThreadCommand::ReceiveMove(uci_move) => {
+                let engine_clone = engine.clone();
+                let _ = tokio::spawn(async move {
+                    let mut engine = engine_clone.lock();
+                    engine.receive_move(&uci_move)
+                });
+            },
+            
+            SearchThreadCommand::ReceiveEval(eval) => {
+                let engine_clone = engine.clone();
+                let _ = tokio::spawn(async move {
+                    let mut engine = engine_clone.lock();
+                    // First, process the evaluation
+                    let _ = engine.receive_eval(eval);
+
+                    // If the engine is still running, trigger the next search step. This
+                    // design prevents holding the mutex across any internal waiting that
+                    // might occur inside `search_step` / `submit_position`.
+                    if engine.is_running() {
+                        let _ = engine.start();
                     }
+                });
+            },
+            
+            SearchThreadCommand::ReceiveFen(fen) => {
+                let engine_clone = engine.clone();
+                let _ = tokio::spawn(async move {
+                    let mut engine = engine_clone.lock();
+                    engine.receive_fen(&fen)
+                });
+            },
+            
+            SearchThreadCommand::Start => {
+                let engine_clone = engine.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    {
+                        let mut eng = engine_clone.lock();
+                        let _ = eng.start();
+                    }
+
+                    loop {
+                        // Acquire lock, perform one step if not waiting, then drop.
+                        {
+                            let mut eng = engine_clone.lock();
+                            if !eng.is_running() {
+                                break;
+                            }
+                            if eng.is_waiting() {
+                                // If waiting for external evaluation, do not take a new step.
+                                // Simply continue the outer loop after dropping the lock.
+                            } else if let Err(_e) = eng.step() {
+                                break;
+                            }
+                        }
+
+                        // Short sleep to yield to other tasks.
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                });
+            },
+            
+            SearchThreadCommand::Stop => {
+                let engine_clone = engine.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut engine = engine_clone.lock();
+                    engine.stop()
                 }).await.unwrap_or_else(|e| {
-                    Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    Err(ChessError::RuntimeError(
                         format!("Task panicked: {}", e)
                     ))
                 });
                 
-                let _ = response_tx.send(EngineResponse::MoveMade(result)).await;
-            },
-            
-            EngineCommand::GetFen => {
-                let fen = tokio::task::spawn_blocking({
-                    let engine = engine.clone();
-                    move || {
-                        let engine = engine.lock();
-                        engine.get_fen()
-                    }
-                }).await.unwrap_or_else(|_| String::from("error"));
-                
-                let _ = response_tx.send(EngineResponse::Fen(fen)).await;
-            },
-            
-            EngineCommand::GetLegalMoves => {
-                let moves = tokio::task::spawn_blocking({
-                    let engine = engine.clone();
-                    move || {
-                        let engine = engine.lock();
-                        engine.get_legal_moves()
-                    }
-                }).await.unwrap_or_else(|_| Vec::new());
-                
-                let _ = response_tx.send(EngineResponse::LegalMoves(moves)).await;
-            },
-            
-            EngineCommand::EvaluatePosition(score, depth) => {
-                let _ = tokio::task::spawn_blocking({
-                    let engine = engine.clone();
-                    move || {
-                        let engine = engine.lock();
-                        let _ = engine.notify_eval(score, depth);
-                    }
-                }).await;
-                
-                // No response needed for notifications
-            },
-            
-            EngineCommand::GameEnd(result, reason) => {
-                let _ = tokio::task::spawn_blocking({
-                    let engine = engine.clone();
-                    move || {
-                        let engine = engine.lock();
-                        let _ = engine.notify_game_end(&result, &reason);
-                    }
-                }).await;
-                
-                // No response needed for notifications
-            },
-            
-            EngineCommand::Stop => {
-                let _ = response_tx.send(EngineResponse::Stopped).await;
-                break;
+                if let Err(err) = result {
+                    let _ = response_tx.send(ThreadResponse::Error(
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", err))
+                    )).await;
+                } else {
+                    let _ = response_tx.send(ThreadResponse::Stopped).await;
+                }
             },
         }
     }
@@ -501,8 +434,7 @@ async fn run_engine_task(
 /// Chess engine Python module
 #[pymodule]
 fn chess_bindings(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyChessEngine>()?;
-    m.add_class::<PyEngineManager>()?;
+    m.add_class::<ThreadManager>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 } 

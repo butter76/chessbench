@@ -3,19 +3,19 @@ Rust-powered Chess Engine Python bindings
 """
 import numpy as np
 try:
-    from .chess_bindings import PyChessEngine, PyEngineManager, __version__
+    from .chess_bindings import ThreadManager, __version__
 except ImportError:
     raise ImportError(
         "Failed to import Rust chess bindings. "
         "Make sure to build the Rust package first using maturin."
     )
 
-__all__ = ["ChessEngine", "EngineManager", "__version__"]
+__all__ = ["ChessEngine", "__version__"]
 
 
 class ChessEngine:
     """
-    Python wrapper for the Rust chess engine
+    Python wrapper for the Rust chess engine using the new ThreadManager API
     """
     
     def __init__(self, fen=None):
@@ -25,191 +25,129 @@ class ChessEngine:
         Args:
             fen: Optional FEN string to start from a specific position
         """
-        if fen is not None:
-            self._engine = PyChessEngine.from_fen(fen)
-        else:
-            self._engine = PyChessEngine()
+        self._manager = ThreadManager()
+        self._engine_id = None
+        self._on_move_callback = None
+        self._on_eval_callback = None
+        self._on_fen_callback = None
+        
+        # Create the engine
+        self._engine_id = self._manager.create_thread(
+            fen=fen,
+            on_move_callback=self._handle_move_callback,
+            on_fen_callback=self._handle_fen_callback,
+            on_eval_callback=self._handle_eval_callback
+        )
+        
+    def _handle_move_callback(self, data):
+        """Internal callback handler for move events"""
+        if self._on_move_callback:
+            return self._on_move_callback(data)
+        return None
+        
+    def _handle_fen_callback(self, data):
+        """Internal callback handler for FEN events"""
+        if self._on_fen_callback:
+            return self._on_fen_callback(data)
+        return None
+        
+    def _handle_eval_callback(self, data):
+        """Internal callback handler for evaluation events"""
+        if self._on_eval_callback:
+            return self._on_eval_callback(data)
+        return None
     
-    def get_fen(self):
-        """Get the current position as FEN string"""
-        return self._engine.get_fen()
+    def start(self):
+        """Start the search thread"""
+        if self._engine_id is not None:
+            self._manager.start_thread(self._engine_id)
     
-    def get_legal_moves(self):
-        """Get a list of legal moves in UCI format"""
-        return self._engine.get_legal_moves()
+    def stop(self):
+        """Stop the search thread"""
+        if self._engine_id is not None:
+            self._manager.stop_thread(self._engine_id)
     
-    def make_move(self, move):
+    def is_running(self):
+        """Check if the search thread is running"""
+        if self._engine_id is not None:
+            return self._manager.is_running(self._engine_id)
+        return False
+    
+    def is_evaluating(self):
+        """Check if the search thread is evaluating a position"""
+        if self._engine_id is not None:
+            return self._manager.is_evaluating(self._engine_id)
+        return False
+    
+    def is_waiting(self):
+        """Check if the search thread is waiting for input"""
+        if self._engine_id is not None:
+            return self._manager.is_waiting(self._engine_id)
+        return False
+    
+    def set_position(self, fen):
+        """
+        Set a new position using FEN notation
+        
+        Args:
+            fen: FEN string representing the position
+        """
+        if self._engine_id is not None:
+            self._manager.receive_fen(self._engine_id, fen)
+    
+    def make_move(self, uci_move):
         """
         Make a move on the board
         
         Args:
             move: Move in UCI format (e.g., "e2e4")
-            
-        Raises:
-            ValueError: If the move is invalid or illegal
         """
-        self._engine.make_move(move)
+        if self._engine_id is not None:
+            self._manager.receive_move(self._engine_id, uci_move)
     
-    def make_array(self):
+    def submit_eval(self, value, policy=None):
         """
-        Create a numpy array from Rust
+        Submit an evaluation for the current position
         
-        Returns:
-            numpy.ndarray: A sample array created in Rust
+        Args:
+            value: Evaluation value
+            policy: Optional move policy as list of (move, probability) tuples
         """
-        return self._engine.make_array()
-        
+        if self._engine_id is not None:
+            policy = policy or []
+            self._manager.receive_eval(self._engine_id, value, policy)
+    
     def register_on_move_callback(self, callback):
         """
         Register a callback to be called when a move is made
         
         Args:
             callback: A function that takes a dictionary with move information
-                      The dictionary contains:
-                      - 'move': The move in UCI format
         """
-        self._engine.register_on_move_callback(callback)
-        
-    def register_on_game_end_callback(self, callback):
+        self._on_move_callback = callback
+    
+    def register_on_fen_callback(self, callback):
         """
-        Register a callback to be called when the game ends
+        Register a callback to be called when a new position is set
         
         Args:
-            callback: A function that takes a dictionary with game end information
-                      The dictionary contains:
-                      - 'result': The game result (e.g., "1-0", "0-1", "1/2-1/2")
-                      - 'reason': The reason for the game ending (e.g., "checkmate", "stalemate")
-                      - 'final_position': The final position as FEN
+            callback: A function that takes a dictionary with position information
         """
-        self._engine.register_on_game_end_callback(callback)
-        
+        self._on_fen_callback = callback
+    
     def register_on_eval_callback(self, callback):
         """
         Register a callback to be called when a position is evaluated
         
         Args:
             callback: A function that takes a dictionary with evaluation information
-                      The dictionary contains:
-                      - 'score': The evaluation score
-                      - 'depth': The search depth
-                      - 'position': The evaluated position as FEN
         """
-        self._engine.register_on_eval_callback(callback)
-
-
-class EngineManager:
-    """
-    Manager for multiple chess engines running in separate threads
-    """
-    
-    def __init__(self):
-        """
-        Initialize a new engine manager
-        """
-        self._manager = PyEngineManager()
-        self._engines = {}
-    
-    def create_engine(self, fen=None, on_move=None, on_game_end=None, on_eval=None):
-        """
-        Create a new engine instance
+        self._on_eval_callback = callback
         
-        Args:
-            fen: Optional FEN string for starting position
-            on_move: Callback for move events
-            on_game_end: Callback for game end events
-            on_eval: Callback for evaluation events
-            
-        Returns:
-            int: Engine ID that can be used to reference this engine later
-        """
-        engine_id = self._manager.create_engine(fen, on_move, on_game_end, on_eval)
-        self._engines[engine_id] = engine_id
-        return engine_id
-    
-    def make_move(self, engine_id, move):
-        """
-        Make a move on the specified engine
-        
-        Args:
-            engine_id: ID of the engine
-            move: Move in UCI format (e.g., "e2e4")
-            
-        Raises:
-            ValueError: If the engine ID is invalid or the move is illegal
-        """
-        return self._manager.make_move(engine_id, move)
-    
-    def get_fen(self, engine_id):
-        """
-        Get the current position from the specified engine
-        
-        Args:
-            engine_id: ID of the engine
-            
-        Returns:
-            str: FEN string representing the position
-        """
-        return self._manager.get_fen(engine_id)
-    
-    def get_legal_moves(self, engine_id):
-        """
-        Get legal moves from the specified engine
-        
-        Args:
-            engine_id: ID of the engine
-            
-        Returns:
-            list: Legal moves in UCI format
-        """
-        return self._manager.get_legal_moves(engine_id)
-    
-    def notify_eval(self, engine_id, score, depth):
-        """
-        Trigger the evaluation callback on the specified engine
-        
-        Args:
-            engine_id: ID of the engine
-            score: Evaluation score
-            depth: Search depth
-        """
-        return self._manager.notify_eval(engine_id, score, depth)
-    
-    def notify_game_end(self, engine_id, result, reason):
-        """
-        Trigger the game end callback on the specified engine
-        
-        Args:
-            engine_id: ID of the engine
-            result: Game result (e.g., "1-0")
-            reason: Reason for game end (e.g., "checkmate")
-        """
-        return self._manager.notify_game_end(engine_id, result, reason)
-    
-    def stop_engine(self, engine_id):
-        """
-        Stop the specified engine
-        
-        Args:
-            engine_id: ID of the engine to stop
-        """
-        if engine_id in self._engines:
-            self._manager.stop_engine(engine_id)
-            del self._engines[engine_id]
-    
-    def stop_all(self):
-        """Stop all engines managed by this manager"""
-        for engine_id in list(self._engines.keys()):
-            self.stop_engine(engine_id)
-    
-    def active_engines(self):
-        """
-        Get the number of active engines
-        
-        Returns:
-            int: Number of active engines
-        """
-        return self._manager.active_engines()
-    
     def __del__(self):
-        """Clean up resources when the manager is deleted"""
-        self.stop_all()
+        """Clean up resources when the engine is deleted"""
+        if self._engine_id is not None:
+            try:
+                self._manager.stop_thread(self._engine_id)
+            except:
+                pass

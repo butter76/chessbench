@@ -30,10 +30,5 @@ pub trait SearchThread: Send + Sync {
     fn is_running(&self) -> bool;
     fn is_evaluating(&self) -> bool;
     fn is_waiting(&self) -> bool;
-
-    /// Perform a single incremental search step. Implementations should return
-    /// immediately if they are currently waiting for an external evaluation so
-    /// that other commands (like `receive_eval`) can proceed concurrently.
-    fn step(&mut self) -> Result<(), ChessError>;
 }
 

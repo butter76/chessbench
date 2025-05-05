@@ -359,15 +359,7 @@ async fn run_engine_task(
                 let engine_clone = engine.clone();
                 let _ = tokio::spawn(async move {
                     let mut engine = engine_clone.lock();
-                    // First, process the evaluation
-                    let _ = engine.receive_eval(eval);
-
-                    // If the engine is still running, trigger the next search step. This
-                    // design prevents holding the mutex across any internal waiting that
-                    // might occur inside `search_step` / `submit_position`.
-                    if engine.is_running() {
-                        let _ = engine.start();
-                    }
+                    engine.receive_eval(eval)
                 });
             },
             
@@ -381,30 +373,9 @@ async fn run_engine_task(
             
             SearchThreadCommand::Start => {
                 let engine_clone = engine.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    {
-                        let mut eng = engine_clone.lock();
-                        let _ = eng.start();
-                    }
-
-                    loop {
-                        // Acquire lock, perform one step if not waiting, then drop.
-                        {
-                            let mut eng = engine_clone.lock();
-                            if !eng.is_running() {
-                                break;
-                            }
-                            if eng.is_waiting() {
-                                // If waiting for external evaluation, do not take a new step.
-                                // Simply continue the outer loop after dropping the lock.
-                            } else if let Err(_e) = eng.step() {
-                                break;
-                            }
-                        }
-
-                        // Short sleep to yield to other tasks.
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
+                let _ = tokio::spawn(async move {
+                    let mut engine = engine_clone.lock();
+                    engine.start()
                 });
             },
             

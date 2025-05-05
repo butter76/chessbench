@@ -109,10 +109,25 @@ impl AlphaBetaEngine {
             }
         });
 
-        // Do NOT block here waiting for a response.  The evaluation will arrive
-        // asynchronously via `receive_eval`, which will attach the evaluated node
-        // and clear the `waiting` flag.  Blocking here would keep the global `engine`
-        // mutex locked and cause a dead-lock.
+        // Wait for notification using Condvar
+        {
+            let mut notified = self.eval_notify_mutex.lock().unwrap();
+            while !*notified {
+                notified = self.eval_notify_condvar.wait(notified).unwrap();
+            }
+            *notified = false; // Reset for next notification
+        }
+
+        self.waiting = false;
+
+        let eval_request = self.eval_request.lock().unwrap();
+        let value = match &*eval_request {
+            Some(req) => req.value,
+            _ => -1.0,
+        };
+
+        let child = Arc::new(Mutex::new(Node::new(board, Some(Arc::downgrade(&self.root)), value, None, false)));
+        self.root.lock().unwrap().add_child(child);
     }
 
     pub fn search_step(&mut self) -> Result<(), ChessError> {
@@ -177,34 +192,13 @@ impl SearchThread for AlphaBetaEngine {
     }
 
     fn receive_eval(&mut self, eval: crate::engine::thread::EvalResponse) -> Result<(), ChessError> {
-        {
-            let mut eval_request = self.eval_request.lock().unwrap();
-            if let Some(request) = eval_request.as_mut() {
-                request.value = eval.value;
-                request.policy = eval.policy.clone();
-            }
+        let mut eval_request = self.eval_request.lock().unwrap();
+        if let Some(request) = eval_request.as_mut() {
+            request.value = eval.value;
+            request.policy = eval.policy;
         }
-        // Add evaluated position as a child of the current root.
-        // We recreate the board from the stored FEN so that we do not rely on
-        // any mutable state that might have changed concurrently.
-        if let Some(request) = &*self.eval_request.lock().unwrap() {
-            // Safely reconstruct the board
-            if let Ok(board) = utils::new_board_from_fen(&request.query) {
-                let child = Arc::new(Mutex::new(Node::new(
-                    board,
-                    Some(Arc::downgrade(&self.root)),
-                    request.value,
-                    None,
-                    false,
-                )));
-                self.root.lock().unwrap().add_child(child);
-            }
-        }
-
-        // Reset waiting flag because evaluation has been supplied.
-        self.waiting = false;
         
-        // Notify waiting search logic (if any) using Condvar.
+        // Notify waiting thread using Condvar
         let mut notified = self.eval_notify_mutex.lock().unwrap();
         *notified = true;
         self.eval_notify_condvar.notify_one();
@@ -236,7 +230,7 @@ impl SearchThread for AlphaBetaEngine {
 
     fn start(&mut self) -> Result<(), ChessError> {
         self.running = true;
-        Ok(())
+        self.search_step()
     }
 
     fn stop(&mut self) -> Result<(), ChessError> {
@@ -254,9 +248,5 @@ impl SearchThread for AlphaBetaEngine {
 
     fn is_waiting(&self) -> bool {
         self.waiting
-    }
-
-    fn step(&mut self) -> Result<(), ChessError> {
-        self.search_step()
     }
 }

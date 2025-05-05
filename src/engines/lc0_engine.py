@@ -46,7 +46,7 @@ class Lc0Engine(engine.Engine):
     self._raw_engine = chess.engine.SimpleEngine.popen_uci(
         command=[bin_path] + options,
     )
-    self._raw_engine.configure({'Threads': 1})
+    self._raw_engine.configure({'Threads': 1, 'MinibatchSize': 1})
 
   def __del__(self) -> None:
     self._raw_engine.close()

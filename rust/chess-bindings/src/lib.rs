@@ -207,24 +207,18 @@ impl PyChessEngine {
 #[pyclass]
 struct PyEngineManager {
     engines: Arc<Mutex<HashMap<usize, EngineHandle>>>,
-    semaphore: Arc<Semaphore>,
     next_id: AtomicUsize,
 }
 
 #[pymethods]
 impl PyEngineManager {
     #[new]
-    fn new(max_concurrent: Option<usize>) -> Self {
+    fn new() -> Self {
         // Initialize the tokio runtime if not already done
         let _ = get_runtime();
         
-        let max = max_concurrent.unwrap_or_else(|| {
-            std::thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(4)
-        });
-        
         Self {
             engines: Arc::new(Mutex::new(HashMap::new())),
-            semaphore: Arc::new(Semaphore::new(max)),
             next_id: AtomicUsize::new(1),
         }
     }
@@ -264,21 +258,11 @@ impl PyEngineManager {
         
         // Wrap engine in thread-safe containers
         let engine = Arc::new(Mutex::new(engine));
-        let semaphore = self.semaphore.clone();
         
         // Spawn the engine task
         let task = get_runtime().spawn(async move {
-            // Acquire permit or wait
-            let permit = match semaphore.acquire().await {
-                Ok(p) => p,
-                Err(_) => return, // Runtime is shutting down
-            };
-            
-            // Run the engine task
+            // Run the engine task directly without semaphore
             run_engine_task(engine, command_rx, response_tx).await;
-            
-            // Release permit when done
-            drop(permit);
         });
         
         // Store the handle

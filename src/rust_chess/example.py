@@ -61,9 +61,9 @@ def threaded_engine_example():
     """Example using the multithreaded engine manager"""
     print("\n=== Threaded Engine Manager Example ===")
     
-    # Create an engine manager with 2 concurrent engines
-    manager = EngineManager(max_concurrent=2)
-    print(f"Created engine manager with 2 concurrent engines")
+    # Create an engine manager
+    manager = EngineManager()
+    print(f"Created engine manager")
     
     # Create multiple engine instances
     positions = [
@@ -96,7 +96,7 @@ def threaded_engine_example():
     
     for i, engine_id in enumerate(engine_ids):
         moves = [
-            "Nf3" if i != 0 else "d2d4",  # Different first moves
+            "g1f3" if i != 0 else "d2d4",  # Different first moves
             # "g1f3",  # Knight to f3
         ]
         

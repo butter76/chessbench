@@ -102,15 +102,11 @@ class EngineManager:
     Manager for multiple chess engines running in separate threads
     """
     
-    def __init__(self, max_concurrent=None):
+    def __init__(self):
         """
         Initialize a new engine manager
-        
-        Args:
-            max_concurrent: Maximum number of engines that can run concurrently.
-                           If None, defaults to the number of CPU cores.
         """
-        self._manager = PyEngineManager(max_concurrent)
+        self._manager = PyEngineManager()
         self._engines = {}
     
     def create_engine(self, fen=None, on_move=None, on_game_end=None, on_eval=None):

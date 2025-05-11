@@ -4,7 +4,7 @@
 # Default parameters
 OUTPUT_DIR="processed_data"
 TEMP_DIR="temp_data"
-DOWNLOAD_WORKERS=4
+DOWNLOAD_WORKERS=6
 PROCESS_WORKERS=30
 BEAM_OUTPUT=""
 
@@ -51,12 +51,6 @@ done
 # Create directories
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$TEMP_DIR"
-
-# Install required packages if not already installed
-pip install -q tqdm requests apache-beam zstandard chess
-
-# Set environment variables
-export PYTHONPATH=$PYTHONPATH:$(dirname $(pwd))
 
 # Run test if requested
 if [ "$RUN_TEST" = true ]; then

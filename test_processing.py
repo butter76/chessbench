@@ -193,4 +193,5 @@ def main():
     logging.info(f"Full process test completed in {full_elapsed:.2f} seconds")
 
 if __name__ == "__main__":
-    main()
+    # main()
+    test_process_only("temp_data/extract_20230701_0017/training-run1-test80-20230701-0017/training.918491883.gz", "processed_data/test.bag")

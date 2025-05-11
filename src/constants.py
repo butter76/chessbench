@@ -135,3 +135,57 @@ CODERS['action_values'] = coders.TupleCoder((
 
 def encode_action_values(data: ActionValuesData) -> bytes:
   return CODERS['action_values'].encode((data.fen, data.move_values))
+
+# Leela Chess Zero data structure
+class LC0DataRecord(NamedTuple):
+  fen: str
+  policy: list[tuple[str, float]]  # List of (move, probability) pairs
+  result: float
+  root_q: float
+  root_d: float
+  played_q: float
+  played_d: float
+  plies_left: int
+  move: str
+
+# Add coder for LC0DataRecord
+CODERS['lc0_data'] = coders.TupleCoder((
+  CODERS['fen'],                                       # fen
+  coders.IterableCoder(                                # policy
+    coders.TupleCoder((CODERS['move'], CODERS['win_prob']))
+  ),
+  CODERS['win_prob'],                                  # result
+  CODERS['win_prob'],                                  # root_q
+  CODERS['win_prob'],                                  # root_d
+  CODERS['win_prob'],                                  # played_q
+  CODERS['win_prob'],                                  # played_d
+  coders.VarIntCoder(),                                # plies_left
+  CODERS['move']                                       # move
+))
+
+def encode_lc0_data(data: LC0DataRecord) -> bytes:
+  return CODERS['lc0_data'].encode((
+    data.fen,
+    data.policy,
+    data.result,
+    data.root_q,
+    data.root_d,
+    data.played_q,
+    data.played_d,
+    data.plies_left,
+    data.move
+  ))
+
+def decode_lc0_data(data_bytes: bytes) -> LC0DataRecord:
+  decoded = CODERS['lc0_data'].decode(data_bytes)
+  return LC0DataRecord(
+    fen=decoded[0],
+    policy=decoded[1],
+    result=decoded[2],
+    root_q=decoded[3],
+    root_d=decoded[4],
+    played_q=decoded[5],
+    played_d=decoded[6],
+    plies_left=decoded[7],
+    move=decoded[8]
+  )

@@ -42,6 +42,10 @@ class Lc0Engine(engine.Engine):
         os.getcwd(),
         # '../lc0/build/release/t1-512x15x8h-distilled-swa-3395000.pb',
         '../lc0/build/release/t3-512x15x16h-distill-swa-2767500.pb',
+        # '../lc0/build/release/768x15x24h-t82-swa-7464000.pb',
+        # '../lc0/build/release/BT4-1024x15x32h-swa-6147500.pb',
+        # '../lc0/build/release/BT4-1740.pb',
+        # '../lc0/build/release/BT3-768x15x24h-swa-2790000.pb',
     )
     options = [f'--weights={weights_path}']
     self._raw_engine = chess.engine.SimpleEngine.popen_uci(

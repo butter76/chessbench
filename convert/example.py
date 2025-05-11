@@ -13,9 +13,10 @@ from typing import List, Dict, Any
 import chess  # For validating legal moves
 import struct  # For unpacking 64-bit integers
 
-from lc0_coder import LC0TrainingDataCoder
-from chunk_parser import read_chunks, ChunkReader, get_chunk_files
-from utils import planes_to_fen, get_uci_move_from_idx, get_input_format_name
+from searchless_chess.convert.lc0_coder import LC0TrainingDataCoder
+from searchless_chess.convert.chunk_parser import read_chunks, ChunkReader, get_chunk_files
+from searchless_chess.convert.utils import planes_to_fen, get_uci_move_from_idx, get_input_format_name
+from searchless_chess.src.constants import LC0DataRecord
 
 
 def setup_logging():
@@ -359,9 +360,14 @@ def simple_convert_example(input_path: str):
     
     Args:
         input_path: Path to the chunk file
+        
+    Returns:
+        List of processed records as LC0DataRecord objects
     """
     coder = LC0TrainingDataCoder(support_v7=False)
     last_board = None
+    output_records = []
+    
     for i, record_bytes in enumerate(read_chunks(input_path)):
         record = coder.decode(record_bytes)
 
@@ -381,7 +387,6 @@ def simple_convert_example(input_path: str):
 
         if planes_len < 832:
             raise Exception(f"Insufficient planes: {planes_len} bytes")
-
 
         # Get the probabilities distribution
         probs = record['probabilities']
@@ -416,9 +421,8 @@ def simple_convert_example(input_path: str):
 
         if i == 0:
             if fen != "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0":
-                print(fen)
                 # This is a non-standard FEN, so we skip it
-                return
+                return []
 
         board = chess.Board(fen)
 
@@ -440,7 +444,8 @@ def simple_convert_example(input_path: str):
         if en_passant_sq is not None:
             fen = " ".join(fen.split(" ")[:3]) + " " + en_passant_sq + " " + " ".join(fen.split(" ")[4:])
             board = chess.Board(fen)
-            python_chess_legal_moves.append(en_passant_move)
+            board.generate_legal_moves()
+            python_chess_legal_moves = [move.uci() for move in board.legal_moves]
 
         played_move = lc0_to_uci_notation(get_uci_move_from_idx(played_idx), board)
         if last_board is not None:
@@ -449,25 +454,33 @@ def simple_convert_example(input_path: str):
             
         assert len(python_chess_legal_moves) == len(lc0_uci_moves)
 
+        # Create policy list of (move, probability) tuples
+        policy = [(move, probs[lc0_uci_moves[uci_to_lc0_notation(move, board)]]) for move in python_chess_legal_moves]
 
-        # Create a dictionary mapping python-chess legal moves to LC0 notation
-        output_record = {
-            'fen': fen,
-            'policy': [(move, probs[lc0_uci_moves[uci_to_lc0_notation(move, board)]]) for move in python_chess_legal_moves],
-            'result': result,
-            'root_q': root_q,
-            'root_d': root_d,
-            'played_q': played_q,
-            'played_d': played_d,
-            'plies_left': plies_left,
-            'move': played_move,
-        }
+        for move, prob in policy:
+            # Make sure this UCI move interpreted by python-chess maps to a legal move as interpreted by Leela
+            assert prob != -1
+        
+        # Create LC0DataRecord instead of dictionary
+        lc0_record = LC0DataRecord(
+            fen=board.fen(),
+            policy=policy,
+            result=result,
+            root_q=root_q,
+            root_d=root_d,
+            played_q=played_q,
+            played_d=played_d,
+            plies_left=plies_left,
+            move=played_move,
+        )
+        
+        output_records.append(lc0_record)
+        
         last_board = board
         last_board.push(chess.Move.from_uci(played_move))
         last_board.apply_mirror()
-
-        print(output_record)
-
+    
+    return output_records
 
 
 def simple_example(input_path: str):

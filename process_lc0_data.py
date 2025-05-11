@@ -203,8 +203,19 @@ def process_data_parallel(tar_urls, num_download_workers=4, num_process_workers=
     files_in_progress = set()
     # Create a queue for files to be downloaded
     download_queue = queue.Queue()
-    # Create a list for successfully downloaded files
-    downloaded_files = []
+    # Create a queue for files that have been downloaded and are ready for processing
+    process_queue = queue.Queue()
+    # Create an event to signal when all downloads are complete
+    all_downloads_complete = threading.Event()
+    # Track successful and failed operations
+    stats = {
+        'downloads_started': 0,
+        'downloads_completed': 0,
+        'downloads_failed': 0,
+        'processing_completed': 0,
+        'processing_failed': 0
+    }
+    stats_lock = threading.Lock()
     
     # Fill the queue with files to download
     for url in tar_urls:
@@ -244,6 +255,8 @@ def process_data_parallel(tar_urls, num_download_workers=4, num_process_workers=
                 
                 # Mark this file as in progress
                 files_in_progress.add(tar_name)
+                with stats_lock:
+                    stats['downloads_started'] += 1
             
             # Download the file
             success = False
@@ -256,12 +269,15 @@ def process_data_parallel(tar_urls, num_download_workers=4, num_process_workers=
                 # Download the file
                 try:
                     tar_path = download_tar(url, temp_dir)
-                    # Add to downloaded files list with thread safety
-                    with download_lock:
-                        downloaded_files.append((url, tar_path))
+                    # Add to process queue
+                    process_queue.put((url, tar_path))
+                    with stats_lock:
+                        stats['downloads_completed'] += 1
                     success = True
-                    logging.info(f"Successfully downloaded: {tar_name}")
+                    logging.info(f"Successfully downloaded: {tar_name} (Queued for processing)")
                 except Exception as e:
+                    with stats_lock:
+                        stats['downloads_failed'] += 1
                     logging.error(f"Failed to download {url}: {e}")
                 
                 # Remove the marker file
@@ -279,6 +295,67 @@ def process_data_parallel(tar_urls, num_download_workers=4, num_process_workers=
                 # Mark task as done
                 download_queue.task_done()
     
+    # Function to process a downloaded file
+    def process_worker():
+        while True:
+            try:
+                # Check if all downloads are complete and the process queue is empty
+                if all_downloads_complete.is_set() and process_queue.empty():
+                    return
+                
+                # Get the next file to process with a timeout
+                try:
+                    url, tar_path = process_queue.get(timeout=1)
+                except queue.Empty:
+                    # No files to process yet, wait and try again
+                    continue
+                
+                tar_name = os.path.basename(url)
+                date_part = tar_name.split('-')[3]  # Extract YYYYMMDD
+                hour_part = tar_name.split('-')[4].split('.')[0]  # Extract HHMM
+                
+                # Create output bag file path and extract directory
+                output_bag = os.path.join(output_dir, f"lc0_data_{date_part}_{hour_part}.bag")
+                extract_dir = os.path.join(temp_dir, f"extract_{date_part}_{hour_part}")
+                
+                try:
+                    # Extract .gz files
+                    gz_files = extract_tar(tar_path, extract_dir)
+                    
+                    # Process each .gz file
+                    success_count = 0
+                    for gz_file in gz_files:
+                        if process_gz_file(gz_file, output_bag):
+                            success_count += 1
+                    
+                    logging.info(f"Successfully processed {success_count}/{len(gz_files)} files from {tar_name}")
+                    
+                    # Clean up
+                    logging.info(f"Cleaning up temporary files for {tar_name}")
+                    shutil.rmtree(extract_dir)
+                    os.remove(tar_path)
+                    
+                    with stats_lock:
+                        stats['processing_completed'] += 1
+                    
+                except Exception as e:
+                    logging.error(f"Error processing {tar_name}: {e}")
+                    # Clean up if possible
+                    if os.path.exists(extract_dir):
+                        shutil.rmtree(extract_dir)
+                    if os.path.exists(tar_path):
+                        os.remove(tar_path)
+                    
+                    with stats_lock:
+                        stats['processing_failed'] += 1
+                
+                finally:
+                    # Mark task as done regardless of success/failure
+                    process_queue.task_done()
+            
+            except Exception as e:
+                logging.error(f"Unhandled error in process worker: {e}")
+    
     # Start download workers
     download_threads = []
     for i in range(num_download_workers):
@@ -287,75 +364,38 @@ def process_data_parallel(tar_urls, num_download_workers=4, num_process_workers=
         thread.start()
         download_threads.append(thread)
     
+    # Start process workers
+    process_threads = []
+    for i in range(num_process_workers):
+        thread = threading.Thread(target=process_worker)
+        thread.daemon = True
+        thread.start()
+        process_threads.append(thread)
+    
     # Wait for all downloads to complete
     download_queue.join()
+    logging.info("All downloads completed or skipped")
     
-    # Stop download workers
-    for thread in download_threads:
+    # Signal that all downloads are complete
+    all_downloads_complete.set()
+    
+    # Wait for all processing to complete
+    process_queue.join()
+    logging.info("All processing completed")
+    
+    # Stop all workers
+    for thread in download_threads + process_threads:
         thread.join(timeout=1)
     
-    logging.info(f"Downloaded {len(downloaded_files)} files. Starting processing...")
+    # Print statistics
+    logging.info("=== Processing Statistics ===")
+    logging.info(f"Downloads started: {stats['downloads_started']}")
+    logging.info(f"Downloads completed: {stats['downloads_completed']}")
+    logging.info(f"Downloads failed: {stats['downloads_failed']}")
+    logging.info(f"Files processed: {stats['processing_completed']}")
+    logging.info(f"Processing failures: {stats['processing_failed']}")
     
-    # Now process the downloaded files
-    def process_downloaded_file(url_tar_tuple):
-        url, tar_path = url_tar_tuple
-        tar_name = os.path.basename(url)
-        date_part = tar_name.split('-')[3]  # Extract YYYYMMDD
-        hour_part = tar_name.split('-')[4].split('.')[0]  # Extract HHMM
-        
-        # Create output bag file path and extract directory
-        output_bag = os.path.join(output_dir, f"lc0_data_{date_part}_{hour_part}.bag")
-        extract_dir = os.path.join(temp_dir, f"extract_{date_part}_{hour_part}")
-        
-        try:
-            # Extract .gz files
-            gz_files = extract_tar(tar_path, extract_dir)
-            
-            # Process each .gz file
-            success_count = 0
-            for gz_file in gz_files:
-                if process_gz_file(gz_file, output_bag):
-                    success_count += 1
-            
-            logging.info(f"Successfully processed {success_count}/{len(gz_files)} files from {tar_name}")
-            
-            # Clean up
-            logging.info(f"Cleaning up temporary files for {tar_name}")
-            shutil.rmtree(extract_dir)
-            os.remove(tar_path)
-            
-            return output_bag
-        
-        except Exception as e:
-            logging.error(f"Error processing {tar_name}: {e}")
-            # Clean up if possible
-            if os.path.exists(extract_dir):
-                shutil.rmtree(extract_dir)
-            if os.path.exists(tar_path):
-                os.remove(tar_path)
-            return None
-    
-    # Use ProcessPoolExecutor for processing since it's CPU bound
-    with concurrent.futures.ProcessPoolExecutor(max_workers=num_process_workers) as process_executor:
-        # Submit processing tasks
-        process_futures = {process_executor.submit(process_downloaded_file, url_tar): url_tar[0] 
-                           for url_tar in downloaded_files}
-        
-        # Process results
-        completed = 0
-        for future in concurrent.futures.as_completed(process_futures):
-            url = process_futures[future]
-            try:
-                output_path = future.result()
-                completed += 1
-                if output_path:
-                    logging.info(f"Completed processing {completed}/{len(downloaded_files)}: {os.path.basename(url)}")
-                else:
-                    logging.warning(f"Failed to process {os.path.basename(url)}")
-            except Exception as e:
-                logging.error(f"Error processing {url}: {e}")
-    
-    logging.info(f"Completed processing {completed}/{len(downloaded_files)} files")
+    return stats['processing_completed']
 
 
 def run_beam_pipeline(input_pattern, output_path):

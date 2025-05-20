@@ -220,12 +220,12 @@ def main(argv: Sequence[str]) -> None:
     )
     puzzles = pd.read_csv(puzzles_path, nrows=_NUM_PUZZLES.value).sample(frac=1)
 
-    for strategy in [MoveSelectionStrategy.ALPHA_BETA_NODE]:
+    for strategy in [MoveSelectionStrategy.MCTS]:
         engine = MyTransformerEngine(
             checkpoint_path,
             chess.engine.Limit(nodes=1),
             strategy=strategy,
-            search_depth=4.6,
+            search_depth=400,
         )
 
         with open(f'puzzles-{strategy}.txt', 'w') as f:

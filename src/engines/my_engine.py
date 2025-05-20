@@ -12,7 +12,7 @@ from searchless_chess.src import constants
 from searchless_chess.src import tokenizer
 from searchless_chess.src.engines import engine
 from searchless_chess.src.models.transformer import ChessTransformer
-from searchless_chess.src.engines.utils.node import Node
+from searchless_chess.src.engines.utils.node import Node, MCTSNode
 from searchless_chess.src.utils import move_to_indices
 import torch
 from torch.amp.autocast_mode import autocast
@@ -30,6 +30,7 @@ class MoveSelectionStrategy(str, Enum):
     NEGAMAX = "negamax"
     ALPHA_BETA = "alpha_beta"
     ALPHA_BETA_NODE = "alpha_beta_node"
+    MCTS = "mcts"
 
 class MyTransformerEngine(engine.Engine):
     def __init__(
@@ -256,7 +257,7 @@ class MyTransformerEngine(engine.Engine):
 
         return max_eval, best_move
 
-    def _create_node(self, board: chess.Board, parent: Optional[Node] = None) -> Node:
+    def _create_node(self, board: chess.Board, parent: Optional[Node] = None, node_class: type[Node] = Node) -> Node:
         terminal_value = None
         if board.is_checkmate():
             terminal_value = -1.0
@@ -264,18 +265,18 @@ class MyTransformerEngine(engine.Engine):
             terminal_value = 0.0
 
         if terminal_value is not None:
-            return Node(board=board, parent=parent, value=terminal_value, terminal=True)
+            return node_class(board=board, parent=parent, value=terminal_value, terminal=True)
         
         self.metrics['num_nodes'] += 1
         output = self.analyse_shallow(board)
         value = output['value'][:, 0] * 2.0 - 1.0 # Move from [0, 1] to [-1, 1]
-        policy = output['policy'].clone()
+        policy = output['opt_policy_split'].clone()
 
         values = value.cpu().float().numpy()
         policies = policy.cpu().float().numpy()
 
         policy, _ = get_policy(board, policies[0])
-        new_node = Node(board=board, parent=parent, value=values[0], policy=policy)
+        new_node = node_class(board=board, parent=parent, value=values[0], policy=policy)
 
         return new_node
 
@@ -368,6 +369,81 @@ class MyTransformerEngine(engine.Engine):
         history[reduced_fen(board)] -= 1
         
         return max_eval, best_move
+    
+    def mcts(self, root: MCTSNode, num_rollouts: int) -> tuple[float, chess.Move]:
+        """
+        Performs Monte Carlo Tree Search with policy-based move ordering.
+        Returns score relative to the current player and the best move found.
+        """
+        for _ in range(num_rollouts):
+            node = root
+            history = defaultdict(int)
+            while not node.is_terminal():
+                history[reduced_fen(node.board)] += 1
+                node, new_node = self._choose_node(node)
+                if new_node:
+                    break
+
+
+            Q = node.get_value()
+            if history[reduced_fen(node.board)] >= 1:
+                # This position has been seen before, so we can return a draw
+                Q = 0.0
+
+            node = node.parent
+            while node is not None:
+                Q = -Q
+                node.avg_in(Q)
+                node = node.parent
+        
+        best_move = None
+        best_N = 0
+        for i, child in enumerate(root.children):
+            if child.N > best_N:
+                best_N = child.N
+                best_move = root.policy[i][0]
+
+        return root.get_value(), best_move
+            
+
+
+    def _choose_node(self, node: MCTSNode) -> tuple[MCTSNode, bool]:
+        """
+        Chooses a child node to expand based on the UCT formula.
+        """
+        c_puct = 2.1
+        best_q = -float('inf')
+        best_idx = -1
+        total_policy = 0.0
+        for i, (_, p) in enumerate(node.policy):
+            
+            if i < len(node.children):
+                child = node.children[i]
+                q = -1 * child.get_value()
+                n = child.N
+                total_policy += p
+            else:
+                # First Play Urgency (FPU)
+                q = node.get_value() + 0.33 * ((total_policy) ** 0.5)
+                n = 0
+            u = c_puct * p * math.sqrt(node.N) / (1 + n)
+            if q + u > best_q:
+                best_q = q + u
+                best_idx = i
+
+
+        if best_idx >= len(node.children):
+            assert best_idx == len(node.children)
+            # Create a new child node
+            child_board = node.board.copy()
+            child_board.push(node.policy[best_idx][0])
+            child_node = self._create_node(child_board, parent=node, node_class=MCTSNode)
+            node.add_child(child_node)
+            return child_node, True
+        return node.children[best_idx], False
+
+    
+
 
     def play(self, board: chess.Board) -> chess.Move:
         self.model.eval()
@@ -435,6 +511,9 @@ class MyTransformerEngine(engine.Engine):
             root_node = self._create_node(board)
             history = defaultdict(int)
             best_value, best_move = self.alpha_beta_policy_node(root_node, self.search_depth, -1.0, 1.0, history)
+        elif self.strategy == MoveSelectionStrategy.MCTS:
+            root_node = self._create_node(board, node_class=MCTSNode)
+            best_value, best_move = self.mcts(root_node, self.search_depth)
 
         else:
              raise ValueError(f"Unknown strategy: {self.strategy}")

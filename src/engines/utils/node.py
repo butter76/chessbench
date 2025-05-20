@@ -112,3 +112,18 @@ class Node:
             result.append(f"{indent}{node.__str__()}")
             
         return "\n".join(result)
+
+class MCTSNode(Node):
+    def __init__(self, board: chess.Board, parent: Optional['MCTSNode'] = None, value: float = 0.0, policy: Optional[List[Tuple[chess.Move, float]]] = None, terminal: bool = False):
+        super().__init__(board, parent, value, policy, terminal)
+        self.Q = value
+        self.N = 1
+
+    def get_value(self) -> float:
+        """Get the value of this node."""
+        return self.Q / self.N
+    
+    def avg_in(self, Q: float):
+        self.Q += Q
+        self.N += 1
+    

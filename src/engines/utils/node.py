@@ -1,7 +1,7 @@
 from typing import Optional, List, Tuple, cast
 import chess
 from collections.abc import Sequence
-
+from searchless_chess.src.engines.utils.nnutils import reduced_fen
 class Node:
     """
     Represents a node in a chess search tree.
@@ -28,9 +28,10 @@ class Node:
         self.moves = list(self.board.generate_legal_moves())
         self.parent = parent
         self.value = value
-        self.policy = policy if policy is not None else [0] * len(self.moves)
+        self.policy = policy if policy is not None else []
         self.terminal = terminal
         self.children: List['Node'] = []
+
         
     def is_root(self) -> bool:
         """Check if this node is the root of the tree (has no parent)."""
@@ -39,6 +40,10 @@ class Node:
     def is_leaf(self) -> bool:
         """Check if this node is a leaf node (has no expanded children)."""
         return len(self.children) == 0
+
+    def is_terminal(self) -> bool:
+        """Check if this node is a terminal state (checkmate, stalemate, etc.)."""
+        return self.terminal
     
     def is_fully_expanded(self) -> bool:
         """
@@ -63,7 +68,7 @@ class Node:
         Get the move with the highest policy value.
         Returns None if no policy is available.
         """
-        if not self.policy:
+        if len(self.policy) == 0:
             return None
         return self.policy[0][0]  # Return the move from the highest policy tuple
     
@@ -86,4 +91,24 @@ class Node:
         value_str = f"{self.value:.4f}"
         move_count = len(self.policy)
         child_count = len(self.children)
-        return f"Node({status}, Value={value_str}, Moves={move_count}, Children={child_count})"
+        return f"Node({self.board.fen()}, Value={value_str}, Moves={move_count}, Children={child_count}, policy: {self.policy})"
+        
+    def print_lineage(self) -> str:
+        """
+        Print this node and all its ancestors in a tree-like structure.
+        Each node is indented based on its depth in the tree.
+        """
+        # Collect all ancestors from root to current
+        ancestors = []
+        current = self
+        while current:
+            ancestors.insert(0, current)
+            current = current.parent
+            
+        # Build the display string
+        result = []
+        for i, node in enumerate(ancestors):
+            indent = "-" * (i + 1) if i > 0 else ""
+            result.append(f"{indent}{node.__str__()}")
+            
+        return "\n".join(result)

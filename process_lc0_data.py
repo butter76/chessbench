@@ -44,21 +44,21 @@ def setup_logging():
 
 def fetch_tar_file_list(base_url="https://storage.lczero.org/files/training_data/test80/"):
     """
-    Fetch list of tar files from Leela's storage, filtering for dates after July 1, 2023
+    Fetch list of tar files from Leela's storage, sorting by most recent first
     
     Args:
         base_url: Base URL for the Leela Chess Zero training data
         
     Returns:
-        List of URLs for tar files dated after July 1, 2023
+        List of URLs for tar files sorted by most recent first
     """
     logging.info(f"Fetching file list from {base_url}")
     response = requests.get(base_url)
     file_pattern = r'(training-run1-test80-\d{8}-\d{4}\.tar)'
     files = re.findall(file_pattern, response.text)
+    cutoff_date = datetime.datetime(2024, 5, 1)
     
-    # Filter files after July 1, 2023
-    cutoff_date = datetime.datetime(2023, 7, 1)
+    # Process all files, no date filtering
     filtered_files = []
     
     for file in files:
@@ -67,11 +67,13 @@ def fetch_tar_file_list(base_url="https://storage.lczero.org/files/training_data
         hour_str = file.split('-')[4].split('.')[0]
         
         file_date = datetime.datetime.strptime(f"{date_str} {hour_str}", "%Y%m%d %H%M")
-        if file_date >= cutoff_date:
-            filtered_files.append(file)
+        if file_date < cutoff_date:
+            # Start processing at May 1st, 2024
+            filtered_files.append((file, file_date))
     
-    sorted_files = sorted(filtered_files)  # Sort by date/time
-    logging.info(f"Found {len(sorted_files)} tar files after July 1, 2023")
+    # Sort files in reverse chronological order (newest first)
+    sorted_files = [file for file, _ in sorted(filtered_files, key=lambda x: x[1], reverse=True)]
+    logging.info(f"Found {len(sorted_files)} tar files sorted by most recent first")
     
     return [f"{base_url}{file}" for file in sorted_files]
 
@@ -338,6 +340,23 @@ def process_data_parallel(tar_urls, num_download_workers=4, num_process_workers=
                     
                     logging.info(f"Worker {worker_id}: Successfully processed {success_count}/{len(gz_files)} files from {tar_name} with {total_records} total records")
                     
+                    # Upload processed bag file to S3/Wasabi
+                    logging.info(f"Worker {worker_id}: Uploading {output_bag} to S3/Wasabi")
+                    try:
+                        filename = os.path.basename(output_bag)
+                        cmd = f'aws s3 mv "{output_bag}" "s3://leela-processed-bag/{filename}" --endpoint-url "https://s3.us-west-1.wasabisys.com" --only-show-errors'
+                        
+                        # Run the upload command
+                        import subprocess
+                        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        
+                        logging.info(f"Worker {worker_id}: Successfully uploaded {filename} to S3/Wasabi")
+                    except Exception as e:
+                        logging.error(f"Worker {worker_id}: Failed to upload {output_bag} to S3/Wasabi: {e}")
+                        # Don't delete the file if upload failed
+                        stats['processing_completed'] += 1
+                        continue
+
                     # Clean up
                     logging.info(f"Worker {worker_id}: Cleaning up temporary files for {tar_name}")
                     shutil.rmtree(extract_dir)

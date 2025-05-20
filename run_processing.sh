@@ -5,7 +5,7 @@
 OUTPUT_DIR="processed_data"
 TEMP_DIR="temp_data"
 DOWNLOAD_WORKERS=6
-PROCESS_WORKERS=30
+PROCESS_WORKERS=52
 BEAM_OUTPUT=""
 
 # Parse command line arguments

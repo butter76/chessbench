@@ -27,6 +27,7 @@ import chess.pgn
 import numpy as np
 import pandas as pd
 import bagz
+from tqdm import tqdm
 
 from searchless_chess.src.engines import engine as engine_lib
 from searchless_chess.src.engines.lc0_engine import AllMovesLc0Engine, Lc0Engine
@@ -45,9 +46,8 @@ lichess_coder = coders.TupleCoder([
 
 _NUM_PUZZLES = flags.DEFINE_integer(
     name='num_puzzles',
-    default=None,
+    default=10000,
     help='The number of puzzles to evaluate.',
-    required=True,
 )
 
 _STRATEGY = flags.DEFINE_enum(
@@ -204,10 +204,11 @@ def validate_lichess_policy(engine: engine_lib.Engine):
 def main(argv: Sequence[str]) -> None:
     if len(argv) > 1:
         raise app.UsageError('Too many command-line arguments.')
-    checkpoint_path = '../checkpoints/p1-standard-bins-121/checkpoint_300000.pt'
+    # checkpoint_path = '../checkpoints/p1/checkpoint_480000.pt'
+    checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt'
     # engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(nodes=1), strategy=MoveSelectionStrategy.POLICY)
     # engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1))
-    engine = Lc0Engine(chess.engine.Limit(nodes=800))
+    # engine = Lc0Engine(chess.engine.Limit(nodes=800))
     # engine = StockfishEngine(chess.engine.Limit(nodes=1000_000))
     # validate_lichess_policy(engine)
     # validate_chessbench_policy(engine)
@@ -217,25 +218,34 @@ def main(argv: Sequence[str]) -> None:
         os.getcwd(),
         '../data/high_rated_puzzles.csv',
     )
-    puzzles = pd.read_csv(puzzles_path, nrows=_NUM_PUZZLES.value)
+    puzzles = pd.read_csv(puzzles_path, nrows=_NUM_PUZZLES.value).sample(frac=1)
 
-    for strategy in [MoveSelectionStrategy.VALUE, MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
-        # engine = MyTransformerEngine(
-        #     checkpoint_path,
-        #     chess.engine.Limit(nodes=1),
-        #     strategy=strategy,
-        # )
+    for strategy in [MoveSelectionStrategy.ALPHA_BETA_NODE]:
+        engine = MyTransformerEngine(
+            checkpoint_path,
+            chess.engine.Limit(nodes=1),
+            strategy=strategy,
+            search_depth=4.6,
+        )
 
         with open(f'puzzles-{strategy}.txt', 'w') as f:
             num_correct = 0
-            for puzzle_id, puzzle in puzzles.iterrows():
+            pbar = tqdm(puzzles.iterrows(), total=len(puzzles), desc=f"Evaluating puzzles ({strategy})")
+            num_iterations = 0
+            for puzzle_id, puzzle in pbar:
                 correct = evaluate_puzzle_from_pandas_row(
                     puzzle=puzzle,
                     engine=engine,
                 )
                 num_correct += correct
+                num_iterations += 1
                 f.write(str({'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}) + '\n')
+                pbar.set_postfix({
+                    'accuracy': f'{num_correct / num_iterations:.2%}',
+                    'avg_nodes': f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}',
+                })
             print(f'{strategy}: {num_correct / len(puzzles):.2%}')
+            print(f'{strategy}: {engine.metrics}')
 
 
 if __name__ == '__main__':

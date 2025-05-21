@@ -308,7 +308,7 @@ class MyTransformerEngine(engine.Engine):
             return 0.0, None
         
         # Leaf node evaluation
-        if depth <= 0.0 and node.is_leaf():
+        if depth <= 1.0 and node.is_leaf():
             return node.value, None
         
         # Safety check against excessive recursion
@@ -325,10 +325,9 @@ class MyTransformerEngine(engine.Engine):
         
         for i, (move, move_weight) in enumerate(node.policy):
             assert move_weight > 0.0
-            # TODO: Mystery constant of 0.1 to prevent extremely long lines
-            new_depth = depth + math.log(move_weight + 1e-6) - 0.1
+            new_depth = (depth - 1.0) * (move_weight + 1e-10)
 
-            if i >= 2 and new_depth <= 0 and i >= len(node.children):
+            if i >= 2 and new_depth <= 1.0 and i >= len(node.children):
                 # Drop the low probability moves until the depth is high enough to explore them
                 # But don't drop the first two moves
                 # And don't drop moves that have already been expanded
@@ -411,7 +410,7 @@ class MyTransformerEngine(engine.Engine):
         """
         Chooses a child node to expand based on the UCT formula.
         """
-        c_puct = 2.1
+        c_puct = 1.745
         best_q = -float('inf')
         best_idx = -1
         total_policy = 0.0
@@ -424,7 +423,11 @@ class MyTransformerEngine(engine.Engine):
                 total_policy += p
             else:
                 # First Play Urgency (FPU)
-                q = node.get_value() + 0.33 * ((total_policy) ** 0.5)
+                if node.parent is not None:
+                    fpu_c = 0.33
+                else:
+                    fpu_c = 1.0
+                q = node.get_value() - fpu_c * ((total_policy) ** 0.5)
                 n = 0
             u = c_puct * p * math.sqrt(node.N) / (1 + n)
             if q + u > best_q:

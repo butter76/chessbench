@@ -270,7 +270,7 @@ class MyTransformerEngine(engine.Engine):
         self.metrics['num_nodes'] += 1
         output = self.analyse_shallow(board)
         value = output['value'][:, 0] * 2.0 - 1.0 # Move from [0, 1] to [-1, 1]
-        policy = output['opt_policy_split'].clone()
+        policy = output['policy'].clone()
 
         values = value.cpu().float().numpy()
         policies = policy.cpu().float().numpy()
@@ -312,7 +312,7 @@ class MyTransformerEngine(engine.Engine):
             return node.value, None
         
         # Safety check against excessive recursion
-        if rec_depth > 80:
+        if rec_depth > 50:
             # If we've recursed too deep, likely a forced three-fold repetition
             print(node.print_lineage())
             raise ValueError("Excessive recursion")
@@ -323,16 +323,18 @@ class MyTransformerEngine(engine.Engine):
 
         history[reduced_fen(board)] += 1
         
+        expanded_move_weight = 0
         for i, (move, move_weight) in enumerate(node.policy):
             assert move_weight > 0.0
-            # TODO: Mystery constant of 0.1 to prevent extremely long lines
+            # TODO: Mystery constant of 0.1
             new_depth = depth + math.log(move_weight + 1e-6) - 0.1
 
-            if i >= 2 and new_depth <= 0 and i >= len(node.children):
-                # Drop the low probability moves until the depth is high enough to explore them
-                # But don't drop the first two moves
-                # And don't drop moves that have already been expanded
-                break
+            if new_depth <= 0 and i >= len(node.children):
+                if i >= 2:
+                    # Drop the low probability moves until the depth is high enough to explore them
+                    # But don't drop the first two moves
+                    # And don't drop moves that have already been expanded
+                    break
                 
             
             if i >= len(node.children):
@@ -365,6 +367,9 @@ class MyTransformerEngine(engine.Engine):
             # Beta cutoff
             if alpha >= beta:
                 break
+
+            if i < len(node.children):
+                expanded_move_weight += move_weight
 
         history[reduced_fen(board)] -= 1
         
@@ -424,7 +429,7 @@ class MyTransformerEngine(engine.Engine):
                 total_policy += p
             else:
                 # First Play Urgency (FPU)
-                q = node.get_value() + 0.33 * ((total_policy) ** 0.5)
+                q = node.get_value() - 0.33 * ((total_policy) ** 0.5)
                 n = 0
             u = c_puct * p * math.sqrt(node.N) / (1 + n)
             if q + u > best_q:
@@ -506,7 +511,7 @@ class MyTransformerEngine(engine.Engine):
         elif self.strategy == MoveSelectionStrategy.NEGAMAX:
             best_value, best_move = self.negamax(board, self.search_depth)
         elif self.strategy == MoveSelectionStrategy.ALPHA_BETA:
-            best_value, best_move = self.alpha_beta_policy(board, self.search_depth, -1.0, 1.0)
+            best_value, best_move = self.alpha_beta(board, self.search_depth, -1.0, 1.0)
         elif self.strategy == MoveSelectionStrategy.ALPHA_BETA_NODE:
             root_node = self._create_node(board)
             history = defaultdict(int)

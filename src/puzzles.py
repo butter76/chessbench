@@ -225,7 +225,7 @@ def main(argv: Sequence[str]) -> None:
             checkpoint_path,
             chess.engine.Limit(nodes=1),
             strategy=strategy,
-            search_depth=6.2,
+            search_depth=6.4,
         )
 
         with open(f'puzzles-{strategy}.txt', 'w') as f:
@@ -243,6 +243,7 @@ def main(argv: Sequence[str]) -> None:
                 pbar.set_postfix({
                     'accuracy': f'{num_correct / num_iterations:.2%}',
                     'avg_nodes': f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}',
+                    'tt_hits': f'{engine.metrics["tt_hits"] / engine.metrics["num_searches"]:.2f}',
                 })
             print(f'{strategy}: {num_correct / len(puzzles):.2%}')
             print(f'{strategy}: {engine.metrics}')

@@ -72,6 +72,7 @@ class MyTransformerEngine(engine.Engine):
             'num_nodes': 0,
             'num_searches': 0,
             'policy_perplexity': 0,
+            'tt_hits': 0,
         }
 
     def _get_ordered_moves(self, board: chess.Board, ordering_strategy: MoveSelectionStrategy | None) -> tuple[list[chess.Move], list[float]]:
@@ -257,7 +258,7 @@ class MyTransformerEngine(engine.Engine):
 
         return max_eval, best_move
 
-    def _create_node(self, board: chess.Board, parent: Optional[Node] = None, node_class: type[Node] = Node) -> Node:
+    def _create_node(self, board: chess.Board, parent: Optional[Node] = None, node_class: type[Node] = Node, tt: dict[str, Node | None] | None = None) -> Node:
         terminal_value = None
         if board.is_checkmate():
             terminal_value = -1.0
@@ -266,6 +267,11 @@ class MyTransformerEngine(engine.Engine):
 
         if terminal_value is not None:
             return node_class(board=board, parent=parent, value=terminal_value, terminal=True)
+        
+
+        if tt is not None and reduced_fen(board) in tt:
+            self.metrics['tt_hits'] += 1
+            return tt[reduced_fen(board)]
         
         self.metrics['num_nodes'] += 1
         output = self.analyse_shallow(board)
@@ -278,11 +284,14 @@ class MyTransformerEngine(engine.Engine):
         policy, _ = get_policy(board, policies[0])
         new_node = node_class(board=board, parent=parent, value=values[0], policy=policy)
 
+        if tt is not None:
+            tt[reduced_fen(board)] = new_node
+
         return new_node
 
 
     
-    def alpha_beta_policy_node(self, node: Node, depth: float, alpha: float, beta: float, history: dict[str, int], rec_depth: int = 0) -> tuple[float, Optional[chess.Move]]:
+    def alpha_beta_policy_node(self, node: Node, depth: float, alpha: float, beta: float, history: dict[str, int], tt: dict[str, Node | None] | None, rec_depth: int = 0) -> tuple[float, Optional[chess.Move]]:
         """
         Node-based alpha-beta search with policy-based move ordering and depth extension.
         Returns score relative to the current player and the best move found.
@@ -294,7 +303,7 @@ class MyTransformerEngine(engine.Engine):
             beta: Upper bound score
             rec_depth: Current recursion depth to prevent infinite loops
             history: Dictionary of previous positions and their counts
-            
+            tt: Transposition table to store and retrieve previously evaluated nodes
         Returns:
             Tuple of (best score, best move)
         """
@@ -342,7 +351,7 @@ class MyTransformerEngine(engine.Engine):
                 # Create a new child node
                 child_board = board.copy()
                 child_board.push(move)
-                child_node = self._create_node(child_board, parent=node)
+                child_node = self._create_node(child_board, parent=node, tt=tt)
                 node.add_child(child_node)
             else:
                 child_node = node.children[i]
@@ -354,6 +363,7 @@ class MyTransformerEngine(engine.Engine):
                 -beta, 
                 -alpha,
                 history,
+                tt,
                 rec_depth + 1
             )
             score = -score  # Negate for current player's perspective
@@ -515,7 +525,8 @@ class MyTransformerEngine(engine.Engine):
         elif self.strategy == MoveSelectionStrategy.ALPHA_BETA_NODE:
             root_node = self._create_node(board)
             history = defaultdict(int)
-            best_value, best_move = self.alpha_beta_policy_node(root_node, self.search_depth, -1.0, 1.0, history)
+            tt = defaultdict(lambda: None)
+            best_value, best_move = self.alpha_beta_policy_node(root_node, self.search_depth, -1.0, 1.0, history, tt)
         elif self.strategy == MoveSelectionStrategy.MCTS:
             root_node = self._create_node(board, node_class=MCTSNode)
             best_value, best_move = self.mcts(root_node, self.search_depth)

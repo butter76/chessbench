@@ -225,7 +225,7 @@ def main(argv: Sequence[str]) -> None:
             checkpoint_path,
             chess.engine.Limit(nodes=1),
             strategy=strategy,
-            search_depth=6.6,
+            search_depth=6.2,
         )
 
         with open(f'puzzles-{strategy}.txt', 'w') as f:

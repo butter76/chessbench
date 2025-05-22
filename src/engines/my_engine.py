@@ -323,14 +323,15 @@ class MyTransformerEngine(engine.Engine):
 
         history[reduced_fen(board)] += 1
         
-        expanded_move_weight = 0
+        total_move_weight = 0
         for i, (move, move_weight) in enumerate(node.policy):
             assert move_weight > 0.0
+
             # TODO: Mystery constant of 0.1
             new_depth = depth + math.log(move_weight + 1e-6) - 0.1
 
             if new_depth <= 0 and i >= len(node.children):
-                if i >= 2:
+                if total_move_weight > 0.85 and i >= 2:
                     # Drop the low probability moves until the depth is high enough to explore them
                     # But don't drop the first two moves
                     # And don't drop moves that have already been expanded
@@ -368,8 +369,7 @@ class MyTransformerEngine(engine.Engine):
             if alpha >= beta:
                 break
 
-            if i < len(node.children):
-                expanded_move_weight += move_weight
+            total_move_weight += move_weight
 
         history[reduced_fen(board)] -= 1
         
@@ -429,7 +429,7 @@ class MyTransformerEngine(engine.Engine):
                 total_policy += p
             else:
                 # First Play Urgency (FPU)
-                q = node.get_value() - 0.33 * ((total_policy) ** 0.5)
+                q = node.get_value() - 0.9 * ((total_policy) ** 0.5)
                 n = 0
             u = c_puct * p * math.sqrt(node.N) / (1 + n)
             if q + u > best_q:

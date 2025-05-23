@@ -31,6 +31,7 @@ class MoveSelectionStrategy(str, Enum):
     ALPHA_BETA = "alpha_beta"
     ALPHA_BETA_NODE = "alpha_beta_node"
     MCTS = "mcts"
+    MTDF = "mtdf"
 
 class MyTransformerEngine(engine.Engine):
     def __init__(
@@ -371,6 +372,13 @@ class MyTransformerEngine(engine.Engine):
             if score > max_eval:
                 max_eval = score
                 best_move = move
+
+            if max_eval == 1.0 and child_node.is_terminal():
+                # The child is a checkmate, so we can convert this node to a terminal node
+                # TODO: This could be a bit better, but it's good enough for now
+                node.value = 1.0
+                node.terminal = True
+                break
                 
             # Update alpha for pruning
             alpha = max(alpha, max_eval)
@@ -384,6 +392,65 @@ class MyTransformerEngine(engine.Engine):
         history[reduced_fen(board)] -= 1
         
         return max_eval, best_move
+    
+    def mtdf(self, root: Node, depth: float, history: dict[str, int], tt: dict[str, Node | None] | None) -> tuple[float, chess.Move]:
+        """
+        Performs MTD(f) search with policy-based move ordering and depth extension.
+        Returns score relative to the current player and the best move found.
+        
+        MTD(f) uses iterative zero-window searches to find the exact minimax value.
+        It's more efficient than regular alpha-beta because it uses narrower search windows.
+        """
+        # Initial guess - use the static evaluation of the root
+        f = root.value
+        best_move = None
+        epsilon = 0.0001  # Small value for zero-window searches
+        max_iterations = 15  # Prevent infinite loops
+        
+        upperbound = 1.0   # Maximum possible score (win)
+        lowerbound = -1.0  # Minimum possible score (loss)
+        
+        for iteration in range(max_iterations):
+            # Choose search window based on current bounds
+            if abs(f - lowerbound) < epsilon:
+                # Test if true value is > f (upper bound search)
+                alpha = f
+                beta = f + epsilon
+            else:
+                # Test if true value is < f (lower bound search)  
+                alpha = f - epsilon
+                beta = f
+                
+            # Perform zero-window search
+            score, move = self.alpha_beta_policy_node(root, depth, alpha, beta, history, tt)
+            
+            if move is not None:
+                best_move = move
+                
+            # Update our bounds and f based on the result
+            if score <= alpha:
+                # True value is <= alpha, so update upper bound
+                upperbound = min(upperbound, score)
+                f = score
+            elif score >= beta:
+                # True value is >= beta, so update lower bound
+                lowerbound = max(lowerbound, score)
+                f = score
+            else:
+                # We have an exact value (alpha < score < beta)
+                f = score
+                break
+                
+            # Check for convergence - bounds have essentially met
+            if upperbound <= lowerbound + epsilon:
+                f = (upperbound + lowerbound) / 2.0
+                break
+                
+            # Safety check against getting stuck
+            if abs(f) >= 1.0 - epsilon:
+                break
+        
+        return f, best_move
     
     def mcts(self, root: MCTSNode, num_rollouts: int) -> tuple[float, chess.Move]:
         """
@@ -530,6 +597,12 @@ class MyTransformerEngine(engine.Engine):
         elif self.strategy == MoveSelectionStrategy.MCTS:
             root_node = self._create_node(board, node_class=MCTSNode)
             best_value, best_move = self.mcts(root_node, self.search_depth)
+        elif self.strategy == MoveSelectionStrategy.MTDF:
+            root_node = self._create_node(board)
+            history = defaultdict(int)
+            tt = defaultdict(lambda: None)
+            best_value, best_move = self.mtdf(root_node, self.search_depth, history, tt)
+
 
         else:
              raise ValueError(f"Unknown strategy: {self.strategy}")

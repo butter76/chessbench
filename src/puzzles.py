@@ -227,7 +227,7 @@ def main(argv: Sequence[str]) -> None:
                 pbar.set_postfix({
                     'accuracy': f'{num_correct / num_iterations:.2%}',
                     'avg_nodes': f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}',
-                    'tt_hits': f'{engine.metrics["tt_hits"] / engine.metrics["num_searches"]:.2f}',
+                    'perplexity': f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}',
                 })
             print(f'{strategy}: {num_correct / len(puzzles):.2%}')
             print(f'{strategy}: {engine.metrics}')
@@ -274,6 +274,7 @@ def main(argv: Sequence[str]) -> None:
             pbar.set_postfix({
                 'nodes': f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}',
                 'accuracy': f'{total_top1_match / total_positions:.2%}' if total_positions > 0 else '0.00%',
+                'perplexity': f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}',
             })
 
         print(f"Lichess Top-1 move match rate: {total_top1_match/total_positions:.4f}")

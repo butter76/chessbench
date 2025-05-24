@@ -282,7 +282,8 @@ class MyTransformerEngine(engine.Engine):
         values = value.cpu().float().numpy()
         policies = policy.cpu().float().numpy()
 
-        policy, _ = get_policy(board, policies[0])
+        policy, _, perplexity = get_policy(board, policies[0])
+        self.metrics['policy_perplexity'] += perplexity
         new_node = node_class(board=board, parent=parent, value=values[0], policy=policy)
 
         if tt is not None:

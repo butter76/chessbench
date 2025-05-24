@@ -14,6 +14,13 @@ def get_policy(board: chess.Board, output: torch.Tensor):
     flat_output = output.reshape(-1)
     exp_output = np.exp(flat_output - np.max(flat_output))  # Subtract max for numerical stability
     softmax_output = exp_output / exp_output.sum()
+    
+    # Compute perplexity
+    # Perplexity = exp(-sum(p * log(p))) where p are the probabilities
+    log_probs = np.log(softmax_output + 1e-12)  # Add small epsilon to avoid log(0)
+    entropy = -np.sum(softmax_output * log_probs)
+    perplexity = np.exp(entropy)
+    
     output = softmax_output.reshape(68, 68)
 
     result = []
@@ -25,7 +32,7 @@ def get_policy(board: chess.Board, output: torch.Tensor):
         policy_map[move] = policy
     # Sort by policy in descending order
     result.sort(key=lambda x: x[1], reverse=True)
-    return result, policy_map
+    return result, policy_map, np.mean(perplexity)
 
 def reduced_fen(board: chess.Board) -> str:
     return ' '.join(board.fen().split(' ')[:4])

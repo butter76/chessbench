@@ -274,23 +274,6 @@ class ChessTransformer(nn.Module):
             ) for _ in range(3 * config.num_layers // 4)]
         ])
 
-        # # DENSE ATTENTION
-        # self.transformer = nn.ModuleList([
-        #     DANetLayer(
-        #         ModelConfig(
-        #             self.vocab_size,
-        #             hidden_size= config.embedding_dim,
-        #             num_hidden_layers=config.num_layers,
-        #             num_attention_heads=config.num_heads,
-        #             intermediate_size=int(config.widening_factor),
-        #             hidden_act="gelu",
-        #             max_position_embeddings=self.seq_len,
-
-                    
-        #         ), layer_number
-        #     ) for layer_number in range(config.num_layers)
-        # ])
-
         self.self_head = nn.Linear(config.embedding_dim, self.vocab_size)
 
         self.value_head = nn.Sequential(

@@ -11,11 +11,6 @@ import math
 from searchless_chess.src import config as config_lib
 from searchless_chess.src import data_loader
 from searchless_chess.src import tokenizer
-from searchless_chess.src import utils
-from torch.nn.attention import SDPBackend, sdpa_kernel
-
-from searchless_chess.src.models.dense_attention.danet_layers import DANetLayer
-from searchless_chess.src.models.dense_attention.model_config import ModelConfig
 
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:

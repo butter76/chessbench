@@ -43,16 +43,9 @@ lichess_coder = coders.TupleCoder([
     coders.FloatCoder(),
 ])
 
-
-_NUM_PUZZLES = flags.DEFINE_integer(
-    name='num_puzzles',
-    default=10000,
-    help='The number of puzzles to evaluate.',
-)
-
 _STRATEGY = flags.DEFINE_enum(
     name='strategy',
-    default='value',
+    default='mtdf',
     enum_values=[
         'value',
         'avs',
@@ -62,8 +55,27 @@ _STRATEGY = flags.DEFINE_enum(
         'opt_policy_split',
         'negamax',
         'alpha_beta',
+        'alpha_beta_node',
+        'mcts',
+        'mtdf',
     ],
     help='The move selection strategy to use for my_engine.',
+)
+
+_TYPE = flags.DEFINE_enum(
+    name='type',
+    default='tactical',
+    enum_values=[
+        'positional',
+        'tactical',
+    ],
+    help='The type of puzzles to evaluate.',
+)
+
+_DEPTH = flags.DEFINE_float(
+    name='depth',
+    default=6.73,
+    help='The search depth to use for search-based strategies.',
 )
 
 
@@ -102,7 +114,7 @@ def evaluate_puzzle_from_board(
     board.push(chess.Move.from_uci(move))
   return True
 
-def validate_chessbench_policy(engine: engine_lib.Engine):
+def validate_chessbench(engine: engine_lib.Engine):
     """Sample positions from validation set and compare MyEngine policy with dataset policy."""
     print("Validating MyEngine policy against dataset policy...")
 
@@ -167,38 +179,9 @@ def validate_chessbench_policy(engine: engine_lib.Engine):
     print(f"Chessbench Top-1 move match rate: {total_top1_match/total_positions:.4f}")
 
 
-def validate_lichess_policy(engine: engine_lib.Engine):
+def validate_lichess(engine: engine_lib.Engine):
     """Sample positions from validation set and compare MyEngine policy with dataset policy."""
     print("Validating MyEngine policy against dataset policy...")
-
-    # Create validation dataloader
-    bag_source = bagz.BagDataSource('../data/lichess_data.bag')
-
-    val_iter = iter(bag_source)
-
-    # Track metrics
-    total_positions = 0
-    total_top1_match = 0.0
-
-    explore = False
-    for i in range(1000000):
-        if (i % 100 == 0):
-            explore = True
-        if not explore:
-            continue
-
-        element = next(val_iter)
-        fen, move, win_prob = lichess_coder.decode(element)
-        if not (0.564 < win_prob < 0.65):
-            continue
-        board = chess.Board(fen)
-        best_move = engine.play(board).uci()
-        if move == best_move:
-            total_top1_match += 1
-        total_positions += 1
-        explore = False
-
-    print(f"Lichess Top-1 move match rate: {total_top1_match/total_positions:.4f}")
 
 
 def main(argv: Sequence[str]) -> None:
@@ -206,27 +189,28 @@ def main(argv: Sequence[str]) -> None:
         raise app.UsageError('Too many command-line arguments.')
     # checkpoint_path = '../checkpoints/p1/checkpoint_480000.pt'
     checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt'
-    # engine = MyTransformerEngine(checkpoint_path=checkpoint_path, limit=chess.engine.Limit(nodes=1), strategy=MoveSelectionStrategy.POLICY)
+
+    strategy = _STRATEGY.value
+    engine = MyTransformerEngine(
+        checkpoint_path,
+        chess.engine.Limit(nodes=1),
+        strategy=strategy,
+        search_depth=_DEPTH.value,
+    )
     # engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1))
     # engine = Lc0Engine(chess.engine.Limit(nodes=800))
     # engine = StockfishEngine(chess.engine.Limit(nodes=1000_000))
-    # validate_lichess_policy(engine)
-    # validate_chessbench_policy(engine)
 
+    if _TYPE.value == 'tactical':
+        # Evaluates on 10_000 random puzzles from Lichess' most difficult puzzles
+        # Puzzles are many moves long, and every move is an only move or a checkmate
+        # This is a good proxy for the tactical accuracy needed to evaluate subtrees
 
-    puzzles_path = os.path.join(
-        os.getcwd(),
-        '../data/high_rated_puzzles.csv',
-    )
-    puzzles = pd.read_csv(puzzles_path, nrows=_NUM_PUZZLES.value).sample(frac=1)
-
-    for strategy in [MoveSelectionStrategy.MTDF]:
-        engine = MyTransformerEngine(
-            checkpoint_path,
-            chess.engine.Limit(nodes=1),
-            strategy=strategy,
-            search_depth=6.7,
+        puzzles_path = os.path.join(
+            os.getcwd(),
+            '../data/high_rated_puzzles.csv',
         )
+        puzzles = pd.read_csv(puzzles_path, nrows=10000).sample(frac=1)
 
         with open(f'puzzles-{strategy}.txt', 'w') as f:
             num_correct = 0
@@ -247,6 +231,52 @@ def main(argv: Sequence[str]) -> None:
                 })
             print(f'{strategy}: {num_correct / len(puzzles):.2%}')
             print(f'{strategy}: {engine.metrics}')
+
+    elif _TYPE.value == 'positional':
+        # Evaluates on 10_000 random positions from lichess that were analyzed by Stockfish
+        # for at least 1 billion nodes on positions that are not obviously drawn or won
+        # which was estimated to be positions between +0.70 and +1.40 evaluation
+        # This is a good proxy for the positional accuracy needed in a real game
+        # However, it is not possible to reach 100% accuracy on this dataset, as the
+        # Stockfish evaluation is not perfect
+
+        # Create validation dataloader
+        bag_source = bagz.BagDataSource('../data/lichess_data.bag')
+
+        val_iter = iter(bag_source)
+
+        # Track metrics
+        total_positions = 0
+        total_top1_match = 0.0
+
+        explore = False
+        pbar = tqdm(range(10000), desc=f"Evaluating positions ({strategy})")
+        
+        for i in range(1000000):
+            if (i % 100 == 0):
+                explore = True
+            if not explore:
+                continue
+
+            element = next(val_iter)
+            fen, move, win_prob = lichess_coder.decode(element)
+            if not (0.564 < win_prob < 0.65):
+                continue
+            board = chess.Board(fen)
+            best_move = engine.play(board).uci()
+            if move == best_move:
+                total_top1_match += 1
+            total_positions += 1
+            explore = False
+
+            pbar.update(1)
+            
+            pbar.set_postfix({
+                'nodes': f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}',
+                'accuracy': f'{total_top1_match / total_positions:.2%}' if total_positions > 0 else '0.00%',
+            })
+
+        print(f"Lichess Top-1 move match rate: {total_top1_match/total_positions:.4f}")
 
 
 if __name__ == '__main__':

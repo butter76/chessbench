@@ -29,3 +29,6 @@ Stockfish/
 checkpoints/
 *.txt
 testing/
+target/
+temp_data/
+processed_data/

@@ -78,6 +78,12 @@ _DEPTH = flags.DEFINE_float(
     help='The search depth to use for search-based strategies.',
 )
 
+_NETWORK = flags.DEFINE_enum(
+    name='network',
+    default=None,
+    enum_values=['t1d', 't1s', 't3d', 't82', 'bt4', 'bt3', 'ls15'],
+    help='The network to use for Lc0Engine.',
+)
 
 def evaluate_puzzle_from_pandas_row(
     puzzle: pd.Series,
@@ -187,19 +193,25 @@ def validate_lichess(engine: engine_lib.Engine):
 def main(argv: Sequence[str]) -> None:
     if len(argv) > 1:
         raise app.UsageError('Too many command-line arguments.')
-    # checkpoint_path = '../checkpoints/p1/checkpoint_480000.pt'
-    checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt'
-
     strategy = _STRATEGY.value
-    engine = MyTransformerEngine(
-        checkpoint_path,
-        chess.engine.Limit(nodes=1),
-        strategy=strategy,
-        search_depth=_DEPTH.value,
-    )
-    # engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1))
-    # engine = Lc0Engine(chess.engine.Limit(nodes=800))
-    # engine = StockfishEngine(chess.engine.Limit(nodes=1000_000))
+    MY_ENGINE = False
+    if _NETWORK.value is not None:
+        if strategy == 'value':
+            # DEPTH 1 SEARCH
+            engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1), network=_NETWORK.value)
+        else:
+            # 400 NODE MCTS
+            engine = Lc0Engine(chess.engine.Limit(nodes=400), network=_NETWORK.value)
+    else:
+        MY_ENGINE = True
+        # checkpoint_path = '../checkpoints/p1/checkpoint_480000.pt'
+        checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt'
+        engine = MyTransformerEngine(
+            checkpoint_path,
+            chess.engine.Limit(nodes=1),
+            strategy=strategy,
+            search_depth=_DEPTH.value,
+        )
 
     if _TYPE.value == 'tactical':
         # Evaluates on 10_000 random puzzles from Lichess' most difficult puzzles
@@ -224,13 +236,14 @@ def main(argv: Sequence[str]) -> None:
                 num_correct += correct
                 num_iterations += 1
                 f.write(str({'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}) + '\n')
-                pbar.set_postfix({
+                stats = {
                     'accuracy': f'{num_correct / num_iterations:.2%}',
-                    'avg_nodes': f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}',
-                    'perplexity': f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}',
-                })
+                }
+                if MY_ENGINE:
+                    stats['nodes'] = f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}'
+                    stats['perplexity'] = f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}'
+                pbar.set_postfix(stats)
             print(f'{strategy}: {num_correct / len(puzzles):.2%}')
-            print(f'{strategy}: {engine.metrics}')
 
     elif _TYPE.value == 'positional':
         # Evaluates on 10_000 random positions from lichess that were analyzed by Stockfish
@@ -270,12 +283,15 @@ def main(argv: Sequence[str]) -> None:
             explore = False
 
             pbar.update(1)
-            
-            pbar.set_postfix({
-                'nodes': f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}',
+
+            stats = {
                 'accuracy': f'{total_top1_match / total_positions:.2%}' if total_positions > 0 else '0.00%',
-                'perplexity': f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}',
-            })
+            }
+            if MY_ENGINE:
+                stats['nodes'] = f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}'
+                stats['perplexity'] = f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}'
+            
+            pbar.set_postfix(stats)
 
         print(f"Lichess Top-1 move match rate: {total_top1_match/total_positions:.4f}")
 

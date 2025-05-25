@@ -15,12 +15,21 @@
 
 """Implements a Leela Chess Zero engine."""
 
+from enum import Enum
 import os
 
 import chess.engine
 
 from searchless_chess.src.engines import engine
 
+class Lc0Network(str, Enum):
+  T1D = 't1d',
+  T1S = 't1s',
+  T3D = 't3d',
+  T82 = 't82',
+  BT4 = 'bt4',
+  BT3 = 'bt3',
+  LS15 = 'ls15',
 
 class Lc0Engine(engine.Engine):
   """Leela Chess Zero with the biggest available network.
@@ -31,6 +40,7 @@ class Lc0Engine(engine.Engine):
   def __init__(
       self,
       limit: chess.engine.Limit,
+      network: Lc0Network = Lc0Network.T1D,
   ) -> None:
     self._limit = limit
     bin_path = os.path.join(
@@ -38,20 +48,31 @@ class Lc0Engine(engine.Engine):
         '../lc0/build/release/lc0',
     )
     # We use the biggest available network.
+    if network == Lc0Network.T1D:
+      network_path = '../lc0/build/release/t1-512x15x8h-distilled-swa-3395000.pb'
+    elif network == Lc0Network.T1S:
+      network_path = '../lc0/build/release/t1-256x10-distilled-swa-2432500.pb'
+    elif network == Lc0Network.T3D:
+      network_path = '../lc0/build/release/t3-512x15x16h-distill-swa-2767500.pb'
+    elif network == Lc0Network.T82:
+      network_path = '../lc0/build/release/768x15x24h-t82-swa-7464000.pb'
+    elif network == Lc0Network.BT4:
+      network_path = '../lc0/build/release/BT4-1740.pb'
+    elif network == Lc0Network.BT3:
+      network_path = '../lc0/build/release/BT3-768x15x24h-swa-2790000.pb'
+    elif network == Lc0Network.LS15:
+      network_path = '../lc0/build/release/LS15-20x256SE-jj-9-75000000.pb'
+    else:
+      raise ValueError(f'Network {network} not found.')
     weights_path = os.path.join(
         os.getcwd(),
-        # '../lc0/build/release/t1-512x15x8h-distilled-swa-3395000.pb',
-        '../lc0/build/release/t3-512x15x16h-distill-swa-2767500.pb',
-        # '../lc0/build/release/768x15x24h-t82-swa-7464000.pb',
-        # '../lc0/build/release/BT4-1024x15x32h-swa-6147500.pb',
-        # '../lc0/build/release/BT4-1740.pb',
-        # '../lc0/build/release/BT3-768x15x24h-swa-2790000.pb',
+        network_path,
     )
     options = [f'--weights={weights_path}']
     self._raw_engine = chess.engine.SimpleEngine.popen_uci(
         command=[bin_path] + options,
     )
-    self._raw_engine.configure({'Threads': 1})
+    self._raw_engine.configure({'Threads': 1, 'MinibatchSize': 1})
 
   def __del__(self) -> None:
     self._raw_engine.close()

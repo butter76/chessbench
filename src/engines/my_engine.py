@@ -74,6 +74,7 @@ class MyTransformerEngine(engine.Engine):
             'num_searches': 0,
             'policy_perplexity': 0,
             'tt_hits': 0,
+            'depth': 0,
         }
 
     def _get_ordered_moves(self, board: chess.Board, ordering_strategy: MoveSelectionStrategy | None) -> tuple[list[chess.Move], list[float]]:
@@ -453,6 +454,18 @@ class MyTransformerEngine(engine.Engine):
         
         return f, best_move
     
+    def mtdf_id(self, root: Node, num_nodes: int, history: dict[str, int], tt: dict[str, Node | None] | None) -> tuple[float, chess.Move]:
+        """
+        Performs MTD(f) search with iterative deepening.
+        """
+        depth = 0.2
+        node_count = self.metrics['num_nodes']
+        while self.metrics['num_nodes'] - node_count < num_nodes * 0.95 and depth < 20:
+            score, move = self.mtdf(root, depth, history, tt)
+            depth += 0.2
+        self.metrics['depth'] += depth
+        return score, move
+    
     def mcts(self, root: MCTSNode, num_rollouts: int) -> tuple[float, chess.Move]:
         """
         Performs Monte Carlo Tree Search with policy-based move ordering.
@@ -602,7 +615,7 @@ class MyTransformerEngine(engine.Engine):
             root_node = self._create_node(board)
             history = defaultdict(int)
             tt = defaultdict(lambda: None)
-            best_value, best_move = self.mtdf(root_node, self.search_depth, history, tt)
+            best_value, best_move = self.mtdf_id(root_node, 400, history, tt)
 
 
         else:

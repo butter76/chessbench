@@ -242,6 +242,7 @@ def main(argv: Sequence[str]) -> None:
                 if MY_ENGINE:
                     stats['nodes'] = f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}'
                     stats['perplexity'] = f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}'
+                    stats['depth'] = f'{engine.metrics["depth"] / engine.metrics["num_searches"]:.2f}'
                 pbar.set_postfix(stats)
             print(f'{strategy}: {num_correct / len(puzzles):.2%}')
 
@@ -290,6 +291,7 @@ def main(argv: Sequence[str]) -> None:
             if MY_ENGINE:
                 stats['nodes'] = f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}'
                 stats['perplexity'] = f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}'
+                stats['depth'] = f'{engine.metrics["depth"] / engine.metrics["num_searches"]:.2f}'
             
             pbar.set_postfix(stats)
 

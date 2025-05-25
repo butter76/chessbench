@@ -210,7 +210,7 @@ def main(argv: Sequence[str]) -> None:
             checkpoint_path,
             chess.engine.Limit(nodes=1),
             strategy=strategy,
-            search_depth=_DEPTH.value,
+            search_depth=_DEPTH.value if strategy != 'mcts' else 400,
         )
 
     if _TYPE.value == 'tactical':

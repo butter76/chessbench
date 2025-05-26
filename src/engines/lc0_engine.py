@@ -93,10 +93,14 @@ class Lc0Engine(engine.Engine):
       else:
         score = chess.engine.Mate(moves=0)
       return {'score': chess.engine.PovScore(score, turn=board.turn)}
+    # NOTE: I'm turning off tree reusage to keep things fair
+    self._raw_engine.protocol.send_line('ucinewgame')
     return self._raw_engine.analyse(board, limit=self._limit)
 
   def play(self, board: chess.Board) -> chess.Move:
     """Returns the best move from the Lc0 engine."""
+    # NOTE: I'm turning off tree reusage to keep things fair
+    self._raw_engine.protocol.send_line('ucinewgame')
     best_move = self._raw_engine.play(board, limit=self._limit).move
     if best_move is None:
       raise ValueError('No best move found, something went wrong.')

@@ -264,7 +264,7 @@ class MyTransformerEngine(engine.Engine):
         terminal_value = None
         if board.is_checkmate():
             terminal_value = -1.0
-        elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves():
+        elif board.is_stalemate() or board.is_insufficient_material() or board.is_fifty_moves():
             terminal_value = 0.0
 
         if terminal_value is not None:
@@ -272,6 +272,7 @@ class MyTransformerEngine(engine.Engine):
         
 
         if tt is not None and reduced_fen(board) in tt:
+            # TODO: This isn't exactly safe, and it doesn't respect rule50
             self.metrics['tt_hits'] += 1
             return tt[reduced_fen(board)]
         
@@ -342,7 +343,6 @@ class MyTransformerEngine(engine.Engine):
             assert move_weight > 0.0
 
             # Multiply by the child's move_weight to compute the new depth
-            # TODO: Mystery constant of 0.1
             new_depth = depth + math.log(move_weight + 1e-6) - 0.1
             if best_move_depth is None:
                 best_move_depth = new_depth

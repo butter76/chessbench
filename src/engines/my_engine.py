@@ -366,6 +366,7 @@ class MyTransformerEngine(engine.Engine):
                 child_node = node.children[i]
 
             child_re_searches = 0
+            RE_SEARCH_DEPTH = 0.2
             while True:
                 # Recursive call with negated bounds
                 score, _ = self.alpha_beta_policy_node(
@@ -381,11 +382,10 @@ class MyTransformerEngine(engine.Engine):
 
                 if i > 0 and score > alpha:
                     # This move improved alpha, so it's better than any previous move
-                    RE_SEARCH_DEPTH = 0.2
                     child_re_searches += 1
                     
                     if new_depth < best_move_depth:
-                        # Re-search with a deeper search
+                        # Re-search with a deeper search, if it's still shallower than the best move
                         new_depth += RE_SEARCH_DEPTH
                         continue
                 elif child_re_searches > 0:

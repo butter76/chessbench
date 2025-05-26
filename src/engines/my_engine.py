@@ -317,17 +317,18 @@ class MyTransformerEngine(engine.Engine):
         
         if history[reduced_fen(board)] >= 1:
             # This position has been seen before, so we can return a draw
+            # This is a 2-fold draw detection, but it's safe because it doesn't change the node's value
             return 0.0, None
         
         # Leaf node evaluation
+        # NOTE: Due to TT and other optimizations, node with depth less than 0 may have children, so we may as well expand them
         if depth <= 0.0 and node.is_leaf():
             return node.value, None
         
         # Safety check against excessive recursion
         if rec_depth > 50:
+            # TODO: Very related to the mystery constant of 0.1
             # If we've recursed too deep, likely a forced three-fold repetition
-            print(node.print_lineage())
-            raise ValueError("Excessive recursion")
             return node.value, None
         
         max_eval = -float('inf')
@@ -336,15 +337,20 @@ class MyTransformerEngine(engine.Engine):
         history[reduced_fen(board)] += 1
         
         total_move_weight = 0
+        best_move_depth = None
         for i, (move, move_weight) in enumerate(node.policy):
             assert move_weight > 0.0
 
+            # Multiply by the child's move_weight to compute the new depth
             # TODO: Mystery constant of 0.1
             new_depth = depth + math.log(move_weight + 1e-6) - 0.1
-
+            if best_move_depth is None:
+                best_move_depth = new_depth
+            
             if new_depth <= 0 and i >= len(node.children):
                 if total_move_weight > 0.85 and i >= 2:
                     # Drop the low probability moves until the depth is high enough to explore them
+                    # Parameter tuning seems to suggest that 85% is a good threshold
                     # But don't drop the first two moves
                     # And don't drop moves that have already been expanded
                     break
@@ -359,29 +365,51 @@ class MyTransformerEngine(engine.Engine):
             else:
                 child_node = node.children[i]
 
-            # Recursive call with negated bounds
-            score, _ = self.alpha_beta_policy_node(
-                child_node, 
-                new_depth, 
-                -beta, 
-                -alpha,
-                history,
-                tt,
-                rec_depth + 1
-            )
-            score = -score  # Negate for current player's perspective
-            
+            child_re_searches = 0
+            while True:
+                # Recursive call with negated bounds
+                score, _ = self.alpha_beta_policy_node(
+                    child_node, 
+                    new_depth, 
+                    -beta, 
+                    -alpha,
+                    history,
+                    tt,
+                    rec_depth + 1
+                )
+                score = -score  # Negate for current player's perspective
+
+                if i > 0 and score > alpha:
+                    # This move improved alpha, so it's better than any previous move
+                    RE_SEARCH_DEPTH = 0.2
+                    child_re_searches += 1
+                    
+                    if new_depth < best_move_depth:
+                        # Re-search with a deeper search
+                        new_depth += RE_SEARCH_DEPTH
+                        continue
+                elif child_re_searches > 0:
+                    # This child is no longer improving alpha, drop it one in re-search depth
+                    new_depth -= RE_SEARCH_DEPTH
+                    child_re_searches -= 1
+                break
+
+            if child_re_searches > 0:
+                # Update the child's policy
+                new_policy = node.policy[i][1] * math.exp(child_re_searches * RE_SEARCH_DEPTH)
+                node.policy[i] = (move, new_policy)
+
+                # Sort and normalize the children, which may cause the ith node to be first
+                node.sort_and_normalize()
+
+                # Update the best move depth
+                best_move_depth = max(best_move_depth, new_depth)
+                
+
             if score > max_eval:
                 max_eval = score
                 best_move = move
-
-            # if max_eval == 1.0 and child_node.is_terminal():
-            #     # The child is a checkmate, so we can convert this node to a terminal node
-            #     # TODO: This could be a bit better, but it's good enough for now
-            #     node.value = 1.0
-            #     node.terminal = True
-            #     break
-                
+            
             # Update alpha for pruning
             alpha = max(alpha, max_eval)
             

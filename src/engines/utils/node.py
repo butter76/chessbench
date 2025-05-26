@@ -138,6 +138,55 @@ class Node:
         _print_tree_recursive(self)
         return "\n".join(result)
     
+    def sort_and_normalize(self) -> None:
+        """
+        Sort and normalize the policy while maintaining the children correspondence.
+        
+        Sorts the first M expanded children by policy probability (descending) and
+        normalizes all probabilities to sum to 1. The invariant that node.children[i] 
+        corresponds to node.policy[i] for i < M is maintained.
+        
+        Assumes that policy probabilities for positions M to N-1 (unexpanded) are 
+        always smaller than positions 0 to M-1 (expanded).
+        """
+        if not self.policy:
+            return
+        
+        M = len(self.children)  # Number of expanded children
+        
+        if M == 0:
+            # No expanded children, just normalize
+            total_prob = sum(prob for _, prob in self.policy)
+            if total_prob > 0:
+                self.policy = [(move, prob / total_prob) for move, prob in self.policy]
+            return
+        
+        # Extract the expanded portion (first M entries) and unexpanded portion (rest)
+        expanded_policy = self.policy[:M]
+        unexpanded_policy = self.policy[M:]
+        
+        # Create list of (index, move, prob) for expanded entries to track original positions
+        indexed_expanded = [(i, move, prob) for i, (move, prob) in enumerate(expanded_policy)]
+        
+        # Sort by probability in descending order
+        indexed_expanded.sort(key=lambda x: x[2], reverse=True)
+        
+        # Extract the new order
+        new_expanded_policy = [(move, prob) for _, move, prob in indexed_expanded]
+        original_indices = [original_idx for original_idx, _, _ in indexed_expanded]
+        
+        # Reorder children to match the new policy order
+        new_children = [self.children[i] for i in original_indices]
+        
+        # Update the node's policy and children
+        self.policy = new_expanded_policy + unexpanded_policy
+        self.children = new_children
+        
+        # Normalize all probabilities to sum to 1
+        total_prob = sum(prob for _, prob in self.policy)
+        if total_prob > 0:
+            self.policy = [(move, prob / total_prob) for move, prob in self.policy]
+
 class MCTSNode(Node):
     def __init__(self, board: chess.Board, parent: Optional['MCTSNode'] = None, value: float = 0.0, policy: Optional[List[Tuple[chess.Move, float]]] = None, terminal: bool = False):
         super().__init__(board, parent, value, policy, terminal)

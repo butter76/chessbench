@@ -32,6 +32,7 @@ class MoveSelectionStrategy(str, Enum):
     ALPHA_BETA_NODE = "alpha_beta_node"
     MCTS = "mcts"
     MTDF = "mtdf"
+    PVS = "pvs"
 
 NULL_EPS = 0.0001
 
@@ -300,6 +301,7 @@ class MyTransformerEngine(engine.Engine):
     def alpha_beta_policy_node(self, node: Node, depth: float, alpha: float, beta: float, history: dict[str, int], tt: dict[str, Node | None] | None, rec_depth: int = 0) -> tuple[float, Optional[chess.Move]]:
         """
         Node-based alpha-beta search with policy-based move ordering and depth extension.
+        Secretly performs PVS search.
         Returns score relative to the current player and the best move found.
         
         Args:
@@ -345,7 +347,10 @@ class MyTransformerEngine(engine.Engine):
             assert move_weight > 0.0
 
             # Multiply by the child's move_weight to compute the new depth
-            new_depth = depth + math.log(move_weight + 1e-6) - 0.1
+            new_depth = depth + math.log(move_weight + 1e-6)
+            if True:
+                # TODO: Mystery constant of 0.1
+                new_depth -= 0.1
             if best_move_depth is None:
                 best_move_depth = new_depth
             
@@ -371,10 +376,12 @@ class MyTransformerEngine(engine.Engine):
             RE_SEARCH_DEPTH = 0.2
             while True:
                 # Recursive call with negated bounds
+                # NOTE: If we're searching the first move, we use the full window [-beta, -alpha]
+                # Otherwise, we use a null window to quickly eliminate inferior moves
                 score, _ = self.alpha_beta_policy_node(
                     child_node, 
                     new_depth, 
-                    -beta, 
+                    -beta if i == 0 else -alpha - 0.0001, 
                     -alpha,
                     history,
                     tt,
@@ -390,6 +397,18 @@ class MyTransformerEngine(engine.Engine):
                         # Re-search with a deeper search, if it's still shallower than the best move
                         new_depth += RE_SEARCH_DEPTH
                         continue
+                    else:
+                        # Re-search with the full window, as we've found a new best move
+                        score, _ = self.alpha_beta_policy_node(
+                            child_node, 
+                            new_depth, 
+                            -beta, 
+                            -alpha,
+                            history,
+                            tt,
+                            rec_depth + 1
+                        )
+                        score = -score
                 elif child_re_searches > 0:
                     # This child is no longer improving alpha, drop it one in re-search depth
                     new_depth -= RE_SEARCH_DEPTH
@@ -496,6 +515,23 @@ class MyTransformerEngine(engine.Engine):
         while self.metrics['num_nodes'] - node_count < num_nodes * 0.95 and depth < 20:
             f = score - NULL_EPS / 2 if score is not None else None
             score, move = self.mtdf(root, depth, history, tt, f=f)
+            depth += 0.2
+        self.metrics['depth'] += depth
+
+        if move is None:
+            print(root.print_tree())
+            raise ValueError("No move found")
+
+        return score, move    
+    
+    def pvs_id(self, root: Node, num_nodes: int, history: dict[str, int], tt: dict[str, Node | None] | None) -> tuple[float, chess.Move]:
+        """
+        Performs PVS search with iterative deepening.
+        """
+        depth = 2.0
+        node_count = self.metrics['num_nodes']
+        while self.metrics['num_nodes'] - node_count < num_nodes * 0.95 and depth < 20:
+            score, move = self.alpha_beta_policy_node(root, depth, -1, 1, history, tt)
             depth += 0.2
         self.metrics['depth'] += depth
 
@@ -655,7 +691,11 @@ class MyTransformerEngine(engine.Engine):
             history = defaultdict(int)
             tt = defaultdict(lambda: None)
             best_value, best_move = self.mtdf_id(root_node, 400, history, tt)
-
+        elif self.strategy == MoveSelectionStrategy.PVS:
+            root_node = self._create_node(board)
+            history = defaultdict(int)
+            tt = defaultdict(lambda: None)
+            best_value, best_move = self.pvs_id(root_node, 400, history, tt)
 
         else:
              raise ValueError(f"Unknown strategy: {self.strategy}")

@@ -58,6 +58,7 @@ _STRATEGY = flags.DEFINE_enum(
         'alpha_beta_node',
         'mcts',
         'mtdf',
+        'pvs',
     ],
     help='The move selection strategy to use for my_engine.',
 )

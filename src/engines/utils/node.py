@@ -1,3 +1,4 @@
+from collections import defaultdict
 from typing import Optional, List, Tuple, cast
 import chess
 from collections.abc import Sequence
@@ -112,7 +113,31 @@ class Node:
             result.append(f"{indent}{node.__str__()}")
             
         return "\n".join(result)
+    
+    def print_tree(self) -> str:
+        """
+        Print the tree structure of this node and all its descendants.
+        Each descendant is indented based on its depth below this node.
+        """
+        result = []
+        history = defaultdict(int)
+        
+        def _print_tree_recursive(node: 'Node', depth: int = 0) -> None:
+            indent = "-" * depth if depth > 0 else ""
 
+            if history[reduced_fen(node.board)] == 0:
+                result.append(f"{indent}{node.__str__()}")
+            else:
+                result.append(f"{indent}{node.__str__()} - REPEAT")
+                return
+            history[reduced_fen(node.board)] += 1
+            
+            for child in node.children:
+                _print_tree_recursive(child, depth + 1)
+        
+        _print_tree_recursive(self)
+        return "\n".join(result)
+    
 class MCTSNode(Node):
     def __init__(self, board: chess.Board, parent: Optional['MCTSNode'] = None, value: float = 0.0, policy: Optional[List[Tuple[chess.Move, float]]] = None, terminal: bool = False):
         super().__init__(board, parent, value, policy, terminal)

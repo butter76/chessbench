@@ -375,12 +375,12 @@ class MyTransformerEngine(engine.Engine):
                 max_eval = score
                 best_move = move
 
-            if max_eval == 1.0 and child_node.is_terminal():
-                # The child is a checkmate, so we can convert this node to a terminal node
-                # TODO: This could be a bit better, but it's good enough for now
-                node.value = 1.0
-                node.terminal = True
-                break
+            # if max_eval == 1.0 and child_node.is_terminal():
+            #     # The child is a checkmate, so we can convert this node to a terminal node
+            #     # TODO: This could be a bit better, but it's good enough for now
+            #     node.value = 1.0
+            #     node.terminal = True
+            #     break
                 
             # Update alpha for pruning
             alpha = max(alpha, max_eval)
@@ -458,12 +458,17 @@ class MyTransformerEngine(engine.Engine):
         """
         Performs MTD(f) search with iterative deepening.
         """
-        depth = 0.2
+        depth = 2.0
         node_count = self.metrics['num_nodes']
         while self.metrics['num_nodes'] - node_count < num_nodes * 0.95 and depth < 20:
             score, move = self.mtdf(root, depth, history, tt)
             depth += 0.2
         self.metrics['depth'] += depth
+
+        if move is None:
+            print(root.print_tree())
+            raise ValueError("No move found")
+
         return score, move
     
     def mcts(self, root: MCTSNode, num_rollouts: int) -> tuple[float, chess.Move]:

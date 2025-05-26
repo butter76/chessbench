@@ -396,6 +396,7 @@ class MyTransformerEngine(engine.Engine):
 
             if child_re_searches > 0:
                 # Update the child's policy
+                # TODO: Is this safe with a TT, as this node can exist multiple times in the tree?
                 new_policy = node.policy[i][1] * math.exp(child_re_searches * RE_SEARCH_DEPTH)
                 node.policy[i] = (move, new_policy)
 

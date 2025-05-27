@@ -344,10 +344,10 @@ class MyTransformerEngine(engine.Engine):
             # If we've recursed too deep, likely a forced three-fold repetition
             return node.value, None
 
-        history[reduced_fen(board)] += 1
-
         # Bad Move Pruning
-        ## This is super simplistic, but it works
+        ## A proof-of-concept of null-move pruning but for our case
+        ## TODO: In a CUT_NODE, we should pick a child that very likely will be a beta-cutoff
+        ##       while maximizing the depth reduction.
         for (i, child) in enumerate(node.children):
             new_depth = depth + math.log(node.policy[i][1] + 1e-6) - 0.1
             value = -child.value
@@ -355,6 +355,7 @@ class MyTransformerEngine(engine.Engine):
                 return value, node.policy[i][0]
 
 
+        history[reduced_fen(board)] += 1
 
         max_eval = -float('inf')
         total_move_weight = 0

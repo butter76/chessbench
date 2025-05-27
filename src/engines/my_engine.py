@@ -34,6 +34,14 @@ class MoveSelectionStrategy(str, Enum):
     MTDF = "mtdf"
     PVS = "pvs"
 
+
+class NodeType(Enum):
+    PV_NODE = auto()
+    CUT_NODE = auto()
+    ALL_NODE = auto()
+
+
+
 class MyTransformerEngine(engine.Engine):
     def __init__(
         self,
@@ -296,7 +304,7 @@ class MyTransformerEngine(engine.Engine):
 
 
     
-    def alpha_beta_policy_node(self, node: Node, depth: float, alpha: float, beta: float, history: dict[str, int], tt: dict[str, Node | None] | None, rec_depth: int = 0) -> tuple[float, Optional[chess.Move]]:
+    def alpha_beta_policy_node(self, node: Node, depth: float, alpha: float, beta: float, history: dict[str, int], tt: dict[str, Node | None] | None, node_type: NodeType = NodeType.PV_NODE, rec_depth: int = 0) -> tuple[float, Optional[chess.Move]]:
         """
         Node-based alpha-beta search with policy-based move ordering and depth extension.
         Secretly performs PVS search.
@@ -310,6 +318,8 @@ class MyTransformerEngine(engine.Engine):
             rec_depth: Current recursion depth to prevent infinite loops
             history: Dictionary of previous positions and their counts
             tt: Transposition table to store and retrieve previously evaluated nodes
+            node_type: Type of node, PV_NODE are the best moves, CUT_NODE's children are likely to be beta-cutoffs (think min nodes), ALL_NODE's are all searched to increase alpha (think max nodes)
+            rec_depth: Current recursion depth
         Returns:
             Tuple of (best score, best move)
         """
@@ -333,11 +343,20 @@ class MyTransformerEngine(engine.Engine):
             # TODO: Very related to the mystery constant of 0.1
             # If we've recursed too deep, likely a forced three-fold repetition
             return node.value, None
-        
-        max_eval = -float('inf')
 
         history[reduced_fen(board)] += 1
-        
+
+        # Bad Move Pruning
+        ## This is super simplistic, but it works
+        for (i, child) in enumerate(node.children):
+            new_depth = depth + math.log(node.policy[i][1] + 1e-6) - 0.1
+            value = -child.value
+            if value >= beta and new_depth <= 0.0 and child.is_leaf():
+                return value, node.policy[i][0]
+
+
+
+        max_eval = -float('inf')
         total_move_weight = 0
         best_move_depth = None
         for i, (move, move_weight) in enumerate(node.policy):
@@ -382,6 +401,7 @@ class MyTransformerEngine(engine.Engine):
                     -alpha,
                     history,
                     tt,
+                    NodeType.PV_NODE if (i == 0 and node_type == NodeType.PV_NODE) else (NodeType.ALL_NODE if node_type == NodeType.CUT_NODE else NodeType.CUT_NODE),
                     rec_depth + 1
                 )
                 score = -score  # Negate for current player's perspective
@@ -395,17 +415,19 @@ class MyTransformerEngine(engine.Engine):
                         new_depth += RE_SEARCH_DEPTH
                         continue
                     else:
-                        # Re-search with the full window, as we've found a new best move
-                        score, _ = self.alpha_beta_policy_node(
-                            child_node, 
-                            new_depth, 
-                            -beta, 
-                            -alpha,
-                            history,
-                            tt,
-                            rec_depth + 1
-                        )
-                        score = -score
+                        if node_type == NodeType.PV_NODE:
+                            # Re-search with the full window, as we've found a new best move
+                            score, _ = self.alpha_beta_policy_node(
+                                child_node, 
+                                new_depth, 
+                                -beta, 
+                                -alpha,
+                                history,
+                                tt,
+                                NodeType.PV_NODE,
+                                rec_depth + 1
+                            )
+                            score = -score
                 elif child_re_searches > 0:
                     # This child is no longer improving alpha, drop it one in re-search depth
                     new_depth -= RE_SEARCH_DEPTH

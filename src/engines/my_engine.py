@@ -335,7 +335,6 @@ class MyTransformerEngine(engine.Engine):
             return node.value, None
         
         max_eval = -float('inf')
-        best_move = None
 
         history[reduced_fen(board)] += 1
         
@@ -428,7 +427,6 @@ class MyTransformerEngine(engine.Engine):
 
             if score > max_eval:
                 max_eval = score
-                best_move = move
             
             # Update alpha for pruning
             alpha = max(alpha, max_eval)
@@ -441,7 +439,7 @@ class MyTransformerEngine(engine.Engine):
 
         history[reduced_fen(board)] -= 1
         
-        return max_eval, best_move
+        return max_eval, node.policy[0][0]
     
     def mtdf(self, root: Node, depth: float, history: dict[str, int], tt: dict[str, Node | None] | None) -> tuple[float, chess.Move]:
         """
@@ -525,9 +523,13 @@ class MyTransformerEngine(engine.Engine):
         """
         depth = 2.0
         node_count = self.metrics['num_nodes']
+        score = root.value
         while self.metrics['num_nodes'] - node_count < num_nodes * 0.95 and depth < 20:
-            score, move = self.alpha_beta_policy_node(root, depth, -1, 1, history, tt)
-            depth += 0.2
+            alpha = score - 0.1
+            beta = score + 0.1
+            score, move = self.alpha_beta_policy_node(root, depth, alpha, beta, history, tt)
+            if alpha < score < beta:
+                depth += 0.2
         self.metrics['depth'] += depth
 
         if move is None:

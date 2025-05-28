@@ -397,14 +397,17 @@ class MyTransformerEngine(engine.Engine):
                 
                 value = (1 - math.exp((beta - score) / 0.1)) / (policy + 1e-6)
 
-                prospective_children.append((child, value, move))
+                prospective_children.append((child, value, move, new_depth))
 
             # Sort the children by value
             prospective_children.sort(key=lambda x: x[1], reverse=True)
 
             # Take the top 2 children
-            for child in prospective_children[:0]:
-                child_node, value, move = child
+            for child in prospective_children[:1]:
+                child_node, value, move, new_depth = child
+
+                if value < 0:
+                    continue
 
                 score, _ = self.alpha_beta_policy_node(
                     child_node,

@@ -344,18 +344,82 @@ class MyTransformerEngine(engine.Engine):
             # If we've recursed too deep, likely a forced three-fold repetition
             return node.value, None
 
+
+        history[reduced_fen(board)] += 1
         # Bad Move Pruning
         ## A proof-of-concept of null-move pruning but for our case
         ## TODO: In a CUT_NODE, we should pick a child that very likely will be a beta-cutoff
         ##       while maximizing the depth reduction.
-        for (i, child) in enumerate(node.children):
-            new_depth = depth + math.log(node.policy[i][1] + 1e-6) - 0.1
-            value = -child.value
-            if value >= beta and new_depth <= 0.0 and child.is_leaf():
-                return value, node.policy[i][0]
+        if node_type == NodeType.CUT_NODE and len(node.policy) > 1:
+            # Start with the obvious beta cutoffs
+            total_move_weight = 0
+            for i in range(len(node.policy)):
+                new_depth = depth + math.log(node.policy[i][1] + 1e-6) - 0.1
 
+                if new_depth <= 0.0:
+                    if i >= len(node.children):
+                        if total_move_weight >= 0.85 and i >= 2:
+                            break
+                        child_board = board.copy()
+                        child_board.push(node.policy[i][0])
+                        child_node = self._create_node(child_board, parent=node, tt=tt)
+                        # Intentionally don't add the child to the node
+                    else:
+                        child_node = node.children[i]
+                    score, _ = self.alpha_beta_policy_node(
+                        child_node,
+                        new_depth,
+                        -beta,
+                        -alpha,
+                        history,
+                        tt,
+                        node_type=NodeType.PV_NODE if (i == 0 and node_type == NodeType.PV_NODE) else (NodeType.ALL_NODE if node_type == NodeType.CUT_NODE else NodeType.CUT_NODE),
+                        rec_depth=rec_depth + 1
+                    )
+                    score = -score
+                    if score >= beta:
+                        history[reduced_fen(board)] -= 1
+                        return score, node.policy[i][0]
+                total_move_weight += node.policy[i][1]
 
-        history[reduced_fen(board)] += 1
+            # Now we need to actually try harder
+            prospective_children = []
+            for (i, child) in enumerate(node.children):
+                if i == 0:
+                    continue
+                new_depth = depth + math.log(node.policy[i][1] + 1e-6) - 0.1
+                if new_depth <= 0.0:
+                    # We just checked these earlier
+                    continue
+                policy = node.policy[i][1]
+                move = node.policy[i][0]
+                score = -1 * child.value
+                
+                value = (1 - math.exp((beta - score) / 0.1)) / (policy + 1e-6)
+
+                prospective_children.append((child, value, move))
+
+            # Sort the children by value
+            prospective_children.sort(key=lambda x: x[1], reverse=True)
+
+            # Take the top 2 children
+            for child in prospective_children[:0]:
+                child_node, value, move = child
+
+                score, _ = self.alpha_beta_policy_node(
+                    child_node,
+                    new_depth,
+                    -beta,
+                    -alpha,
+                    history,
+                    tt,
+                    node_type=NodeType.ALL_NODE,
+                    rec_depth=rec_depth + 1
+                )
+                score = -score
+                if score >= beta:
+                    history[reduced_fen(board)] -= 1
+                    return score, move
 
         max_eval = -float('inf')
         total_move_weight = 0
@@ -364,10 +428,8 @@ class MyTransformerEngine(engine.Engine):
             assert move_weight > 0.0
 
             # Multiply by the child's move_weight to compute the new depth
-            new_depth = depth + math.log(move_weight + 1e-6)
-            if True:
-                # TODO: Mystery constant of 0.1
-                new_depth -= 0.1
+            # TODO: Mystery constant of 0.1
+            new_depth = depth + math.log(move_weight + 1e-6) - 0.1
             if best_move_depth is None:
                 best_move_depth = new_depth
             
@@ -546,13 +608,10 @@ class MyTransformerEngine(engine.Engine):
         """
         depth = 2.0
         node_count = self.metrics['num_nodes']
-        score = root.value
         while self.metrics['num_nodes'] - node_count < num_nodes * 0.95 and depth < 20:
-            alpha = score - 0.1
-            beta = score + 0.1
-            score, move = self.alpha_beta_policy_node(root, depth, alpha, beta, history, tt)
-            if alpha < score < beta:
-                depth += 0.2
+            # NOTE: The initial attempt to use aspiration windows was not successful, so we just use a full window
+            score, move = self.alpha_beta_policy_node(root, depth, -1.0, 1.0, history, tt, node_type=NodeType.ALL_NODE)
+            depth += 0.2
         self.metrics['depth'] += depth
 
         if move is None:

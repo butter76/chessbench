@@ -350,79 +350,85 @@ class MyTransformerEngine(engine.Engine):
         ## A proof-of-concept of null-move pruning but for our case
         ## TODO: In a CUT_NODE, we should pick a child that very likely will be a beta-cutoff
         ##       while maximizing the depth reduction.
-        if node_type == NodeType.CUT_NODE and len(node.policy) > 1:
-            # Start with the obvious beta cutoffs
-            total_move_weight = 0
-            for i in range(len(node.policy)):
-                new_depth = depth + math.log(node.policy[i][1] + 1e-6) - 0.1
+        # if node_type == NodeType.CUT_NODE and len(node.policy) > 1:
+        #     # Start with the obvious beta cutoffs
+        #     total_move_weight = 0
+        #     checked_child = False
+        #     for i in range(len(node.policy)):
+        #         new_depth = depth + math.log(node.policy[i][1] + 1e-6) - 0.1
 
-                if new_depth <= 0.0:
-                    if i >= len(node.children):
-                        if total_move_weight >= 0.85 and i >= 2:
-                            break
-                        child_board = board.copy()
-                        child_board.push(node.policy[i][0])
-                        child_node = self._create_node(child_board, parent=node, tt=tt)
-                        # Intentionally don't add the child to the node
-                    else:
-                        child_node = node.children[i]
-                    score, _ = self.alpha_beta_policy_node(
-                        child_node,
-                        new_depth,
-                        -beta,
-                        -alpha,
-                        history,
-                        tt,
-                        node_type=NodeType.PV_NODE if (i == 0 and node_type == NodeType.PV_NODE) else (NodeType.ALL_NODE if node_type == NodeType.CUT_NODE else NodeType.CUT_NODE),
-                        rec_depth=rec_depth + 1
-                    )
-                    score = -score
-                    if score >= beta:
-                        history[reduced_fen(board)] -= 1
-                        return score, node.policy[i][0]
-                total_move_weight += node.policy[i][1]
+        #         if new_depth <= 0.0:
+        #             if i >= len(node.children):
+        #                 if total_move_weight >= 0.85 and i >= 2 and checked_child:
+        #                     # Either expand children we would have expand anyways
+        #                     # Or expand just one child to have negative depth
+        #                     break
+        #                 child_board = board.copy()
+        #                 child_board.push(node.policy[i][0])
+        #                 child_node = self._create_node(child_board, parent=node, tt=tt)
+                        
+        #                 if i == len(node.children):
+        #                     node.add_child(child_node)
+        #             else:
+        #                 child_node = node.children[i]
+        #             score, _ = self.alpha_beta_policy_node(
+        #                 child_node,
+        #                 new_depth,
+        #                 -beta,
+        #                 -alpha,
+        #                 history,
+        #                 tt,
+        #                 node_type=NodeType.PV_NODE if (i == 0 and node_type == NodeType.PV_NODE) else (NodeType.ALL_NODE if node_type == NodeType.CUT_NODE else NodeType.CUT_NODE),
+        #                 rec_depth=rec_depth + 1
+        #             )
+        #             score = -score
+        #             if score >= beta:
+        #                 history[reduced_fen(board)] -= 1
+        #                 return score, node.policy[i][0]
+        #             checked_child = True
+        #         total_move_weight += node.policy[i][1]
 
-            # Now we need to actually try harder
-            prospective_children = []
-            for (i, child) in enumerate(node.children):
-                if i == 0:
-                    continue
-                new_depth = depth + math.log(node.policy[i][1] + 1e-6) - 0.1
-                if new_depth <= 0.0:
-                    # We just checked these earlier
-                    continue
-                policy = node.policy[i][1]
-                move = node.policy[i][0]
-                score = -1 * child.value
+        #     # Now we need to actually try harder
+        #     prospective_children = []
+        #     for (i, child) in enumerate(node.children):
+        #         if i == 0:
+        #             continue
+        #         new_depth = depth + math.log(node.policy[i][1] + 1e-6) - 0.1
+        #         if new_depth <= 0.0:
+        #             # We just checked these earlier
+        #             continue
+        #         policy = node.policy[i][1]
+        #         move = node.policy[i][0]
+        #         score = -1 * child.value
                 
-                value = (1 - math.exp((beta - score) / 0.1)) / (policy + 1e-6)
+        #         value = (1 - math.exp((beta - score) / 0.1)) / (policy + 1e-6)
 
-                prospective_children.append((child, value, move, new_depth))
+        #         prospective_children.append((child, value, move, new_depth))
 
-            # Sort the children by value
-            prospective_children.sort(key=lambda x: x[1], reverse=True)
+        #     # Sort the children by value
+        #     prospective_children.sort(key=lambda x: x[1], reverse=True)
 
-            # Take the top 2 children
-            for child in prospective_children[:1]:
-                child_node, value, move, new_depth = child
+        #     # Take the top 2 children
+        #     for child in prospective_children[:0]:
+        #         child_node, value, move, new_depth = child
 
-                if value < 0:
-                    continue
+        #         if value < 0:
+        #             continue
 
-                score, _ = self.alpha_beta_policy_node(
-                    child_node,
-                    new_depth,
-                    -beta,
-                    -alpha,
-                    history,
-                    tt,
-                    node_type=NodeType.ALL_NODE,
-                    rec_depth=rec_depth + 1
-                )
-                score = -score
-                if score >= beta:
-                    history[reduced_fen(board)] -= 1
-                    return score, move
+        #         score, _ = self.alpha_beta_policy_node(
+        #             child_node,
+        #             new_depth,
+        #             -beta,
+        #             -alpha,
+        #             history,
+        #             tt,
+        #             node_type=NodeType.ALL_NODE,
+        #             rec_depth=rec_depth + 1
+        #         )
+        #         score = -score
+        #         if score >= beta:
+        #             history[reduced_fen(board)] -= 1
+        #             return score, move
 
         max_eval = -float('inf')
         total_move_weight = 0

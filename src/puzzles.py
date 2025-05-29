@@ -32,7 +32,8 @@ from tqdm import tqdm
 from searchless_chess.src.engines import engine as engine_lib
 from searchless_chess.src.engines.lc0_engine import AllMovesLc0Engine, Lc0Engine
 from searchless_chess.src.engines.stockfish_engine import StockfishEngine
-from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTransformerEngine
+from searchless_chess.src.engines.strategy import MoveSelectionStrategy
+from searchless_chess.src.engines.my_engine import MyTransformerEngine
 from searchless_chess.src.constants import CODERS
 import searchless_chess.src.utils as utils
 from apache_beam import coders

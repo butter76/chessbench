@@ -11,6 +11,7 @@ from collections import defaultdict
 from searchless_chess.src import constants
 from searchless_chess.src import tokenizer
 from searchless_chess.src.engines import engine
+from searchless_chess.src.engines.strategy import MoveSelectionStrategy
 from searchless_chess.src.models.transformer import ChessTransformer
 from searchless_chess.src.engines.utils.node import Node, MCTSNode
 from searchless_chess.src.utils import move_to_indices
@@ -18,21 +19,12 @@ import torch
 from torch.amp.autocast_mode import autocast
 
 from searchless_chess.src.engines.utils.nnutils import get_policy, reduced_fen
+from searchless_chess.src.engines.search import (
+    ValueSearch, PolicySearch, AVSSearch, NegamaxSearch, 
+    AlphaBetaSearch, PVSSearch, MTDFSearch, MCTSSearch
+)
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
-
-class MoveSelectionStrategy(str, Enum):
-    VALUE = "value"
-    AVS = "avs"
-    AVS2 = "avs2"
-    POLICY = "policy"
-    OPT_POLICY_SPLIT = "opt_policy_split"
-    NEGAMAX = "negamax"
-    ALPHA_BETA = "alpha_beta"
-    ALPHA_BETA_NODE = "alpha_beta_node"
-    MCTS = "mcts"
-    MTDF = "mtdf"
-    PVS = "pvs"
 
 class NodeType(Enum):
     PV_NODE = auto()
@@ -83,6 +75,21 @@ class MyTransformerEngine(engine.Engine):
             'policy_perplexity': 0,
             'tt_hits': 0,
             'depth': 0,
+        }
+
+        # Initialize search algorithms
+        self.search_algorithms = {
+            MoveSelectionStrategy.VALUE: ValueSearch(),
+            MoveSelectionStrategy.AVS: AVSSearch("avs"),
+            MoveSelectionStrategy.AVS2: AVSSearch("avs2"),
+            MoveSelectionStrategy.POLICY: PolicySearch("policy"),
+            MoveSelectionStrategy.OPT_POLICY_SPLIT: PolicySearch("opt_policy_split"),
+            MoveSelectionStrategy.NEGAMAX: NegamaxSearch(self.search_ordering_strategy),
+            MoveSelectionStrategy.ALPHA_BETA: AlphaBetaSearch(self.search_ordering_strategy),
+            MoveSelectionStrategy.ALPHA_BETA_NODE: PVSSearch(),  # Legacy name for PVS
+            MoveSelectionStrategy.PVS: PVSSearch(),
+            MoveSelectionStrategy.MTDF: MTDFSearch(),
+            MoveSelectionStrategy.MCTS: MCTSSearch(),
         }
 
     def _get_ordered_moves(self, board: chess.Board, ordering_strategy: MoveSelectionStrategy | None) -> tuple[list[chess.Move], list[float]]:
@@ -625,87 +632,58 @@ class MyTransformerEngine(engine.Engine):
         self.model.eval()
         self.metrics['num_searches'] += 1
 
-        if self.strategy == MoveSelectionStrategy.VALUE:
-            # print(board.fen())
-            value = self.analyse(board)['value']
-            value = value[:, 0].clone()
-            # print(board.fen())
-            for i, (move, av) in enumerate(zip(board.legal_moves, value)):
-                # print(move, av.item())
-                board.push(move)
-                if board.is_checkmate():
-                    board.pop()
-                    return move
-                if board.is_stalemate():
-                    value[i] = 0.5
-                board.pop()
-            best_ix = cast(int, torch.argmin(value).item())
-            best_move = list(board.legal_moves)[best_ix]
-            best_value = value[best_ix].item()
-            # print(f"Best Move: {best_move} with value {best_value}")
-        elif self.strategy == MoveSelectionStrategy.AVS or self.strategy == MoveSelectionStrategy.AVS2:
-            move_values = []
-            avs = self.analyse_shallow(board)[self.strategy][0, :, :].clone()
-            for (i, move) in enumerate(board.legal_moves):
-                board.push(move)
-                if board.is_checkmate():
-                    board.pop()
-                    return move
-                if board.is_stalemate() or board.is_insufficient_material():
-                    best_res = 0.5
-                    board.pop()
-                else:
-                    board.pop()
-                    s1, s2 = move_to_indices(move, flip=board.turn == chess.BLACK)
-                    best_res = avs[s1, s2].item()
-                move_values.append((best_res, i))
-            (best_value, best_idx) = max(move_values)
-            best_move = list(board.legal_moves)[best_idx]
-        elif self.strategy == MoveSelectionStrategy.POLICY or \
-             self.strategy == MoveSelectionStrategy.OPT_POLICY_SPLIT:
-            move_values = []
-            policy = self.analyse_shallow(board)[self.strategy][0, :, :].clone()
-            for (i, move) in enumerate(board.legal_moves):
-                board.push(move)
-                if board.is_checkmate():
-                    self.metrics['policy_perplexity'] += 1
-                    board.pop()
-                    return move
-                board.pop()
-                
-                s1, s2 = move_to_indices(move, flip=board.turn == chess.BLACK)
-                best_res = policy[s1, s2].item()
+        # Get the appropriate search algorithm
+        search_algorithm = self.search_algorithms.get(self.strategy)
+        if search_algorithm is None:
+            raise ValueError(f"Unknown strategy: {self.strategy}")
 
-                move_values.append((best_res, i))
-            (best_value, best_idx) = max(move_values)
-            best_move = list(board.legal_moves)[best_idx]
-        elif self.strategy == MoveSelectionStrategy.NEGAMAX:
-            best_value, best_move = self.negamax(board, self.search_depth)
-        elif self.strategy == MoveSelectionStrategy.ALPHA_BETA:
-            best_value, best_move = self.alpha_beta(board, self.search_depth, -1.0, 1.0)
-        elif self.strategy == MoveSelectionStrategy.ALPHA_BETA_NODE:
-            root_node = self._create_node(board)
-            history = defaultdict(int)
-            tt = defaultdict(lambda: None)
-            best_value, best_move = self.pvs(root_node, self.search_depth, -1.0, 1.0, history, tt)
-        elif self.strategy == MoveSelectionStrategy.MCTS:
-            root_node = self._create_node(board, node_class=MCTSNode)
-            best_value, best_move = self.mcts(root_node, self.search_depth)
-        elif self.strategy == MoveSelectionStrategy.MTDF:
-            root_node = self._create_node(board)
-            history = defaultdict(int)
-            tt = defaultdict(lambda: None)
-            best_value, best_move = self.mtdf_id(root_node, 400, history, tt)
-        elif self.strategy == MoveSelectionStrategy.PVS:
-            root_node = self._create_node(board)
-            history = defaultdict(int)
-            tt = defaultdict(lambda: None)
-            best_value, best_move = self.pvs_id(root_node, 400, history, tt)
-
-        else:
-             raise ValueError(f"Unknown strategy: {self.strategy}")
-
-        return best_move
+        # Create inference functions for the search algorithm
+        def inference_func(board: chess.Board):
+            return self.analyse_shallow(board)
+        
+        def batch_inference_func(boards):
+            # Convert FEN strings back to boards and analyze them
+            board_objs = []
+            for fen in boards:
+                board_obj = chess.Board(fen)
+                board_objs.append(board_obj)
+            return self.analyse_batch(board_objs)
+        
+        # Configure search parameters based on strategy
+        search_kwargs = {
+            'num_nodes': 400 if self.strategy in [MoveSelectionStrategy.MTDF, MoveSelectionStrategy.PVS] else None,
+            'num_rollouts': int(self.search_depth) if self.strategy == MoveSelectionStrategy.MCTS else None,
+        }
+        
+        # Perform the search
+        result = search_algorithm.search(
+            board=board,
+            inference_func=inference_func,
+            batch_inference_func=batch_inference_func,
+            depth=self.search_depth,
+            **{k: v for k, v in search_kwargs.items() if v is not None}
+        )
+        
+        # Update metrics from the search algorithm
+        self.metrics['num_nodes'] += search_algorithm.metrics['num_nodes']
+        if 'depth' in search_algorithm.metrics:
+            self.metrics['depth'] += search_algorithm.metrics['depth']
+        
+        # Reset search algorithm metrics for next search
+        search_algorithm.reset_metrics()
+        
+        return result.move
+    
+    def analyse_batch(self, boards):
+        """Analyze multiple boards in a batch."""
+        x = []
+        for board in boards:
+            x.append(tokenizer.tokenize(board.fen()))
+        x = np.array(x)
+        x = torch.tensor(x, dtype=torch.long, device=self.device)
+        with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
+            output = self.model(x)
+        return output
 
 
 

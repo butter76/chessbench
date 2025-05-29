@@ -87,6 +87,18 @@ _NETWORK = flags.DEFINE_enum(
     help='The network to use for Lc0Engine.',
 )
 
+_BATCH_MODE = flags.DEFINE_bool(
+    name='batch_mode',
+    default=False,
+    help='Use batch processing for better performance when evaluating many puzzles.',
+)
+
+_BATCH_SIZE = flags.DEFINE_integer(
+    name='batch_size', 
+    default=100,
+    help='Number of puzzles to process in each batch.',
+)
+
 def evaluate_puzzle_from_pandas_row(
     puzzle: pd.Series,
     engine: engine_lib.Engine,
@@ -192,6 +204,85 @@ def validate_lichess(engine: engine_lib.Engine):
     print("Validating MyEngine policy against dataset policy...")
 
 
+def evaluate_puzzles_batch(
+    puzzles: pd.DataFrame,
+    engine: MyTransformerEngine,
+    batch_size: int = 100
+) -> list[bool]:
+    """
+    Evaluate puzzles in batches for better performance.
+    
+    Args:
+        puzzles: DataFrame containing puzzle data
+        engine: MyTransformerEngine instance
+        batch_size: Number of puzzles per batch
+        
+    Returns:
+        List of boolean results indicating if each puzzle was solved
+    """
+    all_results = []
+    num_puzzles = len(puzzles)
+    
+    print(f"Processing {num_puzzles} puzzles in batches of {batch_size}")
+    
+    # Process puzzles in batches
+    for batch_start in tqdm(range(0, num_puzzles, batch_size), desc="Processing batches"):
+        batch_end = min(batch_start + batch_size, num_puzzles)
+        puzzle_batch = puzzles.iloc[batch_start:batch_end]
+        
+        # Collect all board positions that need evaluation from this batch
+        eval_positions = []
+        puzzle_contexts = []  # Store (puzzle_idx, move_idx, board, moves) for each position
+        
+        for puzzle_idx, (_, puzzle) in enumerate(puzzle_batch.iterrows()):
+            board = chess.Board(puzzle['FEN'])
+            moves = puzzle['Moves'].split(' ')
+            
+            for move_idx, move in enumerate(moves):
+                if move_idx % 2 == 1:  # This is a position where we need to predict
+                    eval_positions.append(board.copy())
+                    puzzle_contexts.append((puzzle_idx, move_idx, board.copy(), moves))
+                
+                board.push(chess.Move.from_uci(move))
+        
+        # Batch evaluate all positions at once
+        if eval_positions:
+            predicted_moves = engine.batch_play(eval_positions)
+            
+            # Process results for each puzzle in the batch
+            batch_results = [True] * len(puzzle_batch)  # Start assuming all solved
+            result_idx = 0
+            
+            for puzzle_idx, (_, puzzle) in enumerate(puzzle_batch.iterrows()):
+                board = chess.Board(puzzle['FEN'])
+                moves = puzzle['Moves'].split(' ')
+                puzzle_solved = True
+                
+                for move_idx, move in enumerate(moves):
+                    if move_idx % 2 == 1:  # Position where we predicted
+                        predicted_move = predicted_moves[result_idx].uci()
+                        result_idx += 1
+                        
+                        # Check if prediction is correct
+                        if move != predicted_move:
+                            # Check if predicted move results in checkmate (also acceptable)
+                            test_board = board.copy()
+                            test_board.push(chess.Move.from_uci(predicted_move))
+                            if not test_board.is_checkmate():
+                                puzzle_solved = False
+                                break
+                    
+                    board.push(chess.Move.from_uci(move))
+                
+                batch_results[puzzle_idx] = puzzle_solved
+            
+            all_results.extend(batch_results)
+        else:
+            # No positions to evaluate in this batch (shouldn't happen)
+            all_results.extend([True] * len(puzzle_batch))
+    
+    return all_results
+
 def main(argv: Sequence[str]) -> None:
     if len(argv) > 1:
         raise app.UsageError('Too many command-line arguments.')
@@ -230,22 +321,44 @@ def main(argv: Sequence[str]) -> None:
             num_correct = 0
             pbar = tqdm(puzzles.iterrows(), total=len(puzzles), desc=f"Evaluating puzzles ({strategy})")
             num_iterations = 0
-            for puzzle_id, puzzle in pbar:
-                correct = evaluate_puzzle_from_pandas_row(
-                    puzzle=puzzle,
-                    engine=engine,
-                )
-                num_correct += correct
-                num_iterations += 1
-                f.write(str({'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}) + '\n')
-                stats = {
-                    'accuracy': f'{num_correct / num_iterations:.2%}',
-                }
-                if MY_ENGINE:
-                    stats['nodes'] = f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}'
-                    stats['perplexity'] = f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}'
-                    stats['depth'] = f'{engine.metrics["depth"] / engine.metrics["num_searches"]:.2f}'
-                pbar.set_postfix(stats)
+            
+            if MY_ENGINE and _BATCH_MODE.value:
+                # Use batch processing for better performance
+                print(f"Using batch processing with batch size {_BATCH_SIZE.value}")
+                results = evaluate_puzzles_batch(puzzles, engine, _BATCH_SIZE.value)
+                
+                for puzzle_idx, ((_, puzzle), correct) in enumerate(zip(puzzles.iterrows(), results)):
+                    num_correct += correct
+                    num_iterations += 1
+                    f.write(str({'puzzle_id': puzzle_idx, 'correct': correct, 'rating': puzzle['Rating']}) + '\n')
+                    
+                    stats = {
+                        'accuracy': f'{num_correct / num_iterations:.2%}',
+                    }
+                    if num_iterations % 100 == 0:  # Update progress every 100 puzzles
+                        pbar.set_postfix(stats)
+                        pbar.update(100)
+                
+                pbar.close()
+            else:
+                # Use original single-puzzle processing
+                for puzzle_id, puzzle in pbar:
+                    correct = evaluate_puzzle_from_pandas_row(
+                        puzzle=puzzle,
+                        engine=engine,
+                    )
+                    num_correct += correct
+                    num_iterations += 1
+                    f.write(str({'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}) + '\n')
+                    stats = {
+                        'accuracy': f'{num_correct / num_iterations:.2%}',
+                    }
+                    if MY_ENGINE:
+                        stats['nodes'] = f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}'
+                        stats['perplexity'] = f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}'
+                        stats['depth'] = f'{engine.metrics["depth"] / engine.metrics["num_searches"]:.2f}'
+                    pbar.set_postfix(stats)
+            
             print(f'{strategy}: {num_correct / len(puzzles):.2%}')
 
     elif _TYPE.value == 'positional':

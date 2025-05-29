@@ -23,6 +23,7 @@ from searchless_chess.src.engines.search import (
     ValueSearch, PolicySearch, AVSSearch, NegamaxSearch, 
     AlphaBetaSearch, PVSSearch, MTDFSearch, MCTSSearch
 )
+from searchless_chess.src.engines.inference import BatchSearchCoordinator
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 
@@ -45,6 +46,7 @@ class MyTransformerEngine(engine.Engine):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._limit = limit
         self.search_depth = search_depth
+        self.checkpoint_path = checkpoint_path  # Store for batch processing
         
         # Convert string to enum if needed
         if isinstance(strategy, str):
@@ -684,6 +686,71 @@ class MyTransformerEngine(engine.Engine):
         with torch.inference_mode(), autocast("cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16):
             output = self.model(x)
         return output
+
+    def batch_play(
+        self, 
+        boards: list[chess.Board], 
+        num_workers: int = None,
+        max_batch_size: int = 64,
+        batch_timeout_ms: float = 10.0
+    ) -> list[chess.Move]:
+        """
+        Play multiple boards in parallel using the inference server pattern.
+        
+        Args:
+            boards: List of chess boards to analyze
+            num_workers: Number of worker processes (default: CPU count)
+            max_batch_size: Maximum batch size for inference server
+            batch_timeout_ms: Timeout for batching requests
+            
+        Returns:
+            List of best moves in the same order as input boards
+        """
+        if not boards:
+            return []
+        
+        # Use the batch coordinator for multiprocessing with shared inference
+        checkpoint_path = self._get_checkpoint_path()
+        
+        with BatchSearchCoordinator(
+            checkpoint_path=checkpoint_path,
+            max_batch_size=max_batch_size,
+            batch_timeout_ms=batch_timeout_ms,
+            num_workers=num_workers,
+            device=str(self.device)
+        ) as coordinator:
+            
+            # Configure search parameters based on strategy
+            search_kwargs = {}
+            if self.strategy in [MoveSelectionStrategy.MTDF, MoveSelectionStrategy.PVS]:
+                search_kwargs['num_nodes'] = 400
+            elif self.strategy == MoveSelectionStrategy.MCTS:
+                search_kwargs['num_rollouts'] = int(self.search_depth)
+            
+            # Perform batch search
+            results = coordinator.batch_search(
+                boards=boards,
+                algorithm=self.strategy.value,
+                depth=self.search_depth,
+                **search_kwargs
+            )
+            
+            # Extract moves from results
+            moves = []
+            for result in results:
+                if result.move is not None:
+                    moves.append(result.move)
+                else:
+                    # Fallback: pick first legal move
+                    legal_moves = list(boards[len(moves)].legal_moves)
+                    fallback_move = legal_moves[0] if legal_moves else chess.Move.null()
+                    moves.append(fallback_move)
+            
+            return moves
+    
+    def _get_checkpoint_path(self) -> str:
+        """Get the checkpoint path used during initialization."""
+        return self.checkpoint_path
 
 
 

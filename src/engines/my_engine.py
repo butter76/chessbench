@@ -34,6 +34,11 @@ class MoveSelectionStrategy(str, Enum):
     MTDF = "mtdf"
     PVS = "pvs"
 
+class NodeType(Enum):
+    PV_NODE = auto()
+    CUT_NODE = auto()
+    ALL_NODE = auto()
+
 NULL_EPS = 0.0001
 
 class MyTransformerEngine(engine.Engine):
@@ -298,10 +303,10 @@ class MyTransformerEngine(engine.Engine):
 
 
     
-    def alpha_beta_policy_node(self, node: Node, depth: float, alpha: float, beta: float, history: dict[str, int], tt: dict[str, Node | None] | None, rec_depth: int = 0) -> tuple[float, Optional[chess.Move]]:
+    def pvs(self, node: Node, depth: float, alpha: float, beta: float, history: dict[str, int], tt: dict[str, Node | None] | None, node_type: NodeType = NodeType.PV_NODE, rec_depth: int = 0) -> tuple[float, Optional[chess.Move]]:
         """
-        Node-based alpha-beta search with policy-based move ordering and depth extension.
-        Secretly performs PVS search.
+        PVS with policy-based move ordering and depth extension.
+        Compatible with both iterative deepening and MTD(f).
         Returns score relative to the current player and the best move found.
         
         Args:
@@ -309,9 +314,10 @@ class MyTransformerEngine(engine.Engine):
             depth: Remaining search depth (can be fractional with policy extension)
             alpha: Lower bound score
             beta: Upper bound score
-            rec_depth: Current recursion depth to prevent infinite loops
             history: Dictionary of previous positions and their counts
             tt: Transposition table to store and retrieve previously evaluated nodes
+            node_type: Type of node, PV_NODE are the best moves, CUT_NODE's children are likely to be beta-cutoffs (think min nodes), ALL_NODE's are all searched to increase alpha (think max nodes)
+            rec_depth: Current recursion depth
         Returns:
             Tuple of (best score, best move)
         """
@@ -337,7 +343,6 @@ class MyTransformerEngine(engine.Engine):
             return node.value, None
         
         max_eval = -float('inf')
-        best_move = None
 
         history[reduced_fen(board)] += 1
         
@@ -347,10 +352,9 @@ class MyTransformerEngine(engine.Engine):
             assert move_weight > 0.0
 
             # Multiply by the child's move_weight to compute the new depth
-            new_depth = depth + math.log(move_weight + 1e-6)
-            if True:
-                # TODO: Mystery constant of 0.1
-                new_depth -= 0.1
+            # TODO: Mystery constant of 0.1
+            new_depth = depth + math.log(move_weight + 1e-6) - 0.1
+
             if best_move_depth is None:
                 best_move_depth = new_depth
             
@@ -375,16 +379,16 @@ class MyTransformerEngine(engine.Engine):
             child_re_searches = 0
             RE_SEARCH_DEPTH = 0.2
             while True:
-                # Recursive call with negated bounds
-                # NOTE: If we're searching the first move, we use the full window [-beta, -alpha]
+                # If we're searching the first move, we use the full window [-beta, -alpha]
                 # Otherwise, we use a null window to quickly eliminate inferior moves
-                score, _ = self.alpha_beta_policy_node(
+                score, _ = self.pvs(
                     child_node, 
                     new_depth, 
-                    -beta if i == 0 else -alpha - 0.0001, 
+                    -beta if i == 0 else -alpha - NULL_EPS, 
                     -alpha,
                     history,
                     tt,
+                    NodeType.PV_NODE if (i == 0 and node_type == NodeType.PV_NODE) else (NodeType.ALL_NODE if node_type == NodeType.CUT_NODE else NodeType.CUT_NODE),
                     rec_depth + 1
                 )
                 score = -score  # Negate for current player's perspective
@@ -398,17 +402,19 @@ class MyTransformerEngine(engine.Engine):
                         new_depth += RE_SEARCH_DEPTH
                         continue
                     else:
-                        # Re-search with the full window, as we've found a new best move
-                        score, _ = self.alpha_beta_policy_node(
-                            child_node, 
-                            new_depth, 
-                            -beta, 
-                            -alpha,
-                            history,
-                            tt,
-                            rec_depth + 1
-                        )
-                        score = -score
+                        if node_type == NodeType.PV_NODE:
+                            # Re-search with the full window, as we've found a new best move
+                            score, _ = self.pvs(
+                                child_node, 
+                                new_depth, 
+                                -beta, 
+                                -alpha,
+                                history,
+                                tt,
+                                NodeType.PV_NODE,
+                                rec_depth + 1
+                            )
+                            score = -score
                 elif child_re_searches > 0:
                     # This child is no longer improving alpha, drop it one in re-search depth
                     new_depth -= RE_SEARCH_DEPTH
@@ -430,7 +436,6 @@ class MyTransformerEngine(engine.Engine):
 
             if score > max_eval:
                 max_eval = score
-                best_move = move
             
             # Update alpha for pruning
             alpha = max(alpha, max_eval)
@@ -443,7 +448,7 @@ class MyTransformerEngine(engine.Engine):
 
         history[reduced_fen(board)] -= 1
         
-        return max_eval, best_move
+        return max_eval, node.policy[0][0]
     
     def mtdf(self, root: Node, depth: float, history: dict[str, int], tt: dict[str, Node | None] | None, f = None) -> tuple[float, chess.Move]:
         """
@@ -475,7 +480,7 @@ class MyTransformerEngine(engine.Engine):
                 beta = f
                 
             # Perform zero-window search
-            score, move = self.alpha_beta_policy_node(root, depth, alpha, beta, history, tt)
+            score, move = self.pvs(root, depth, alpha, beta, history, tt)
             
             if move is not None:
                 best_move = move
@@ -531,7 +536,7 @@ class MyTransformerEngine(engine.Engine):
         depth = 2.0
         node_count = self.metrics['num_nodes']
         while self.metrics['num_nodes'] - node_count < num_nodes * 0.95 and depth < 20:
-            score, move = self.alpha_beta_policy_node(root, depth, -1, 1, history, tt)
+            score, move = self.pvs(root, depth, -1, 1, history, tt)
             depth += 0.2
         self.metrics['depth'] += depth
 
@@ -682,7 +687,7 @@ class MyTransformerEngine(engine.Engine):
             root_node = self._create_node(board)
             history = defaultdict(int)
             tt = defaultdict(lambda: None)
-            best_value, best_move = self.alpha_beta_policy_node(root_node, self.search_depth, -1.0, 1.0, history, tt)
+            best_value, best_move = self.pvs(root_node, self.search_depth, -1.0, 1.0, history, tt)
         elif self.strategy == MoveSelectionStrategy.MCTS:
             root_node = self._create_node(board, node_class=MCTSNode)
             best_value, best_move = self.mcts(root_node, self.search_depth)

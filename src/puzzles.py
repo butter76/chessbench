@@ -45,7 +45,7 @@ lichess_coder = coders.TupleCoder([
 
 _STRATEGY = flags.DEFINE_enum(
     name='strategy',
-    default='mtdf',
+    default='pvs',
     enum_values=[
         'value',
         'avs',

@@ -21,13 +21,14 @@ class InferenceRequest:
 
 
 class InferenceResponse:
-    def __init__(self, request_id: str, results: Optional[Dict[str, torch.Tensor]] = None, error: Optional[str] = None):
+    def __init__(self, request_id: str, results: Optional[Dict[str, np.ndarray]] = None, error: Optional[str] = None):
         self.request_id = request_id
-        # Ensure all tensors are on CPU and detached for serialization
+        # Convert tensors to numpy arrays for workers to use directly
         if results is not None:
             self.results = {}
             for key, tensor in results.items():
-                self.results[key] = tensor.detach().cpu().clone()
+                # Convert to float32 first (numpy doesn't support bfloat16), then to numpy array on CPU
+                self.results[key] = tensor.float().detach().cpu().numpy()
         else:
             self.results = None
         self.error = error

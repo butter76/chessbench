@@ -113,7 +113,7 @@ class MyTransformerEngine(engine.Engine):
         
         # Configure search parameters based on strategy
         search_kwargs = {
-            'num_nodes': 400 if self.strategy in [MoveSelectionStrategy.MTDF, MoveSelectionStrategy.PVS] else None,
+            'num_nodes': int(self.search_depth) if self.strategy in [MoveSelectionStrategy.MTDF, MoveSelectionStrategy.PVS] else None,
             'num_rollouts': int(self.search_depth) if self.strategy == MoveSelectionStrategy.MCTS else None,
         }
         

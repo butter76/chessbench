@@ -106,6 +106,7 @@ class PVSSearch(SearchAlgorithm):
         
         total_move_weight = 0
         best_move_depth = None
+        best_move = None
         
         for i, (move, move_weight) in enumerate(node.policy):
             assert move_weight > 0.0
@@ -167,19 +168,19 @@ class PVSSearch(SearchAlgorithm):
                         new_depth += RE_SEARCH_DEPTH
                         continue
                     else:
-                        if node_type == NodeType.PV_NODE:
-                            # Re-search with full window
-                            score, _ = self._pvs(
-                                child_node, 
-                                new_depth, 
-                                -beta, 
-                                -alpha,
-                                history,
-                                tt,
-                                NodeType.PV_NODE,
-                                rec_depth + 1
-                            )
-                            score = -score
+                        # if node_type == NodeType.PV_NODE:
+                        # Re-search with full window
+                        score, _ = self._pvs(
+                            child_node, 
+                            new_depth, 
+                            -beta, 
+                            -alpha,
+                            history,
+                            tt,
+                            NodeType.PV_NODE,
+                            rec_depth + 1
+                        )
+                        score = -score
                 elif child_re_searches > 0:
                     # Drop re-search depth
                     new_depth -= RE_SEARCH_DEPTH
@@ -195,6 +196,7 @@ class PVSSearch(SearchAlgorithm):
 
             if score > max_eval:
                 max_eval = score
+                best_move = move
             
             # Update alpha for pruning
             alpha = max(alpha, max_eval)
@@ -207,7 +209,7 @@ class PVSSearch(SearchAlgorithm):
 
         history[reduced_fen(board)] -= 1
         
-        return max_eval, node.policy[0][0] if node.policy else None
+        return max_eval, best_move
     
     def _create_node(self, board: chess.Board, inference_func=None, parent: Optional[Node] = None, tt: Dict[str, Node] = None) -> Node:
         """Create a node with static evaluation and policy."""

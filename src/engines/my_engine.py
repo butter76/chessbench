@@ -23,6 +23,11 @@ from searchless_chess.src.engines.search import (
     ValueSearch, PolicySearch, AVSSearch, NegamaxSearch, 
     AlphaBetaSearch, PVSSearch, MTDFSearch, MCTSSearch
 )
+
+# Suppress FutureWarning about torch.load weights_only parameter
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 
@@ -40,11 +45,20 @@ class MyTransformerEngine(engine.Engine):
         limit: chess.engine.Limit,
         strategy: Union[MoveSelectionStrategy, str] = MoveSelectionStrategy.VALUE,
         search_depth: int | float = 2,
+        num_nodes: int = 400,
         search_ordering_strategy: Union[MoveSelectionStrategy, str, None] = MoveSelectionStrategy.AVS,
     ) -> None:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._limit = limit
         self.search_depth = search_depth
+        self.num_nodes = num_nodes
+        # Initialize metrics tracking
+        self.metrics = {
+            'num_nodes': 0,
+            'num_searches': 0,
+            'policy_perplexity': 0,
+            'depth': 0,
+        }
         
         # Convert string to enum if needed
         if isinstance(strategy, str):
@@ -99,6 +113,10 @@ class MyTransformerEngine(engine.Engine):
         if search_algorithm is None:
             raise ValueError(f"Unknown strategy: {self.strategy}")
 
+        # Reset search algorithm metrics for this search
+        search_algorithm.reset_metrics()
+        
+
         # Create inference functions for the search algorithm
         def inference_func(board: chess.Board):
             return self.analyse_shallow(board)
@@ -113,8 +131,8 @@ class MyTransformerEngine(engine.Engine):
         
         # Configure search parameters based on strategy
         search_kwargs = {
-            'num_nodes': 400 if self.strategy in [MoveSelectionStrategy.MTDF, MoveSelectionStrategy.PVS] else None,
-            'num_rollouts': int(self.search_depth) if self.strategy == MoveSelectionStrategy.MCTS else None,
+            'num_nodes': self.num_nodes,
+            'num_rollouts': self.num_nodes,
         }
         
         # Perform the search
@@ -126,8 +144,22 @@ class MyTransformerEngine(engine.Engine):
             **{k: v for k, v in search_kwargs.items() if v is not None}
         )
         
+        # Update engine metrics
+        self.metrics['num_searches'] += 1
+        self.metrics['num_nodes'] += search_algorithm.metrics.get('num_nodes', 0)
+        self.metrics['depth'] += search_algorithm.metrics.get('depth', self.search_depth)
+        self.metrics['policy_perplexity'] += search_algorithm.metrics.get('policy_perplexity', 0)
         
         return result.move
+    
+    def reset_metrics(self):
+        """Reset engine metrics."""
+        self.metrics = {
+            'num_nodes': 0,
+            'num_searches': 0,
+            'policy_perplexity': 0,
+            'depth': 0,
+        }
     
     def analyse_batch(self, boards):
         """Analyze multiple boards in a batch."""

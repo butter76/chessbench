@@ -168,18 +168,30 @@ class PVSSearch(SearchAlgorithm):
                         new_depth += RE_SEARCH_DEPTH
                         continue
                     else:
-                        # if node_type == NodeType.PV_NODE:
-                        # Re-search with full window
-                        score, _ = self._pvs(
-                            child_node, 
-                            new_depth, 
-                            -beta, 
-                            -alpha,
-                            history,
-                            tt,
-                            NodeType.PV_NODE,
-                            rec_depth + 1
-                        )
+                        if node_type == NodeType.PV_NODE:
+                            # Re-search with full window
+                            score, _ = self._pvs(
+                                child_node, 
+                                new_depth, 
+                                -beta, 
+                                -alpha,
+                                history,
+                                tt,
+                                NodeType.PV_NODE,
+                                rec_depth + 1
+                            )
+                        else:
+                            # Re-search with full window
+                            score, _ = self._pvs(
+                                child_node, 
+                                new_depth, 
+                                -beta, 
+                                -alpha,
+                                history,
+                                tt,
+                                child_node_type,
+                                rec_depth + 1
+                            )
                         score = -score
                 elif child_re_searches > 0:
                     # Drop re-search depth

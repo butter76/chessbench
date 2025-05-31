@@ -40,6 +40,10 @@ from searchless_chess.src.constants import CODERS
 import searchless_chess.src.utils as utils
 from apache_beam import coders
 
+# Suppress FutureWarning about torch.load weights_only parameter
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 lichess_coder = coders.TupleCoder([
     coders.StrUtf8Coder(),
     coders.StrUtf8Coder(),
@@ -82,6 +86,12 @@ _DEPTH = flags.DEFINE_float(
     help='The search depth to use for search-based strategies.',
 )
 
+_NUM_NODES = flags.DEFINE_integer(
+    name='num_nodes',
+    default=400,
+    help='The number of nodes to use.',
+)
+
 _NETWORK = flags.DEFINE_enum(
     name='network',
     default=None,
@@ -91,14 +101,14 @@ _NETWORK = flags.DEFINE_enum(
 
 _NUM_PROCESSES = flags.DEFINE_integer(
     name='num_processes',
-    default=None,
-    help='Number of processes to use for multiprocessing. Defaults to CPU count.',
+    default=8,
+    help='Number of processes to use for multiprocessing.',
 )
 
 # Global variable to store the engine in each worker process
 worker_engine = None
 
-def init_worker(strategy, network, depth, checkpoint_path=None):
+def init_worker(strategy, network, depth, num_nodes, checkpoint_path=None):
     """Initialize worker process with an engine instance."""
     global worker_engine
     if network is not None:
@@ -106,8 +116,8 @@ def init_worker(strategy, network, depth, checkpoint_path=None):
             # DEPTH 1 SEARCH
             worker_engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1), network=network)
         else:
-            # 400 NODE MCTS
-            worker_engine = Lc0Engine(chess.engine.Limit(nodes=400), network=network)
+            # NODE MCTS
+            worker_engine = Lc0Engine(chess.engine.Limit(nodes=num_nodes), network=network)
     else:
         if checkpoint_path is None:
             checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt'
@@ -115,28 +125,9 @@ def init_worker(strategy, network, depth, checkpoint_path=None):
             checkpoint_path,
             chess.engine.Limit(nodes=1),
             strategy=strategy,
-            search_depth=depth if strategy != 'mcts' else 400,
+            search_depth=depth,
+            num_nodes=num_nodes,
         )
-
-def create_engine(strategy, network, depth, checkpoint_path=None):
-    """Create an engine instance with the given parameters."""
-    if network is not None:
-        if strategy == 'value':
-            # DEPTH 1 SEARCH
-            engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1), network=network)
-        else:
-            # 400 NODE MCTS
-            engine = Lc0Engine(chess.engine.Limit(nodes=400), network=network)
-    else:
-        if checkpoint_path is None:
-            checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt'
-        engine = MyTransformerEngine(
-            checkpoint_path,
-            chess.engine.Limit(nodes=1),
-            strategy=strategy,
-            search_depth=depth if strategy != 'mcts' else 400,
-        )
-    return engine
 
 def evaluate_puzzle_from_pandas_row(
     puzzle: pd.Series,
@@ -298,6 +289,7 @@ def main(argv: Sequence[str]) -> None:
     strategy = _STRATEGY.value
     network = _NETWORK.value
     depth = _DEPTH.value
+    num_nodes = _NUM_NODES.value
     num_processes = _NUM_PROCESSES.value or mp.cpu_count()
     
     MY_ENGINE = (network is None)
@@ -327,7 +319,7 @@ def main(argv: Sequence[str]) -> None:
             with mp.Pool(
                 processes=num_processes, 
                 initializer=init_worker,
-                initargs=(strategy, network, depth, checkpoint_path)
+                initargs=(strategy, network, depth, num_nodes, checkpoint_path)
             ) as pool:
                 # Use imap for streaming results with progress bar
                 pbar = tqdm(

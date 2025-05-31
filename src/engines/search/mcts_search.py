@@ -51,10 +51,10 @@ class MCTSSearch(SearchAlgorithm):
         # Select best move based on visit count
         best_move = None
         best_N = 0
-        for i, child in enumerate(root.children):
-            if child.N > best_N:
+        for move, _, child in root.policy:
+            if child is not None and child.N > best_N:
                 best_N = child.N
-                best_move = root.policy[i][0]
+                best_move = move
 
         return SearchResult(
             move=best_move,
@@ -72,19 +72,19 @@ class MCTSSearch(SearchAlgorithm):
         Returns (selected_node, is_new_node).
         """
         c_puct = 2.1
+        fpu_factor = 0.9
         best_q = -float('inf')
         best_idx = -1
         total_policy = 0.0
         
-        for i, (_, p) in enumerate(node.policy):
-            if i < len(node.children):
-                child = node.children[i]
+        for i, (move, p, child) in enumerate(node.policy):
+            if child is not None:
                 q = -1 * child.get_value()
                 n = child.N
                 total_policy += p
             else:
                 # First Play Urgency (FPU)
-                q = node.get_value() - 0.9 * ((total_policy) ** 0.5)
+                q = node.get_value() - fpu_factor * ((total_policy) ** 0.5)
                 n = 0
             
             u = c_puct * p * math.sqrt(node.N) / (1 + n)
@@ -92,16 +92,16 @@ class MCTSSearch(SearchAlgorithm):
                 best_q = q + u
                 best_idx = i
 
-        if best_idx >= len(node.children):
-            assert best_idx == len(node.children)
+        move, p, child = node.policy[best_idx]
+        if child is None:
             # Create a new child node
             child_board = node.board.copy()
-            child_board.push(node.policy[best_idx][0])
+            child_board.push(move)
             child_node = self._create_mcts_node(child_board, inference_func, parent=node)
-            node.add_child(child_node)
+            node.add_child(child_node, move)
             return child_node, True
         
-        return node.children[best_idx], False
+        return child, False
     
     def _create_mcts_node(self, board: chess.Board, inference_func, parent: Optional[MCTSNode] = None) -> MCTSNode:
         """Create an MCTS node with static evaluation and policy."""

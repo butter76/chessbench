@@ -108,7 +108,7 @@ class PVSSearch(SearchAlgorithm):
         best_move_depth = None
         best_move = None
         
-        for i, (move, move_weight) in enumerate(node.policy):
+        for i, (move, move_weight, child_node) in enumerate(node.policy):
             assert move_weight > 0.0
 
             # Compute new depth with policy extension
@@ -118,18 +118,16 @@ class PVSSearch(SearchAlgorithm):
                 best_move_depth = new_depth
             
             # Skip low probability moves if depth is too low
-            if new_depth <= 0 and i >= len(node.children):
+            if new_depth <= 0 and child_node is None:
                 if total_move_weight > 0.85 and i >= 2:
-                    break
+                    continue
             
             # Create child node if needed
-            if i >= len(node.children):
+            if child_node is None:
                 child_board = board.copy()
                 child_board.push(move)
                 child_node = self._create_node(child_board, inference_func=self.inference_func, parent=node, tt=tt)
-                node.add_child(child_node)
-            else:
-                child_node = node.children[i]
+                node.add_child(child_node, move)
 
             child_re_searches = 0
             RE_SEARCH_DEPTH = 0.2
@@ -201,8 +199,8 @@ class PVSSearch(SearchAlgorithm):
 
             # Update policy if re-searches occurred
             if child_re_searches > 0:
-                new_policy = node.policy[i][1] * math.exp(child_re_searches * RE_SEARCH_DEPTH)
-                node.policy[i] = (move, new_policy)
+                new_policy = move_weight * math.exp(child_re_searches * RE_SEARCH_DEPTH)
+                node.policy[i] = (move, new_policy, child_node)
                 node.sort_and_normalize()
                 best_move_depth = max(best_move_depth, new_depth)
 

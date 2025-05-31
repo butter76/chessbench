@@ -18,6 +18,8 @@
 from collections.abc import Sequence
 import io
 import os
+import multiprocessing as mp
+import time
 
 from absl import app
 from absl import flags
@@ -32,10 +34,15 @@ from tqdm import tqdm
 from searchless_chess.src.engines import engine as engine_lib
 from searchless_chess.src.engines.lc0_engine import AllMovesLc0Engine, Lc0Engine
 from searchless_chess.src.engines.stockfish_engine import StockfishEngine
-from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTransformerEngine
+from searchless_chess.src.engines.strategy import MoveSelectionStrategy
+from searchless_chess.src.engines.my_engine import MyTransformerEngine
 from searchless_chess.src.constants import CODERS
 import searchless_chess.src.utils as utils
 from apache_beam import coders
+
+# Suppress FutureWarning about torch.load weights_only parameter
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 lichess_coder = coders.TupleCoder([
     coders.StrUtf8Coder(),
@@ -79,12 +86,48 @@ _DEPTH = flags.DEFINE_float(
     help='The search depth to use for search-based strategies.',
 )
 
+_NUM_NODES = flags.DEFINE_integer(
+    name='num_nodes',
+    default=400,
+    help='The number of nodes to use.',
+)
+
 _NETWORK = flags.DEFINE_enum(
     name='network',
     default=None,
     enum_values=['t1d', 't1s', 't3d', 't82', 'bt4', 'bt3', 'ls15'],
     help='The network to use for Lc0Engine.',
 )
+
+_NUM_PROCESSES = flags.DEFINE_integer(
+    name='num_processes',
+    default=8,
+    help='Number of processes to use for multiprocessing.',
+)
+
+# Global variable to store the engine in each worker process
+worker_engine = None
+
+def init_worker(strategy, network, depth, num_nodes, checkpoint_path=None):
+    """Initialize worker process with an engine instance."""
+    global worker_engine
+    if network is not None:
+        if strategy == 'value':
+            # DEPTH 1 SEARCH
+            worker_engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1), network=network)
+        else:
+            # NODE MCTS
+            worker_engine = Lc0Engine(chess.engine.Limit(nodes=num_nodes), network=network)
+    else:
+        if checkpoint_path is None:
+            checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt'
+        worker_engine = MyTransformerEngine(
+            checkpoint_path,
+            chess.engine.Limit(nodes=1),
+            strategy=strategy,
+            search_depth=depth,
+            num_nodes=num_nodes,
+        )
 
 def evaluate_puzzle_from_pandas_row(
     puzzle: pd.Series,
@@ -120,6 +163,54 @@ def evaluate_puzzle_from_board(
         return board.is_checkmate()
     board.push(chess.Move.from_uci(move))
   return True
+
+def worker_evaluate_puzzle(puzzle_data):
+    """Worker function for evaluating a single puzzle using the global engine."""
+    global worker_engine
+    puzzle_id, puzzle = puzzle_data
+    try:
+        correct = evaluate_puzzle_from_pandas_row(puzzle, worker_engine)
+        metrics = {}
+        if hasattr(worker_engine, 'metrics'):
+            metrics = worker_engine.metrics.copy()
+        return {
+            'puzzle_id': puzzle_id,
+            'correct': correct,
+            'rating': puzzle['Rating'],
+            'metrics': metrics
+        }
+    except Exception as e:
+        print(f"Error evaluating puzzle {puzzle_id}: {e}")
+        return {
+            'puzzle_id': puzzle_id,
+            'correct': False,
+            'rating': puzzle['Rating'],
+            'metrics': {}
+        }
+
+def worker_evaluate_position(position_data):
+    """Worker function for evaluating a single position using the global engine."""
+    global worker_engine
+    fen, expected_move, win_prob = position_data
+    try:
+        board = chess.Board(fen)
+        predicted_move = worker_engine.play(board).uci()
+        correct = (expected_move == predicted_move)
+        metrics = {}
+        if hasattr(worker_engine, 'metrics'):
+            metrics = worker_engine.metrics.copy()
+        return {
+            'correct': correct,
+            'win_prob': win_prob,
+            'metrics': metrics
+        }
+    except Exception as e:
+        print(f"Error evaluating position {fen}: {e}")
+        return {
+            'correct': False,
+            'win_prob': win_prob,
+            'metrics': {}
+        }
 
 def validate_chessbench(engine: engine_lib.Engine):
     """Sample positions from validation set and compare MyEngine policy with dataset policy."""
@@ -194,25 +285,17 @@ def validate_lichess(engine: engine_lib.Engine):
 def main(argv: Sequence[str]) -> None:
     if len(argv) > 1:
         raise app.UsageError('Too many command-line arguments.')
+    
     strategy = _STRATEGY.value
-    MY_ENGINE = False
-    if _NETWORK.value is not None:
-        if strategy == 'value':
-            # DEPTH 1 SEARCH
-            engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1), network=_NETWORK.value)
-        else:
-            # 400 NODE MCTS
-            engine = Lc0Engine(chess.engine.Limit(nodes=400), network=_NETWORK.value)
-    else:
-        MY_ENGINE = True
-        # checkpoint_path = '../checkpoints/p1/checkpoint_480000.pt'
-        checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt'
-        engine = MyTransformerEngine(
-            checkpoint_path,
-            chess.engine.Limit(nodes=1),
-            strategy=strategy,
-            search_depth=_DEPTH.value if strategy != 'mcts' else 400,
-        )
+    network = _NETWORK.value
+    depth = _DEPTH.value
+    num_nodes = _NUM_NODES.value
+    num_processes = _NUM_PROCESSES.value or mp.cpu_count()
+    
+    MY_ENGINE = (network is None)
+    checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt' if MY_ENGINE else None
+
+    print(f"Using {num_processes} processes for evaluation")
 
     if _TYPE.value == 'tactical':
         # Evaluates on 10_000 random puzzles from Lichess' most difficult puzzles
@@ -225,26 +308,54 @@ def main(argv: Sequence[str]) -> None:
         )
         puzzles = pd.read_csv(puzzles_path, nrows=10000).sample(frac=1)
 
+        # Prepare data for multiprocessing
+        puzzle_data = [(puzzle_id, puzzle) for puzzle_id, puzzle in puzzles.iterrows()]
+        
         with open(f'puzzles-{strategy}.txt', 'w') as f:
             num_correct = 0
-            pbar = tqdm(puzzles.iterrows(), total=len(puzzles), desc=f"Evaluating puzzles ({strategy})")
             num_iterations = 0
-            for puzzle_id, puzzle in pbar:
-                correct = evaluate_puzzle_from_pandas_row(
-                    puzzle=puzzle,
-                    engine=engine,
+            
+            # Use multiprocessing Pool with initializer
+            with mp.Pool(
+                processes=num_processes, 
+                initializer=init_worker,
+                initargs=(strategy, network, depth, num_nodes, checkpoint_path)
+            ) as pool:
+                # Use imap for streaming results with progress bar
+                pbar = tqdm(
+                    pool.imap(worker_evaluate_puzzle, puzzle_data),
+                    total=len(puzzle_data),
+                    desc=f"Evaluating puzzles ({strategy})"
                 )
-                num_correct += correct
-                num_iterations += 1
-                f.write(str({'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}) + '\n')
-                stats = {
-                    'accuracy': f'{num_correct / num_iterations:.2%}',
+                
+                # Aggregate metrics
+                total_metrics = {
+                    'num_nodes': 0,
+                    'num_searches': 0,
+                    'policy_perplexity': 0,
+                    'depth': 0,
                 }
-                if MY_ENGINE:
-                    stats['nodes'] = f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}'
-                    stats['perplexity'] = f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}'
-                    stats['depth'] = f'{engine.metrics["depth"] / engine.metrics["num_searches"]:.2f}'
-                pbar.set_postfix(stats)
+                
+                for result in pbar:
+                    num_correct += result['correct']
+                    num_iterations += 1
+                    f.write(str(result) + '\n')
+                    
+                    # Aggregate metrics if available
+                    if result['metrics']:
+                        for key in total_metrics:
+                            if key in result['metrics']:
+                                total_metrics[key] += result['metrics'][key]
+                    
+                    stats = {
+                        'accuracy': f'{num_correct / num_iterations:.2%}',
+                    }
+                    if MY_ENGINE and total_metrics['num_searches'] > 0:
+                        stats['nodes'] = f'{total_metrics["num_nodes"] / total_metrics["num_searches"]:.2f}'
+                        stats['perplexity'] = f'{total_metrics["policy_perplexity"] / max(1, total_metrics["num_nodes"]):.2f}'
+                        stats['depth'] = f'{total_metrics["depth"] / total_metrics["num_searches"]:.2f}'
+                    pbar.set_postfix(stats)
+                    
             print(f'{strategy}: {num_correct / len(puzzles):.2%}')
 
     elif _TYPE.value == 'positional':
@@ -257,17 +368,17 @@ def main(argv: Sequence[str]) -> None:
 
         # Create validation dataloader
         bag_source = bagz.BagDataSource('../data/lichess_data.bag')
-
         val_iter = iter(bag_source)
 
-        # Track metrics
-        total_positions = 0
-        total_top1_match = 0.0
-
+        # Collect positions to evaluate
+        positions_to_evaluate = []
         explore = False
-        pbar = tqdm(range(10000), desc=f"Evaluating positions ({strategy})")
         
+        print("Collecting positions to evaluate...")
         for i in range(1000000):
+            if len(positions_to_evaluate) >= 10000:
+                break
+                
             if (i % 100 == 0):
                 explore = True
             if not explore:
@@ -277,24 +388,54 @@ def main(argv: Sequence[str]) -> None:
             fen, move, win_prob = lichess_coder.decode(element)
             if not (0.564 < win_prob < 0.65):
                 continue
-            board = chess.Board(fen)
-            best_move = engine.play(board).uci()
-            if move == best_move:
-                total_top1_match += 1
-            total_positions += 1
+                
+            positions_to_evaluate.append((fen, move, win_prob))
             explore = False
 
-            pbar.update(1)
-
-            stats = {
-                'accuracy': f'{total_top1_match / total_positions:.2%}' if total_positions > 0 else '0.00%',
-            }
-            if MY_ENGINE:
-                stats['nodes'] = f'{engine.metrics["num_nodes"] / engine.metrics["num_searches"]:.2f}'
-                stats['perplexity'] = f'{engine.metrics["policy_perplexity"] / max(1, engine.metrics["num_nodes"]):.2f}'
-                stats['depth'] = f'{engine.metrics["depth"] / engine.metrics["num_searches"]:.2f}'
+        print(f"Evaluating {len(positions_to_evaluate)} positions...")
+        
+        # Track metrics
+        total_positions = 0
+        total_top1_match = 0.0
+        total_metrics = {
+            'num_nodes': 0,
+            'num_searches': 0,
+            'policy_perplexity': 0,
+            'depth': 0,
+        }
+        
+        # Use multiprocessing Pool with initializer
+        with mp.Pool(
+            processes=num_processes,
+            initializer=init_worker,
+            initargs=(strategy, network, depth, checkpoint_path)
+        ) as pool:
+            pbar = tqdm(
+                pool.imap(worker_evaluate_position, positions_to_evaluate),
+                total=len(positions_to_evaluate),
+                desc=f"Evaluating positions ({strategy})"
+            )
             
-            pbar.set_postfix(stats)
+            for result in pbar:
+                if result['correct']:
+                    total_top1_match += 1
+                total_positions += 1
+                
+                # Aggregate metrics if available
+                if result['metrics']:
+                    for key in total_metrics:
+                        if key in result['metrics']:
+                            total_metrics[key] += result['metrics'][key]
+
+                stats = {
+                    'accuracy': f'{total_top1_match / total_positions:.2%}' if total_positions > 0 else '0.00%',
+                }
+                if MY_ENGINE and total_metrics['num_searches'] > 0:
+                    stats['nodes'] = f'{total_metrics["num_nodes"] / total_metrics["num_searches"]:.2f}'
+                    stats['perplexity'] = f'{total_metrics["policy_perplexity"] / max(1, total_metrics["num_nodes"]):.2f}'
+                    stats['depth'] = f'{total_metrics["depth"] / total_metrics["num_searches"]:.2f}'
+                
+                pbar.set_postfix(stats)
 
         print(f"Lichess Top-1 move match rate: {total_top1_match/total_positions:.4f}")
 

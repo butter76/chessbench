@@ -21,6 +21,10 @@ from searchless_chess.src.puzzles import evaluate_puzzle_from_pandas_row
 from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
 
+# Suppress FutureWarning about torch.load weights_only parameter
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 
 def train(
     train_config: config_lib.TrainConfig,

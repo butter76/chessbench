@@ -20,6 +20,7 @@ import io
 import os
 import multiprocessing as mp
 import time
+import signal
 
 from absl import app
 from absl import flags
@@ -43,6 +44,14 @@ from apache_beam import coders
 # Suppress FutureWarning about torch.load weights_only parameter
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
+
+class WorkerTimeoutError(Exception):
+    """Raised when worker evaluation takes longer than the allowed timeout."""
+    pass
+
+def worker_timeout_handler(signum, frame):
+    """Signal handler for worker timeout."""
+    raise WorkerTimeoutError("Worker evaluation timed out after 10 minutes")
 
 lichess_coder = coders.TupleCoder([
     coders.StrUtf8Coder(),
@@ -103,6 +112,12 @@ _NUM_PROCESSES = flags.DEFINE_integer(
     name='num_processes',
     default=8,
     help='Number of processes to use for multiprocessing.',
+)
+
+_NAME = flags.DEFINE_string(
+    name='name',
+    default=None,
+    help='The name of the experiment.',
 )
 
 # Global variable to store the engine in each worker process
@@ -168,30 +183,49 @@ def worker_evaluate_puzzle(puzzle_data):
     """Worker function for evaluating a single puzzle using the global engine."""
     global worker_engine
     puzzle_id, puzzle = puzzle_data
+    
+    # Set up timeout (10 minutes = 600 seconds)
+    old_handler = signal.signal(signal.SIGALRM, worker_timeout_handler)
+    signal.alarm(600)  # 10 minutes timeout
+    
     try:
         correct = evaluate_puzzle_from_pandas_row(puzzle, worker_engine)
         metrics = {}
         if hasattr(worker_engine, 'metrics'):
             metrics = worker_engine.metrics.copy()
-        return {
+        result = {
             'puzzle_id': puzzle_id,
             'correct': correct,
             'rating': puzzle['Rating'],
             'metrics': metrics
         }
-    except Exception as e:
-        print(f"Error evaluating puzzle {puzzle_id}: {e}")
-        return {
+    except (Exception, WorkerTimeoutError) as e:
+        if isinstance(e, WorkerTimeoutError):
+            print(f"Puzzle {puzzle_id} evaluation timed out after 10 minutes")
+        else:
+            print(f"Error evaluating puzzle {puzzle_id}: {e}")
+        result = {
             'puzzle_id': puzzle_id,
             'correct': False,
             'rating': puzzle['Rating'],
             'metrics': {}
         }
+    finally:
+        # Reset the alarm and restore the old handler
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+    
+    return result
 
 def worker_evaluate_position(position_data):
     """Worker function for evaluating a single position using the global engine."""
     global worker_engine
     fen, expected_move, win_prob = position_data
+    
+    # Set up timeout (10 minutes = 600 seconds)
+    old_handler = signal.signal(signal.SIGALRM, worker_timeout_handler)
+    signal.alarm(600)  # 10 minutes timeout
+    
     try:
         board = chess.Board(fen)
         predicted_move = worker_engine.play(board).uci()
@@ -199,18 +233,27 @@ def worker_evaluate_position(position_data):
         metrics = {}
         if hasattr(worker_engine, 'metrics'):
             metrics = worker_engine.metrics.copy()
-        return {
+        result = {
             'correct': correct,
             'win_prob': win_prob,
             'metrics': metrics
         }
-    except Exception as e:
-        print(f"Error evaluating position {fen}: {e}")
-        return {
+    except (Exception, WorkerTimeoutError) as e:
+        if isinstance(e, WorkerTimeoutError):
+            print(f"Position evaluation timed out after 10 minutes for FEN: {fen}")
+        else:
+            print(f"Error evaluating position {fen}: {e}")
+        result = {
             'correct': False,
             'win_prob': win_prob,
             'metrics': {}
         }
+    finally:
+        # Reset the alarm and restore the old handler
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+    
+    return result
 
 def validate_chessbench(engine: engine_lib.Engine):
     """Sample positions from validation set and compare MyEngine policy with dataset policy."""
@@ -291,6 +334,7 @@ def main(argv: Sequence[str]) -> None:
     depth = _DEPTH.value
     num_nodes = _NUM_NODES.value
     num_processes = _NUM_PROCESSES.value or mp.cpu_count()
+    name = _NAME.value if _NAME.value is not None else strategy
     
     MY_ENGINE = (network is None)
     checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt' if MY_ENGINE else None
@@ -311,7 +355,7 @@ def main(argv: Sequence[str]) -> None:
         # Prepare data for multiprocessing
         puzzle_data = [(puzzle_id, puzzle) for puzzle_id, puzzle in puzzles.iterrows()]
         
-        with open(f'puzzles-{strategy}.txt', 'w') as f:
+        with open(f'puzzles-{name}.txt', 'w') as f:
             num_correct = 0
             num_iterations = 0
             
@@ -325,7 +369,7 @@ def main(argv: Sequence[str]) -> None:
                 pbar = tqdm(
                     pool.imap(worker_evaluate_puzzle, puzzle_data),
                     total=len(puzzle_data),
-                    desc=f"Evaluating puzzles ({strategy})"
+                    desc=f"Evaluating puzzles ({name})"
                 )
                 
                 # Aggregate metrics
@@ -356,7 +400,7 @@ def main(argv: Sequence[str]) -> None:
                         stats['depth'] = f'{total_metrics["depth"] / total_metrics["num_searches"]:.2f}'
                     pbar.set_postfix(stats)
                     
-            print(f'{strategy}: {num_correct / len(puzzles):.2%}')
+            print(f'{name}: {num_correct / len(puzzles):.2%}')
 
     elif _TYPE.value == 'positional':
         # Evaluates on 10_000 random positions from lichess that were analyzed by Stockfish
@@ -413,7 +457,7 @@ def main(argv: Sequence[str]) -> None:
             pbar = tqdm(
                 pool.imap(worker_evaluate_position, positions_to_evaluate),
                 total=len(positions_to_evaluate),
-                desc=f"Evaluating positions ({strategy})"
+                desc=f"Evaluating positions ({name})"
             )
             
             for result in pbar:

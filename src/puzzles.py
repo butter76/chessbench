@@ -452,7 +452,7 @@ def main(argv: Sequence[str]) -> None:
         with mp.Pool(
             processes=num_processes,
             initializer=init_worker,
-            initargs=(strategy, network, depth, checkpoint_path)
+            initargs=(strategy, network, depth, num_nodes, checkpoint_path)
         ) as pool:
             pbar = tqdm(
                 pool.imap(worker_evaluate_position, positions_to_evaluate),

@@ -199,7 +199,7 @@ class PVSSearch(SearchAlgorithm):
 
             # Update policy if re-searches occurred
             if child_re_searches > 0:
-                new_policy = move_weight * math.exp(child_re_searches * RE_SEARCH_DEPTH)
+                new_policy = node.policy[i][1] * math.exp(child_re_searches * RE_SEARCH_DEPTH)
                 node.policy[i] = (move, new_policy, child_node)
                 node.sort_and_normalize()
                 best_move_depth = max(best_move_depth, new_depth)

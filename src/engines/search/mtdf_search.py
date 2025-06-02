@@ -4,7 +4,7 @@ from collections import defaultdict
 
 from .base import SearchAlgorithm, SearchResult
 from .pvs_search import PVSSearch, NULL_EPS, NodeType
-from searchless_chess.src.engines.utils.node import Node
+from searchless_chess.src.engines.utils.node import Node, TTEntry
 
 
 class MTDFSearch(PVSSearch):
@@ -19,6 +19,10 @@ class MTDFSearch(PVSSearch):
         Perform MTD(f) search with iterative deepening.
         """
         num_nodes = kwargs.get('num_nodes', 400)
+        
+        # Store inference function for use in node creation
+        self.inference_func = inference_func
+        self.tt_hits = 0  # Reset TT hit counter
         
         # Create root node
         root = self._create_node(board, inference_func)
@@ -57,11 +61,12 @@ class MTDFSearch(PVSSearch):
             metadata={
                 'depth': current_depth,
                 'nodes': self.metrics['num_nodes'],
-                'tt_hits': kwargs.get('tt_hits', 0)
+                'tt_hits': self.tt_hits,
+                'tt_entries': len([entry for entry in tt.values() if entry is not None])
             }
         )
     
-    def _mtdf(self, root: Node, depth: float, history: Dict[str, int], tt: Dict[str, Node], f=None) -> tuple[float, Optional[chess.Move]]:
+    def _mtdf(self, root: Node, depth: float, history: Dict[str, int], tt: Dict[str, TTEntry], f=None) -> tuple[float, Optional[chess.Move]]:
         """
         Performs MTD(f) search with policy-based move ordering and depth extension.
         Returns score relative to the current player and the best move found.

@@ -4,6 +4,95 @@ import chess
 from collections.abc import Sequence
 from searchless_chess.src.engines.utils.nnutils import reduced_fen
 
+
+class TTEntry:
+    """
+    Transposition table entry that stores comprehensive search information for a position.
+    
+    For each position (reduced_fen), we store:
+    - Static evaluation (value and policy) for node creation
+    - Exact score + depth (for PV nodes where alpha < score < beta)
+    - Upper bound score + depth (for nodes that fail low, score <= alpha)
+    - Lower bound score + depth (for nodes that fail high, score >= beta)
+    """
+    
+    def __init__(self, static_value: float, policy: List[Tuple[chess.Move, float]]):
+        """
+        Initialize a transposition table entry.
+        
+        Args:
+            static_value: The static evaluation of the position
+            policy: List of (move, probability) tuples for move ordering
+        """
+        self.static_value = static_value
+        self.policy = policy
+        
+        # Exact score entries: (score, depth)
+        self.exact_score: Optional[Tuple[float, float]] = None
+        
+        # Upper bound entries: (score, depth) - score <= alpha (fail low)
+        self.upper_bound: Optional[Tuple[float, float]] = None
+        
+        # Lower bound entries: (score, depth) - score >= beta (fail high)
+        self.lower_bound: Optional[Tuple[float, float]] = None
+    
+    def store_exact(self, score: float, depth: float) -> None:
+        """Store an exact score (PV node result)."""
+        if self.exact_score is None or depth >= self.exact_score[1]:
+            self.exact_score = (score, depth)
+    
+    def store_upper_bound(self, score: float, depth: float) -> None:
+        """Store an upper bound (fail low result)."""
+        if self.upper_bound is None or depth >= self.upper_bound[1]:
+            self.upper_bound = (score, depth)
+    
+    def store_lower_bound(self, score: float, depth: float) -> None:
+        """Store a lower bound (fail high result)."""
+        if self.lower_bound is None or depth >= self.lower_bound[1]:
+            self.lower_bound = (score, depth)
+    
+    def query(self, alpha: float, beta: float, depth: float) -> Optional[float]:
+        """
+        Query the transposition table entry for a usable score.
+        
+        Returns a score if we have sufficient information to answer the alpha-beta query,
+        None otherwise.
+        
+        Args:
+            alpha: The alpha bound for the search
+            beta: The beta bound for the search
+            depth: The current search depth
+            
+        Returns:
+            The score if we can answer the query, None otherwise
+        """
+        # Check for exact score with sufficient depth
+        if (self.exact_score is not None and 
+            self.exact_score[1] >= depth):
+            return self.exact_score[0]
+        
+        # Check for upper bound that causes fail low
+        if (self.upper_bound is not None and 
+            self.upper_bound[1] >= depth and 
+            self.upper_bound[0] <= alpha):
+            return self.upper_bound[0]
+        
+        # Check for lower bound that causes fail high
+        if (self.lower_bound is not None and 
+            self.lower_bound[1] >= depth and 
+            self.lower_bound[0] >= beta):
+            return self.lower_bound[0]
+        
+        return None
+    
+    def __str__(self) -> str:
+        """String representation of the TT entry."""
+        exact_str = f"Exact: {self.exact_score}" if self.exact_score else "Exact: None"
+        upper_str = f"Upper: {self.upper_bound}" if self.upper_bound else "Upper: None"
+        lower_str = f"Lower: {self.lower_bound}" if self.lower_bound else "Lower: None"
+        return f"TTEntry(Value={self.static_value:.4f}, {exact_str}, {upper_str}, {lower_str})"
+
+
 class Node:
     """
     Represents a node in a chess search tree.

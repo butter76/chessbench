@@ -5,7 +5,7 @@ from collections import defaultdict
 from enum import Enum, auto
 
 from .base import SearchAlgorithm, SearchResult
-from searchless_chess.src.engines.utils.node import Node
+from searchless_chess.src.engines.utils.node import Node, TTEntry
 from searchless_chess.src.engines.utils.nnutils import reduced_fen
 
 
@@ -23,6 +23,7 @@ class PVSSearch(SearchAlgorithm):
     
     def __init__(self):
         super().__init__("pvs")
+        self.tt_hits = 0  # Track transposition table hits
     
     def search(self, board: chess.Board, inference_func, batch_inference_func=None, depth=2.0, **kwargs) -> SearchResult:
         """
@@ -32,6 +33,7 @@ class PVSSearch(SearchAlgorithm):
         
         # Store inference function for use in node creation
         self.inference_func = inference_func
+        self.tt_hits = 0  # Reset TT hit counter
         
         # Create root node
         root = self._create_node(board, inference_func)
@@ -70,28 +72,37 @@ class PVSSearch(SearchAlgorithm):
             metadata={
                 'depth': current_depth,
                 'nodes': self.metrics['num_nodes'],
-                'tt_hits': kwargs.get('tt_hits', 0)
+                'tt_hits': self.tt_hits,
+                'tt_entries': len([entry for entry in tt.values() if entry is not None])
             }
         )
     
-    def _pvs_root(self, root: Node, depth: float, history: Dict[str, int], tt: Dict[str, Node], f=None) -> tuple[float, Optional[chess.Move]]:
+    def _pvs_root(self, root: Node, depth: float, history: Dict[str, int], tt: Dict[str, TTEntry], f=None) -> tuple[float, Optional[chess.Move]]:
         """Root level PVS call."""
         return self._pvs(root, depth, -1.0, 1.0, history, tt, NodeType.PV_NODE, 0)
     
     def _pvs(self, node: Node, depth: float, alpha: float, beta: float, 
-             history: Dict[str, int], tt: Dict[str, Node], 
+             history: Dict[str, int], tt: Dict[str, TTEntry], 
              node_type: NodeType = NodeType.PV_NODE, rec_depth: int = 0) -> tuple[float, Optional[chess.Move]]:
         """
         PVS with policy-based move ordering and depth extension.
         """
         board = node.board
+        position_key = reduced_fen(board)
 
         if node.is_terminal():
             return node.value, None
         
-        if history[reduced_fen(board)] >= 1:
+        if history[position_key] >= 1:
             # This position has been seen before, so we can return a draw
             return 0.0, None
+        
+        # Query transposition table
+        if position_key in tt and tt[position_key] is not None:
+            tt_score = tt[position_key].query(alpha, beta, depth)
+            if tt_score is not None:
+                self.tt_hits += 1
+                return tt_score, None
         
         # Leaf node evaluation
         if depth <= 0.0 and node.is_leaf():
@@ -102,11 +113,12 @@ class PVSSearch(SearchAlgorithm):
             return node.value, None
         
         max_eval = -float('inf')
-        history[reduced_fen(board)] += 1
+        history[position_key] += 1
         
         total_move_weight = 0
         best_move_depth = None
         best_move = None
+        original_alpha = alpha
         
         for i, (move, move_weight, child_node) in enumerate(node.policy):
             assert move_weight > 0.0
@@ -217,12 +229,26 @@ class PVSSearch(SearchAlgorithm):
 
             total_move_weight += move_weight
 
-        history[reduced_fen(board)] -= 1
+        history[position_key] -= 1
+        
+        # Store result in transposition table
+        if position_key in tt and tt[position_key] is not None:
+            if max_eval <= original_alpha:
+                # Fail low - upper bound
+                tt[position_key].store_upper_bound(max_eval, depth)
+            elif max_eval >= beta:
+                # Fail high - lower bound
+                tt[position_key].store_lower_bound(max_eval, depth)
+            else:
+                # Exact score
+                tt[position_key].store_exact(max_eval, depth)
         
         return max_eval, best_move
     
-    def _create_node(self, board: chess.Board, inference_func=None, parent: Optional[Node] = None, tt: Dict[str, Node] = None) -> Node:
+    def _create_node(self, board: chess.Board, inference_func=None, parent: Optional[Node] = None, tt: Dict[str, TTEntry] = None) -> Node:
         """Create a node with static evaluation and policy."""
+        position_key = reduced_fen(board)
+        
         # Check for terminal conditions
         terminal_value = None
         if board.is_checkmate():
@@ -233,9 +259,10 @@ class PVSSearch(SearchAlgorithm):
         if terminal_value is not None:
             return Node(board=board, parent=parent, value=terminal_value, terminal=True)
 
-        # Check transposition table
-        if tt is not None and reduced_fen(board) in tt:
-            return tt[reduced_fen(board)]
+        # Check transposition table for cached evaluation
+        if tt is not None and position_key in tt and tt[position_key] is not None:
+            tt_entry = tt[position_key]
+            return Node(board=board, parent=parent, value=tt_entry.static_value, policy=tt_entry.policy)
         
         self.metrics['num_nodes'] += 1
         
@@ -255,7 +282,8 @@ class PVSSearch(SearchAlgorithm):
         
         new_node = Node(board=board, parent=parent, value=value, policy=policy)
 
+        # Store static evaluation in transposition table
         if tt is not None:
-            tt[reduced_fen(board)] = new_node
+            tt[position_key] = TTEntry(static_value=value, policy=policy)
 
         return new_node 

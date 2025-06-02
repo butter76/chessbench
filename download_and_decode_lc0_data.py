@@ -14,10 +14,13 @@ import boto3
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 import csv
+import threading
+import queue
+import time
 
 # Import custom modules
-from searchless_chess.src.bagz import BagReader
-from searchless_chess.src.constants import decode_lc0_data, LC0DataRecord
+from searchless_chess.src.bagz import BagReader, BagWriter
+from searchless_chess.src.constants import decode_lc0_data, LC0DataRecord, encode_lc0_data
 
 
 def setup_logging(verbose=False):
@@ -139,13 +142,87 @@ def download_bag_file(s3_client, bucket_name, object_key, output_dir):
             os.remove(local_path)
         raise
 
-def decode_bag_file(bag_path, max_records=None, print_sample=False):
+
+def download_worker(s3_client, bucket_name, bag_files, buffer_dir, file_queue, max_buffer_size=10):
+    """
+    Background worker to download bag files while maintaining a buffer
+    
+    Args:
+        s3_client: boto3 S3 client
+        bucket_name: Name of the bucket
+        bag_files: List of bag file keys to download
+        buffer_dir: Directory to store downloaded files
+        file_queue: Queue to put downloaded filenames
+        max_buffer_size: Maximum number of files to keep in buffer
+    """
+    try:
+        for bag_file in bag_files:
+            # Wait until buffer has space
+            while True:
+                buffer_files = [f for f in os.listdir(buffer_dir) if f.endswith('.bag')]
+                if len(buffer_files) < max_buffer_size:
+                    break
+                time.sleep(1)  # Wait 1 second before checking again
+            
+            # Download the file
+            try:
+                local_path = download_bag_file(s3_client, bucket_name, bag_file, buffer_dir)
+                file_queue.put(local_path)
+                logging.info(f"Downloaded and queued: {bag_file}")
+            except Exception as e:
+                logging.error(f"Failed to download {bag_file}: {e}")
+                continue
+        
+        # Signal completion by putting None in queue
+        file_queue.put(None)
+        logging.info("Download worker completed")
+        
+    except Exception as e:
+        logging.error(f"Download worker error: {e}")
+        file_queue.put(None)
+
+
+def upload_bag_file(s3_client, bucket_name, local_path, object_key):
+    """
+    Upload a processed .bag file to S3/Wasabi
+    
+    Args:
+        s3_client: boto3 S3 client
+        bucket_name: Name of the bucket
+        local_path: Path to the local file to upload
+        object_key: Key to use for the uploaded object
+    """
+    try:
+        # Get file size for progress tracking
+        file_size = os.path.getsize(local_path)
+        
+        # Upload with progress bar
+        with tqdm(total=file_size, unit='B', unit_scale=True, desc=f"Uploading {object_key}") as pbar:
+            # Define a callback for progress updates
+            def upload_progress(bytes_amount):
+                pbar.update(bytes_amount)
+            
+            # Upload the file
+            s3_client.upload_file(
+                local_path,
+                bucket_name, 
+                object_key,
+                Callback=upload_progress
+            )
+        
+        logging.info(f"Uploaded {local_path} to {object_key}")
+        
+    except ClientError as e:
+        logging.error(f"Error uploading {local_path}: {e}")
+        raise
+
+
+def decode_bag_file(bag_path, output_bag, dedup, print_sample=False):
     """
     Decode a .bag file containing LC0 data records
     
     Args:
         bag_path: Path to the .bag file
-        max_records: Maximum number of records to process (None for all)
         print_sample: Whether to print sample records
         
     Returns:
@@ -155,53 +232,48 @@ def decode_bag_file(bag_path, max_records=None, print_sample=False):
         # Open the bag file
         reader = BagReader(bag_path)
         record_count = len(reader)
-        logging.info(f"Bag file contains {record_count} records")
         
-        # Limit records if specified
-        if max_records is not None and max_records < record_count:
-            record_count = max_records
-            logging.info(f"Processing first {max_records} records")
-        
-        # Process records with progress bar
-        processed = 0
-        games = 0
-        deduped = 0
-        dist = {'-1.0': 0, '0.0': 0, '1.0': 0}
-        prev_records = []
-        dedup = set()
-        with tqdm(total=record_count, desc="Decoding records") as pbar:
-            for i in range(record_count):
-                # Get and decode the record
-                record_bytes = reader[i]
-                record = decode_lc0_data(record_bytes)
-                
-                if record.fen == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1":
-                    games += 1
-                    if len(prev_records) > 0:
-                        last_record = prev_records[-1]
-                        if last_record.root_q > 0.5:
-                            outcome = 1
-                        elif last_record.root_q < -0.5:
-                            outcome = -1
-                        else:
-                            outcome = 0
-                        outcome *= (-1) ** (last_record.plies_left % 2)
-                        for prev_record in prev_records:
-                            new_record = prev_record._replace(result=outcome * (-1) ** (prev_record.plies_left % 2))
-                            
-                        prev_records = []
+        with BagWriter(output_bag) as writer:
+            # Process records with progress bar
+            processed = 0
+            games = 0
+            deduped = 0
+            prev_records = []
+            count = 0
+            with tqdm(total=record_count, desc="Decoding records") as pbar:
+                for i in range(record_count):
+                    # Get and decode the record
+                    record_bytes = reader[i]
+                    record = decode_lc0_data(record_bytes)
                     
-                
-                b = record.fen.split(' ')[0]
-                if b not in dedup:
-                    deduped += 1
-                    dedup.add(b)
-                    prev_records.append(record)
-                
-                processed += 1
-                pbar.update(1)
-        
-        return processed, games, dist, deduped
+                    if record.fen == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1":
+                        games += 1
+                        if len(prev_records) > 0:
+                            last_record = prev_records[-1]
+                            if last_record.root_q > 0.5:
+                                outcome = 1
+                            elif last_record.root_q < -0.5:
+                                outcome = -1
+                            else:
+                                outcome = 0
+                            outcome *= (-1) ** (last_record.plies_left % 2)
+                            for prev_record in prev_records:
+                                count += 1
+                                if count % 3 != 0:
+                                    continue
+                                new_record = prev_record._replace(result=outcome * (-1) ** (prev_record.plies_left % 2))
+                                writer.write(encode_lc0_data(new_record))
+                            prev_records = []
+                    
+                    b = record.fen.split(' ')[0]
+                    if b not in dedup:
+                        deduped += 1
+                        dedup.add(b)
+                        prev_records.append(record)
+                    
+                    processed += 1
+                    if i % 1000 == 0:
+                        pbar.update(1000)
     
     except Exception as e:
         logging.error(f"Error decoding bag file {bag_path}: {e}")
@@ -240,7 +312,8 @@ def parse_args():
     parser.add_argument('--secret-key', required=True, help='S3/Wasabi secret key')
     parser.add_argument('--region', default='us-west-1', help='S3/Wasabi region (default: us-east-1)')
     parser.add_argument('--endpoint-url', help='Custom S3 endpoint URL (optional, default: Wasabi endpoint for region)')
-    parser.add_argument('--bucket', required=True, help='S3/Wasabi bucket name')
+    parser.add_argument('--bucket', required=True, help='S3/Wasabi bucket name for downloading')
+    parser.add_argument('--output-bucket', required=True, help='S3/Wasabi bucket name for uploading processed files (optional, defaults to same as --bucket)')
     
     # File selection
     parser.add_argument('--prefix', default='', help='Prefix for listing files (optional)')
@@ -248,9 +321,7 @@ def parse_args():
     
     # Output options
     parser.add_argument('--output-dir', default='downloaded_data', help='Directory for downloaded files')
-    parser.add_argument('--csv', action='store_true', help='Output decoded data to CSV')
-    parser.add_argument('--max-records', type=int, help='Maximum number of records to process')
-    parser.add_argument('--print-samples', action='store_true', help='Print sample records')
+    parser.add_argument('--output-bag', default='processed_data', help='Directory for processed bag files')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     
     return parser.parse_args()
@@ -272,29 +343,36 @@ def main():
         
         # Ensure output directory exists
         os.makedirs(args.output_dir, exist_ok=True)
+        os.makedirs(args.output_bag, exist_ok=True)
+        
+        # Create buffer directory for downloads
+        buffer_dir = os.path.join(args.output_dir, 'buffer')
+        os.makedirs(buffer_dir, exist_ok=True)
+        
+        # Global dedup set shared across all processing
+        global_dedup = set()
+        
+        # Set output bucket (default to same as input bucket)
+        output_bucket = args.output_bucket if args.output_bucket else args.bucket
         
         # If specific key provided, download and process it
         if args.key:
-            logging.info(f"Downloading specific file: {args.key}")
+            logging.info(f"Downloading and processing specific file: {args.key}")
             bag_path = download_bag_file(s3_client, args.bucket, args.key, args.output_dir)
-            
-            # Define CSV output path if requested
-            csv_path = None
-            if args.csv:
-                csv_name = os.path.splitext(os.path.basename(args.key))[0] + '.csv'
-                csv_path = os.path.join(args.output_dir, csv_name)
+            output_bag = os.path.join(args.output_bag, f"processed_{os.path.basename(args.key)}")
             
             # Decode the bag file
-            record_count, game_count, dist, deduped = decode_bag_file(
+            decode_bag_file(
                 bag_path, 
-                max_records=args.max_records,
-                print_sample=args.print_samples
+                output_bag,
+                dedup=global_dedup,
             )
             
-            print(f"Successfully processed {record_count} records from {args.key} ({game_count} games), average {record_count / game_count} records per game")
-            print(f"Result distribution: {dist}")
-            print(f"Deduped {deduped} records, {deduped / record_count * 100:.2f}% of total")
-        # If no key provided, list available files
+            # Upload processed file to S3
+            upload_key = f"processed_{args.key}"
+            upload_bag_file(s3_client, output_bucket, output_bag, upload_key)
+            
+        # If no key provided, process all files with streaming download
         else:
             logging.info(f"Listing .bag files in bucket {args.bucket} with prefix '{args.prefix}'")
             bag_files = list_bag_files(s3_client, args.bucket, args.prefix)
@@ -303,12 +381,62 @@ def main():
                 logging.info(f"No .bag files found in bucket {args.bucket} with prefix '{args.prefix}'")
                 return
             
-            print(f"\nFound {len(bag_files)} .bag files in bucket {args.bucket}:")
-            for i, key in enumerate(bag_files):
-                print(f"{i+1}. {key}")
+            logging.info(f"Found {len(bag_files)} .bag files to process")
             
-            print("\nTo download and decode a specific file, run:")
-            print(f"python {sys.argv[0]} --access-key YOUR_KEY --secret-key YOUR_SECRET --bucket {args.bucket} --key FILE_KEY")
+            # Set up queue for communication between threads
+            file_queue = queue.Queue()
+            
+            # Start download worker thread
+            download_thread = threading.Thread(
+                target=download_worker,
+                args=(s3_client, args.bucket, bag_files, buffer_dir, file_queue),
+                daemon=True
+            )
+            download_thread.start()
+            
+            # Process files as they become available
+            processed_count = 0
+            while True:
+                # Get next downloaded file
+                bag_path = file_queue.get()
+                
+                # None signals completion
+                if bag_path is None:
+                    break
+                
+                try:
+                    # Process the bag file
+                    output_bag = os.path.join(args.output_bag, f"processed_{os.path.basename(bag_path)}")
+                    logging.info(f"Processing {bag_path}")
+                    
+                    decode_bag_file(
+                        bag_path,
+                        output_bag,
+                        dedup=global_dedup
+                    )
+                    
+                    # Upload processed file to S3
+                    original_key = os.path.relpath(bag_path, buffer_dir)
+                    upload_key = f"processed_{original_key}"
+                    upload_bag_file(s3_client, output_bucket, output_bag, upload_key)
+                    
+                    processed_count += 1
+                    logging.info(f"Completed processing {processed_count}/{len(bag_files)}: {os.path.basename(bag_path)}")
+                    
+                except Exception as e:
+                    logging.error(f"Error processing {bag_path}: {e}")
+                
+                finally:
+                    # Delete the processed file to free up buffer space
+                    try:
+                        os.remove(bag_path)
+                        logging.debug(f"Deleted processed file: {bag_path}")
+                    except Exception as e:
+                        logging.warning(f"Failed to delete {bag_path}: {e}")
+            
+            # Wait for download thread to complete
+            download_thread.join()
+            logging.info(f"Completed processing all {processed_count} files")
     
     except Exception as e:
         logging.error(f"Error: {e}")

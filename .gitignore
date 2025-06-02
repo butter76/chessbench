@@ -32,3 +32,4 @@ testing/
 target/
 temp_data/
 processed_data/
+downloaded_data/

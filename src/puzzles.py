@@ -108,6 +108,13 @@ _NETWORK = flags.DEFINE_enum(
     help='The network to use for Lc0Engine.',
 )
 
+_CHECKPOINT = flags.DEFINE_string(
+    name='checkpoint',
+    default=None,
+    help='The checkpoint to use for MyTransformerEngine.',
+)
+
+
 _NUM_PROCESSES = flags.DEFINE_integer(
     name='num_processes',
     default=8,
@@ -123,7 +130,7 @@ _NAME = flags.DEFINE_string(
 # Global variable to store the engine in each worker process
 worker_engine = None
 
-def init_worker(strategy, network, depth, num_nodes, checkpoint_path=None):
+def init_worker(strategy, network, depth, num_nodes, checkpoint_path):
     """Initialize worker process with an engine instance."""
     global worker_engine
     if network is not None:
@@ -134,8 +141,6 @@ def init_worker(strategy, network, depth, num_nodes, checkpoint_path=None):
             # NODE MCTS
             worker_engine = Lc0Engine(chess.engine.Limit(nodes=num_nodes), network=network)
     else:
-        if checkpoint_path is None:
-            checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt'
         worker_engine = MyTransformerEngine(
             checkpoint_path,
             chess.engine.Limit(nodes=1),
@@ -143,7 +148,6 @@ def init_worker(strategy, network, depth, num_nodes, checkpoint_path=None):
             search_depth=depth,
             num_nodes=num_nodes,
         )
-
 def evaluate_puzzle_from_pandas_row(
     puzzle: pd.Series,
     engine: engine_lib.Engine,
@@ -337,7 +341,7 @@ def main(argv: Sequence[str]) -> None:
     name = _NAME.value if _NAME.value is not None else strategy
     
     MY_ENGINE = (network is None)
-    checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt' if MY_ENGINE else None
+    checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt' if _CHECKPOINT.value is None else _CHECKPOINT.value
 
     print(f"Using {num_processes} processes for evaluation")
 

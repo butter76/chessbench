@@ -127,24 +127,28 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, legal_actions, avs, hl, value_prob, policy, weights = next(train_iter)
+            x, legal_actions, policy, soft_policy, hard_policy, hl, wdl, value_prob, draw_prob, plies_left = next(train_iter)
                 
             x = x.to(torch.long).to(device)
             legal_actions = legal_actions.to(torch.float32).to(device)
-            avs = avs.to(torch.float32).to(device)
-            hl = hl.to(torch.float32).to(device)
-            value_prob = value_prob.to(torch.float32).to(device)
             policy = policy.to(torch.float32).to(device)
-            weights = weights.to(torch.float32).to(device)
+            soft_policy = soft_policy.to(torch.float32).to(device)
+            hard_policy = hard_policy.to(torch.float32).to(device)
+            hl = hl.to(torch.float32).to(device)
+            wdl = wdl.to(torch.long).to(device)
+            value_prob = value_prob.to(torch.float32).to(device)
+            draw_prob = draw_prob.to(torch.float32).to(device)
 
             target = {
                 'self': x,
                 'legal': legal_actions,
-                'avs': avs,
                 'hl': hl,
                 'value': value_prob,
                 'policy': policy,
-                'weights': weights,
+                'soft_policy': soft_policy,
+                'hard_policy': hard_policy,
+                'wdl': wdl,
+                'draw': draw_prob,
             }
             
             with autocast(device, dtype=torch.bfloat16):
@@ -153,7 +157,7 @@ def train(
                 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2', 'avs_accuracy', 'avs2_accuracy', 'policy_accuracy']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'draw']))
 
             
             # Backward pass
@@ -195,24 +199,28 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, legal_actions, avs, hl, value_prob, policy, weights = next(val_iter)
-                
+                x, legal_actions, policy, soft_policy, hard_policy, hl, wdl, value_prob, draw_prob, plies_left = next(val_iter)
+                    
                 x = x.to(torch.long).to(device)
                 legal_actions = legal_actions.to(torch.float32).to(device)
-                avs = avs.to(torch.float32).to(device)
-                hl = hl.to(torch.float32).to(device)
-                value_prob = value_prob.to(torch.float32).to(device)
                 policy = policy.to(torch.float32).to(device)
-                weights = weights.to(torch.float32).to(device)
+                soft_policy = soft_policy.to(torch.float32).to(device)
+                hard_policy = hard_policy.to(torch.float32).to(device)
+                hl = hl.to(torch.float32).to(device)
+                wdl = wdl.to(torch.long).to(device)
+                value_prob = value_prob.to(torch.float32).to(device)
+                draw_prob = draw_prob.to(torch.float32).to(device)
 
                 target = {
                     'self': x,
                     'legal': legal_actions,
-                    'avs': avs,
                     'hl': hl,
                     'value': value_prob,
                     'policy': policy,
-                    'weights': weights,
+                    'soft_policy': soft_policy,
+                    'hard_policy': hard_policy,
+                    'wdl': wdl,
+                    'draw': draw_prob,
                 }
                 
                 with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
@@ -220,7 +228,7 @@ def train(
 
                 # Compute loss
                 losses = model.losses(value, target)
-                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'avs', 'avs2', 'avs_accuracy', 'avs2_accuracy', 'policy_accuracy']))
+                loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'draw']))
                 # Update totals
                 val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
                 val_loss += loss.item()
@@ -280,7 +288,7 @@ def main():
     """Main training function."""
     # Set constants
     num_return_buckets = 128
-    policy = 'action_values'
+    policy = 'lc0_data'
     
     # Create model config
     model_config = TransformerConfig(
@@ -302,7 +310,7 @@ def main():
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='train',
-            dataset_path='../data/output/new@24.bag',
+            dataset_path='../processed_data/processed_lc0_data_20230806*|processed_lc0_data_20230807*|processed_lc0_data_20230808*|processed_lc0_data_20230809*|processed_lc0_data_202308010*|processed_lc0_data_202308011*|processed_lc0_data_20230812*|processed_lc0_data_20230813*|processed_lc0_data_20230814*|processed_lc0_data_20230815*|processed_lc0_data_20230816*|processed_lc0_data_20230817*|processed_lc0_data_20230818*|processed_lc0_data_20230819*|processed_lc0_data_20230820*|processed_lc0_data_20230821*.bag',
         ),
         eval_data=config_lib.DataConfig(
             batch_size=2048,
@@ -311,7 +319,7 @@ def main():
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='test',
-            dataset_path='../data/output/validation.bag',
+            dataset_path='../processed_data/processed_lc0_data_20230701_1117.bag',
             num_records=1_000_000
         ),
         compile=True,
@@ -320,7 +328,7 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p1-standard-take2/',
+        save_checkpoint_path='../checkpoints/p2-first-try/',
     )
     
     # Train model
@@ -334,7 +342,7 @@ def main():
         '../data/puzzles.csv',
     )
     puzzles = pd.read_csv(puzzles_path, nrows=10000)
-    for strategy in [MoveSelectionStrategy.VALUE, MoveSelectionStrategy.AVS, MoveSelectionStrategy.AVS2, MoveSelectionStrategy.POLICY, MoveSelectionStrategy.OPT_POLICY_SPLIT]:
+    for strategy in [MoveSelectionStrategy.VALUE, MoveSelectionStrategy.POLICY]:
         engine = MyTransformerEngine(
             f'{train_config.save_checkpoint_path}checkpoint_{train_config.num_steps}.pt',
             chess.engine.Limit(nodes=1),

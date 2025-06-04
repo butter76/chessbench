@@ -21,6 +21,7 @@ serialised protocol buffers. It supports fast index based look-up.
 
 import bisect
 from collections.abc import Sequence
+import glob
 import itertools
 import mmap
 import os
@@ -155,6 +156,67 @@ class BagShardReader(Sequence[bytes]):
     return self._bags[seqn][index]
 
 
+class BagGlobShardReader(Sequence[bytes]):
+  """Reader for glob-pattern sharded Bagz files."""
+
+  def __init__(
+      self,
+      pattern: str,
+      *,
+      separate_limits: bool = False,
+      decompress: bool | None = None,
+  ) -> None:
+    """Creates a BagGlobShardReader.
+
+    Args:
+      pattern: The glob pattern for sharded Bagz files in format 
+        'path/prefix*|prefix2*|prefix3*.bag' where multiple patterns are 
+        separated by '|'.
+      separate_limits: Whether the limits are stored in a separate file.
+      decompress: Whether to decompress the records. If None, uses the file
+        extension to determine whether to decompress.
+    """
+    # Parse the pattern to extract individual patterns
+    patterns = pattern.split('|')
+    all_files = []
+    
+    prefix = '/'.join(patterns[0].split('/')[:-1])
+    for p in patterns:
+      pp = prefix + '/' + p.split('/')[-1]
+      # Find all files matching this pattern
+      matching_files = glob.glob(pp)
+      all_files.extend(matching_files)
+    
+    # Remove duplicates and sort for consistent ordering
+    all_files = sorted(set(all_files))
+    
+    if not all_files:
+      raise ValueError(f"No files found matching pattern: {pattern}")
+    
+    self._bags = tuple(
+        BagFileReader(
+            filename=filepath,
+            separate_limits=separate_limits,
+            decompress=decompress,
+        )
+        for filepath in all_files
+    )
+    self._accum = tuple(itertools.accumulate(map(len, self._bags)))
+
+  def __len__(self) -> int:
+    """Returns the number of records in the Bagz file."""
+    return self._accum[-1] if self._accum else 0
+
+  def __getitem__(self, index: int) -> bytes:
+    if not self._accum:
+      raise IndexError('No files loaded')
+    if index < 0:
+      index += self._accum[-1]
+    if seqn := bisect.bisect_left(self._accum, index + 1):
+      index -= self._accum[seqn - 1]
+    return self._bags[seqn][index]
+
+
 class BagReader(Sequence[bytes]):
   """Reader for Bagz files."""
 
@@ -169,27 +231,39 @@ class BagReader(Sequence[bytes]):
 
     Args:
       filename: The name of the Bagz file to read. Supports the @N shard syntax
-        (where @0 corresponds to the single file case). If the shard syntax does
-        not parse, then `filename` is treated as a single file.
+        (where @0 corresponds to the single file case), or the glob pattern 
+        syntax 'path/prefix*|prefix2*|prefix3*.bag' for multiple patterns.
+        If neither syntax is detected, then `filename` is treated as a single file.
       separate_limits: Whether the limits are stored in a separate file.
       decompress: Whether to decompress the records. If None, uses the file
         extension to determine whether to decompress.
     """
-    if matches := re.findall(r'@(\d+)', filename):
+    if '|' in filename or '*' in filename:
+      reader_class = BagGlobShardReader
+      self._reader = reader_class(
+          pattern=filename,
+          separate_limits=separate_limits,
+          decompress=decompress,
+      )
+    elif matches := re.findall(r'@(\d+)', filename):
       assert len(matches) == 1
-      if int(matches[0]) != '0':
+      if int(matches[0]) != 0:
         reader_class = BagShardReader
       else:
-        filename = filename.replace(matches[0], '')
+        filename = filename.replace('@0', '')
         reader_class = BagFileReader
+      self._reader = reader_class(
+          filename=filename,
+          separate_limits=separate_limits,
+          decompress=decompress,
+      )
     else:
       reader_class = BagFileReader
-
-    self._reader = reader_class(
-        filename=filename,
-        separate_limits=separate_limits,
-        decompress=decompress,
-    )
+      self._reader = reader_class(
+          filename=filename,
+          separate_limits=separate_limits,
+          decompress=decompress,
+      )
 
   def __len__(self) -> int:
     """Returns the number of records in the Bagz file."""

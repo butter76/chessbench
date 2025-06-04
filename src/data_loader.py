@@ -164,12 +164,55 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     policy = policy / policy.sum()
 
     return state, legal_actions, actions, probs, np.array([value_prob]), policy, weights
+  
+
+class ConvertLeelaDataToSequence(ConvertToSequence):
+  """Converts the fen, move, and win probability into a sequence of integers."""
+  def map(
+    self, element: bytes
+  ):
+    fen, leela_policy, result, root_q, root_d, played_q, played_d, plies_left, _move = constants.CODERS['lc0_data'].decode(element)
+    state = _process_fen(fen)
+    Q = (root_q + 1) / 2
+    D = root_d
+
+    legal_actions = np.zeros((S, S))
+    policy = np.zeros((S, S))
+    soft_policy = np.zeros((S, S))
+    hard_policy = np.zeros((S, S))
+    flip = fen.split(' ')[1] == 'b'
+
+    # First pass to get raw policy values
+    for move, p in leela_policy:
+        s1, s2 = utils.move_to_indices(chess.Move.from_uci(move), flip)
+        policy[s1, s2] = p
+        legal_actions[s1, s2] = 1
+
+    # Compute temperature-adjusted policies
+    # Flatten for numerical stability
+    flat_policy = policy.reshape(-1)
+    
+    # Hard policy (temp=0.25)
+    logits = np.log(flat_policy + 1e-20) / 0.25
+    exp_logits = np.exp(logits - np.max(logits))
+    hard_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
+
+    # Soft policy (temp=4)
+    logits = np.log(flat_policy + 1e-20) / 4.0
+    exp_logits = np.exp(logits - np.max(logits))
+    soft_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
+
+    wdl = np.array([int(-result + 1)])
+    probs = _process_prob(Q)
+
+    return state, legal_actions, policy, soft_policy, hard_policy, probs, wdl, np.array([Q]), np.array([D]), np.array([plies_left])
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,
     'action_value': ConvertActionValueDataToSequence,
     'action_values': ConvertActionValuesDataToSequence,
     'state_value': ConvertStateValueDataToSequence,
+    'lc0_data': ConvertLeelaDataToSequence,
 }
 
 # Follows the base_constants.DataLoaderBuilder protocol.

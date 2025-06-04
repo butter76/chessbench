@@ -17,6 +17,7 @@ import csv
 import threading
 import queue
 import time
+from cachetools import LRUCache
 
 # Import custom modules
 from searchless_chess.src.bagz import BagReader, BagWriter
@@ -217,12 +218,14 @@ def upload_bag_file(s3_client, bucket_name, local_path, object_key):
         raise
 
 
-def decode_bag_file(bag_path, output_bag, dedup, print_sample=False):
+def decode_bag_file(bag_path, output_bag, dedup_cache, print_sample=False):
     """
     Decode a .bag file containing LC0 data records
     
     Args:
         bag_path: Path to the .bag file
+        output_bag: Path to output processed bag file
+        dedup_cache: LRU cache for deduplication
         print_sample: Whether to print sample records
         
     Returns:
@@ -266,9 +269,11 @@ def decode_bag_file(bag_path, output_bag, dedup, print_sample=False):
                             prev_records = []
                     
                     b = record.fen.split(' ')[0]
-                    if b not in dedup:
+                    # Use LRU cache for deduplication - check if position is in cache
+                    if b not in dedup_cache:
                         deduped += 1
-                        dedup.add(b)
+                        # Add to cache with a dummy value (we only care about presence)
+                        dedup_cache[b] = True
                         prev_records.append(record)
                     
                     processed += 1
@@ -324,6 +329,9 @@ def parse_args():
     parser.add_argument('--output-bag', default='processed_data', help='Directory for processed bag files')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     
+    # Deduplication options
+    parser.add_argument('--cache-size', type=int, default=20_000_000, help='LRU cache size for deduplication (default: 1,000,000)')
+    
     return parser.parse_args()
 
 
@@ -349,8 +357,9 @@ def main():
         buffer_dir = os.path.join(args.output_dir, 'buffer')
         os.makedirs(buffer_dir, exist_ok=True)
         
-        # Global dedup set shared across all processing
-        global_dedup = set()
+        # Create LRU cache for deduplication with fixed size
+        dedup_cache = LRUCache(maxsize=args.cache_size)
+        logging.info(f"Initialized LRU cache with size {args.cache_size:,} for deduplication")
         
         # Set output bucket (default to same as input bucket)
         output_bucket = args.output_bucket if args.output_bucket else args.bucket
@@ -365,7 +374,7 @@ def main():
             decode_bag_file(
                 bag_path, 
                 output_bag,
-                dedup=global_dedup,
+                dedup_cache=dedup_cache,
             )
             
             # Upload processed file to S3
@@ -412,7 +421,7 @@ def main():
                     decode_bag_file(
                         bag_path,
                         output_bag,
-                        dedup=global_dedup
+                        dedup_cache=dedup_cache
                     )
                     
                     # Upload processed file to S3
@@ -422,6 +431,10 @@ def main():
                     
                     processed_count += 1
                     logging.info(f"Completed processing {processed_count}/{len(bag_files)}: {os.path.basename(bag_path)}")
+                    
+                    # Log cache statistics periodically
+                    if processed_count % 10 == 0:
+                        logging.info(f"Cache stats - Size: {len(dedup_cache):,}/{dedup_cache.maxsize:,}")
                     
                 except Exception as e:
                     logging.error(f"Error processing {bag_path}: {e}")
@@ -437,6 +450,7 @@ def main():
             # Wait for download thread to complete
             download_thread.join()
             logging.info(f"Completed processing all {processed_count} files")
+            logging.info(f"Final cache stats - Size: {len(dedup_cache):,}/{dedup_cache.maxsize:,}")
     
     except Exception as e:
         logging.error(f"Error: {e}")

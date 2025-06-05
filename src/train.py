@@ -310,7 +310,7 @@ def main():
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='train',
-            dataset_path='../processed_data/processed_lc0_data_20230806*|processed_lc0_data_20230807*|processed_lc0_data_20230808*|processed_lc0_data_20230809*|processed_lc0_data_202308010*|processed_lc0_data_202308011*|processed_lc0_data_20230812*|processed_lc0_data_20230813*|processed_lc0_data_20230814*|processed_lc0_data_20230815*|processed_lc0_data_20230816*|processed_lc0_data_20230817*|processed_lc0_data_20230818*|processed_lc0_data_20230819*|processed_lc0_data_20230820*|processed_lc0_data_20230821*.bag',
+            dataset_path='../processed_data/processed_lc0_data_202308*.bag',
         ),
         eval_data=config_lib.DataConfig(
             batch_size=2048,
@@ -328,7 +328,7 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p2-first-try/',
+        save_checkpoint_path='../checkpoints/p2-soft-policy/',
     )
     
     # Train model

@@ -351,8 +351,8 @@ class ChessTransformer(nn.Module):
         batch_size = output['policy'].shape[0]
         # Clone policy logits to avoid modifying the original
         masked_policy = output['policy'].clone()
-        masked_soft_policy = output['soft_policy'].clone() / 4
-        masked_hard_policy = output['hard_policy'].clone() * 4
+        masked_soft_policy = output['soft_policy'].clone()
+        masked_hard_policy = output['hard_policy'].clone()
         # Apply masking - set illegal moves to large negative value
         masked_policy[~legal_moves] = -1e9  
         masked_soft_policy[~legal_moves] = -1e9
@@ -379,6 +379,6 @@ class ChessTransformer(nn.Module):
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             'policy': policy_loss * 0.1,
-            # 'soft_policy': soft_policy_loss * 0.8,
+            'soft_policy': soft_policy_loss * 0.8,
             'hard_policy': hard_policy_loss * 0.025,
         }

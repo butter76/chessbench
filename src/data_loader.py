@@ -176,10 +176,10 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     Q = (root_q + 1) / 2
     D = root_d
 
-    legal_actions = np.zeros((S, S))
-    policy = np.zeros((S, S))
-    soft_policy = np.zeros((S, S))
-    hard_policy = np.zeros((S, S))
+    legal_actions = np.zeros((S, S), dtype=np.float32)
+    policy = np.zeros((S, S), dtype=np.float32)
+    soft_policy = np.zeros((S, S), dtype=np.float32)
+    hard_policy = np.zeros((S, S), dtype=np.float32)
     flip = fen.split(' ')[1] == 'b'
 
     # First pass to get raw policy values
@@ -193,12 +193,14 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     flat_policy = policy.reshape(-1)
     
     # Hard policy (temp=0.25)
-    logits = np.log(flat_policy + 1e-20) / 0.25
+    # Add small epsilon to avoid log(0)
+    eps = 1e-8
+    logits = np.where(flat_policy > 0, np.log(flat_policy + eps), -np.inf) / 0.25
     exp_logits = np.exp(logits - np.max(logits))
     hard_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
 
     # Soft policy (temp=4)
-    logits = np.log(flat_policy + 1e-20) / 4.0
+    logits = np.where(flat_policy > 0, np.log(flat_policy + eps), -np.inf) / 4
     exp_logits = np.exp(logits - np.max(logits))
     soft_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
 

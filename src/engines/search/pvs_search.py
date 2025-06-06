@@ -273,7 +273,7 @@ class PVSSearch(SearchAlgorithm):
             
             # Get policy for move ordering
             from searchless_chess.src.engines.utils.nnutils import get_policy
-            policies = output['policy'].float().cpu().numpy()
+            policies = output['hardest_policy'].float().cpu().numpy()
             policy, _, perplexity = get_policy(board, policies[0])
         else:
             # Default values for when inference_func is not available

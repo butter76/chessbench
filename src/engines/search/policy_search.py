@@ -21,7 +21,7 @@ class PolicySearch(SearchAlgorithm):
         
         # Get policy predictions from the model
         output = inference_func(board)
-        policy = output["policy"][0, :, :].clone()
+        policy = output[self.policy_type][0, :, :].clone()
         
         move_values = []
         moves = list(board.legal_moves)

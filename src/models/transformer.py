@@ -291,7 +291,7 @@ class ChessTransformer(nn.Module):
             nn.Linear(self.final_num_heads, 
                     self.final_num_heads),
             nn.GELU(),
-            nn.Linear(self.final_num_heads, 4),
+            nn.Linear(self.final_num_heads, 5),
         )
         
         
@@ -338,6 +338,7 @@ class ChessTransformer(nn.Module):
             'policy': attn_scores[:, :, :, 1],
             'soft_policy': attn_scores[:, :, :, 2],
             'hard_policy': attn_scores[:, :, :, 3],
+            'hardest_policy': attn_scores[:, :, :, 4],
             ## TODO: Add draw probability + plies left
         }
     
@@ -353,24 +354,27 @@ class ChessTransformer(nn.Module):
         masked_policy = output['policy'].clone()
         masked_soft_policy = output['soft_policy'].clone()
         masked_hard_policy = output['hard_policy'].clone()
+        masked_hardest_policy = output['hardest_policy'].clone()
         # Apply masking - set illegal moves to large negative value
         masked_policy[~legal_moves] = -1e9  
         masked_soft_policy[~legal_moves] = -1e9
         masked_hard_policy[~legal_moves] = -1e9
+        masked_hardest_policy[~legal_moves] = -1e9
 
         # Reshape for softmax over all possible moves
         masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, S*S]
         masked_soft_policy_flat = masked_soft_policy.view(batch_size, -1)  # [batch_size, S*S]
         masked_hard_policy_flat = masked_hard_policy.view(batch_size, -1)  # [batch_size, S*S]
+        masked_hardest_policy_flat = masked_hardest_policy.view(batch_size, -1)  # [batch_size, S*S]
         target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, S*S]
         target_soft_policy_flat = target['soft_policy'].view(batch_size, -1)  # [batch_size, S*S]
         target_hard_policy_flat = target['hard_policy'].view(batch_size, -1)  # [batch_size, S*S]
-
+        target_hardest_policy_flat = target['hardest_policy'].view(batch_size, -1)  # [batch_size, S*S]
         # Compute cross entropy loss
         policy_loss = -torch.sum(target_policy_flat * F.log_softmax(masked_policy_flat, dim=-1), dim=-1).mean()
         soft_policy_loss = -torch.sum(target_soft_policy_flat * F.log_softmax(masked_soft_policy_flat, dim=-1), dim=-1).mean()
         hard_policy_loss = -torch.sum(target_hard_policy_flat * F.log_softmax(masked_hard_policy_flat, dim=-1), dim=-1).mean()
-
+        hardest_policy_loss = -torch.sum(target_hardest_policy_flat * F.log_softmax(masked_hardest_policy_flat, dim=-1), dim=-1).mean()
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
@@ -380,5 +384,6 @@ class ChessTransformer(nn.Module):
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
             'policy': policy_loss * 0.1,
             'soft_policy': soft_policy_loss * 0.8,
-            'hard_policy': hard_policy_loss * 0.025,
+            'hard_policy': hard_policy_loss * 0.075,
+            'hardest_policy': hardest_policy_loss * 0.025,
         }

@@ -180,6 +180,7 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     policy = np.zeros((S, S), dtype=np.float32)
     soft_policy = np.zeros((S, S), dtype=np.float32)
     hard_policy = np.zeros((S, S), dtype=np.float32)
+    hardest_policy = np.zeros((S, S), dtype=np.float32)
     flip = fen.split(' ')[1] == 'b'
 
     # First pass to get raw policy values
@@ -204,10 +205,15 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     exp_logits = np.exp(logits - np.max(logits))
     soft_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
 
+    # Hardest policy (temp=0.1)
+    logits = np.where(flat_policy > 0, np.log(flat_policy + eps), -np.inf) / 0.1
+    exp_logits = np.exp(logits - np.max(logits))
+    hardest_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
+
     wdl = np.array([int(-result + 1)])
     probs = _process_prob(Q)
 
-    return state, legal_actions, policy, soft_policy, hard_policy, probs, wdl, np.array([Q]), np.array([D]), np.array([plies_left])
+    return state, legal_actions, policy, soft_policy, hard_policy, hardest_policy, probs, wdl, np.array([Q]), np.array([D]), np.array([plies_left])
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

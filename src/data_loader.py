@@ -176,18 +176,22 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     Q = (root_q + 1) / 2
     D = root_d
 
-    legal_actions = np.zeros((S, S), dtype=np.float32)
-    policy = np.zeros((S, S), dtype=np.float32)
-    soft_policy = np.zeros((S, S), dtype=np.float32)
-    hard_policy = np.zeros((S, S), dtype=np.float32)
-    hardest_policy = np.zeros((S, S), dtype=np.float32)
+    legal_actions = np.zeros((S, S))
+    policy = np.zeros((S, S))
+    soft_policy = np.zeros((S, S))
+    hard_policy = np.zeros((S, S))
+    hardest_policy = np.zeros((S, S))
     flip = fen.split(' ')[1] == 'b'
 
+
+    max_p = max(p for _, p in leela_policy)
     # First pass to get raw policy values
     for move, p in leela_policy:
         s1, s2 = utils.move_to_indices(chess.Move.from_uci(move), flip)
         policy[s1, s2] = p
         legal_actions[s1, s2] = 1
+        if p >= max_p * 0.98:
+            hardest_policy[s1, s2] = 1
 
     # Compute temperature-adjusted policies
     # Flatten for numerical stability
@@ -205,10 +209,7 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     exp_logits = np.exp(logits - np.max(logits))
     soft_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
 
-    # Hardest policy (temp=0.1)
-    logits = np.where(flat_policy > 0, np.log(flat_policy + eps), -np.inf) / 0.1
-    exp_logits = np.exp(logits - np.max(logits))
-    hardest_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
+    hardest_policy = hardest_policy / hardest_policy.sum()
 
     wdl = np.array([int(-result + 1)])
     probs = _process_prob(Q)

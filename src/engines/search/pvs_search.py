@@ -105,7 +105,7 @@ class PVSSearch(SearchAlgorithm):
                 return tt_score, None
         
         # Leaf node evaluation
-        if depth <= 0.0 and node.is_leaf():
+        if depth <= -1 * math.log(node.U + 1e-6) and node.is_leaf():
             return node.value, None
         
         # Safety check against excessive recursion
@@ -262,7 +262,7 @@ class PVSSearch(SearchAlgorithm):
         # Check transposition table for cached evaluation
         if tt is not None and position_key in tt and tt[position_key] is not None:
             tt_entry = tt[position_key]
-            return Node(board=board, parent=parent, value=tt_entry.static_value, policy=tt_entry.policy)
+            return Node(board=board, parent=parent, value=tt_entry.static_value, policy=tt_entry.policy, U=tt_entry.U)
         
         self.metrics['num_nodes'] += 1
         
@@ -275,15 +275,26 @@ class PVSSearch(SearchAlgorithm):
             from searchless_chess.src.engines.utils.nnutils import get_policy
             policies = output['hardest_policy'].float().cpu().numpy()
             policy, _, perplexity = get_policy(board, policies[0])
+
+            wdl = output['wdl'].float().cpu().numpy()
+            
+            # Apply softmax to WDL
+            import numpy as np
+            wdl_exp = np.exp(wdl[0] - np.max(wdl[0]))  # Subtract max for numerical stability
+            wdl_softmax = wdl_exp / np.sum(wdl_exp)
+            
+            W, D, L = wdl_softmax[0], wdl_softmax[1], wdl_softmax[2]
+            
+            wdl_variance = (max(1 - D - value ** 2, 0.0) ** 0.5)
         else:
             # Default values for when inference_func is not available
             value = 0.0
             policy = [(move, 1.0/len(list(board.legal_moves))) for move in board.legal_moves]
         
-        new_node = Node(board=board, parent=parent, value=value, policy=policy)
+        new_node = Node(board=board, parent=parent, value=value, policy=policy, U=wdl_variance)
 
         # Store static evaluation in transposition table
         if tt is not None:
-            tt[position_key] = TTEntry(static_value=value, policy=policy)
+            tt[position_key] = TTEntry(static_value=value, policy=policy, U=wdl_variance)
 
         return new_node 

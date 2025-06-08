@@ -16,7 +16,7 @@ class TTEntry:
     - Lower bound score + depth (for nodes that fail high, score >= beta)
     """
     
-    def __init__(self, static_value: float, policy: List[Tuple[chess.Move, float]]):
+    def __init__(self, static_value: float, policy: List[Tuple[chess.Move, float]], U: float = 0.0):
         """
         Initialize a transposition table entry.
         
@@ -26,6 +26,7 @@ class TTEntry:
         """
         self.static_value = static_value
         self.policy = policy
+        self.U = U
         
         # Exact score entries: (score, depth)
         self.exact_score: Optional[Tuple[float, float]] = None
@@ -104,6 +105,7 @@ class Node:
                  parent: Optional['Node'] = None,
                  value: float = 0.0,
                  policy: Optional[List[Tuple[chess.Move, float]]] = None,
+                 U: float = 0.0,
                  terminal: bool = False):
         """
         Initialize a new Node in the search tree.
@@ -125,7 +127,7 @@ class Node:
         else:
             self.policy: List[Tuple[chess.Move, float, Optional['Node']]] = []
         self.terminal = terminal
-
+        self.U = U
         
     def is_root(self) -> bool:
         """Check if this node is the root of the tree (has no parent)."""
@@ -268,7 +270,7 @@ class Node:
 
 class MCTSNode(Node):
     def __init__(self, board: chess.Board, parent: Optional['MCTSNode'] = None, value: float = 0.0, policy: Optional[List[Tuple[chess.Move, float]]] = None, terminal: bool = False):
-        super().__init__(board, parent, value, policy, terminal)
+        super().__init__(board, parent, value, policy, terminal=terminal)
         self.Q = value
         self.N = 1
 

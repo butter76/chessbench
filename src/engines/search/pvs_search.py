@@ -2,17 +2,11 @@ import chess
 import math
 from typing import Optional, Dict
 from collections import defaultdict
-from enum import Enum, auto
 
 from .base import SearchAlgorithm, SearchResult
-from searchless_chess.src.engines.utils.node import Node, TTEntry
+from searchless_chess.src.engines.utils.node import Node, TTEntry, NodeType
 from searchless_chess.src.engines.utils.nnutils import reduced_fen
 
-
-class NodeType(Enum):
-    PV_NODE = auto()
-    CUT_NODE = auto()
-    ALL_NODE = auto()
 
 
 NULL_EPS = 0.0001
@@ -119,12 +113,18 @@ class PVSSearch(SearchAlgorithm):
         best_move_depth = None
         best_move = None
         original_alpha = alpha
-        
+
+        total_pu = 0.0
+        for i, (move, move_weight, child_node) in enumerate(node.policy):
+            total_pu += move_weight * (child_node.U if child_node is not None else node.U)
+            
+
         for i, (move, move_weight, child_node) in enumerate(node.policy):
             assert move_weight > 0.0
 
             # Compute new depth with policy extension
-            new_depth = depth + math.log(move_weight + 1e-6) - 0.1
+            child_u = child_node.U if child_node is not None else node.U
+            new_depth = depth + math.log(move_weight + 1e-6) + math.log(child_u + 1e-6) - math.log(total_pu + 1e-6) - 0.1
 
             if best_move_depth is None:
                 best_move_depth = new_depth

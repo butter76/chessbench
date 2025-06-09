@@ -9,6 +9,7 @@ from .alpha_beta_search import AlphaBetaSearch
 from .pvs_search import PVSSearch
 from .mtdf_search import MTDFSearch
 from .mcts_search import MCTSSearch
+from .mmmcts_search import MMMCTSSearch
 
 __all__ = [
     'SearchAlgorithm',
@@ -21,4 +22,5 @@ __all__ = [
     'PVSSearch',
     'MTDFSearch',
     'MCTSSearch',
+    'MMMCTSSearch',
 ] 

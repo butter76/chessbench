@@ -76,6 +76,7 @@ _STRATEGY = flags.DEFINE_enum(
         'alpha_beta',
         'alpha_beta_node',
         'mcts',
+        'mmmcts',
         'mtdf',
         'pvs',
     ],

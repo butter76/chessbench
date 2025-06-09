@@ -48,7 +48,7 @@ def train(
     checkpoint = None
     compiled = False
     if checkpoint_path is not None and os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
         model_config =  checkpoint['model_config']
         step = checkpoint['step']
 

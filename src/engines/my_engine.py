@@ -21,7 +21,7 @@ from torch.amp.autocast_mode import autocast
 from searchless_chess.src.engines.utils.nnutils import get_policy, reduced_fen
 from searchless_chess.src.engines.search import (
     ValueSearch, PolicySearch, AVSSearch, NegamaxSearch, 
-    AlphaBetaSearch, PVSSearch, MTDFSearch, MCTSSearch
+    AlphaBetaSearch, PVSSearch, MTDFSearch, MCTSSearch, MMMCTSSearch
 )
 
 # Suppress FutureWarning about torch.load weights_only parameter
@@ -70,7 +70,7 @@ class MyTransformerEngine(engine.Engine):
             search_ordering_strategy = MoveSelectionStrategy(search_ordering_strategy)
         self.search_ordering_strategy = search_ordering_strategy
 
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
         model_config =  checkpoint['model_config']
 
         # Create model that matches the checkpoint
@@ -99,6 +99,7 @@ class MyTransformerEngine(engine.Engine):
             MoveSelectionStrategy.PVS: PVSSearch(),
             MoveSelectionStrategy.MTDF: MTDFSearch(),
             MoveSelectionStrategy.MCTS: MCTSSearch(),
+            MoveSelectionStrategy.MMMCTS: MMMCTSSearch(),
         }
 
     def analyse_shallow(self, board: chess.Board) -> engine.AnalysisResult:

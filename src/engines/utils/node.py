@@ -1,9 +1,15 @@
 from collections import defaultdict
 from typing import Optional, List, Tuple, cast
 import chess
+from enum import Enum, auto
 from collections.abc import Sequence
 from searchless_chess.src.engines.utils.nnutils import reduced_fen
+import math
 
+class NodeType(Enum):
+    PV_NODE = auto()
+    CUT_NODE = auto()
+    ALL_NODE = auto()
 
 class TTEntry:
     """
@@ -282,3 +288,43 @@ class MCTSNode(Node):
         self.Q += Q
         self.N += 1
     
+
+class MMMCTSNode(Node):
+    def __init__(self, board: chess.Board, parent: Optional['MMMCTSNode'] = None, value: float = 0.0, policy: Optional[List[Tuple[chess.Move, float]]] = None, U: float = 0.0, terminal: bool = False):
+        super().__init__(board, parent, value, policy, U=U, terminal=terminal)
+        self.Q = value
+        self.depth = 0
+
+    def update(self):
+        Q = -float('inf')
+        for _, _, child in self.policy:
+            if child is not None:
+                child_q = -1 * child.Q
+                Q = max(Q, child_q)
+        self.Q = Q
+
+    def get_Q(self) -> float:
+        """Get the value of this node."""
+        return self.Q
+    
+    def get_N(self) -> float:
+        """Get the depth of this node."""
+        return math.exp(self.depth)
+    
+    def child_N(self) -> float:
+        total = 0
+        for _, _, child in self.policy:
+            if child is not None:
+                total += child.get_N()
+        return total
+
+    def best_child(self) -> Optional[chess.Move]:
+        best_move = None
+        best_depth = -float('inf')
+        for move, _, child in self.policy:
+            if child is not None:
+                child_depth = child.depth
+                if child_depth > best_depth:
+                    best_depth = child_depth
+                    best_move = move
+        return best_move

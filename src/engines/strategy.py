@@ -14,5 +14,6 @@ class MoveSelectionStrategy(str, Enum):
     ALPHA_BETA = "alpha_beta"
     ALPHA_BETA_NODE = "alpha_beta_node"
     MCTS = "mcts"
+    MMMCTS = "mmmcts"
     MTDF = "mtdf"
     PVS = "pvs" 

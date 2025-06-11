@@ -382,8 +382,8 @@ class ChessTransformer(nn.Module):
             'wdl': F.cross_entropy(output['wdl'].view(-1, 3), target['wdl'].view(-1)) * 0.01,
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
-            'policy': policy_loss * 0.1,
-            'soft_policy': soft_policy_loss * 0.8,
-            'hard_policy': hard_policy_loss * 0.075,
-            'hardest_policy': hardest_policy_loss * 0.025,
+            'policy': policy_loss * 0.1 * 1.6,
+            'soft_policy': soft_policy_loss * 0.8 * 1.6,
+            'hard_policy': hard_policy_loss * 0.075 * 1.6,
+            'hardest_policy': hardest_policy_loss * 0.025 * 1.6,
         }

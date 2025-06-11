@@ -332,7 +332,7 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p2-max-policy/',
+        save_checkpoint_path='../checkpoints/p2-max-policy-16x/',
     )
     
     # Train model

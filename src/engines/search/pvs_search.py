@@ -105,8 +105,15 @@ class PVSSearch(SearchAlgorithm):
                 return tt_score, None
         
         # Leaf node evaluation
-        if depth <= -1 * math.log(node.U + 1e-6) and node.is_leaf():
-            return node.value, None
+        if node.is_leaf():
+            total_move_weight = 0
+            count = 0
+            while total_move_weight <= 0.80:
+                total_move_weight += node.policy[count][1]
+                count += 1
+            count = max(count, 2)
+            if depth <= math.log(count) - 2 * math.log(node.U + 1e-6):
+                return node.value, None
         
         # Safety check against excessive recursion
         if rec_depth > 50:
@@ -130,8 +137,8 @@ class PVSSearch(SearchAlgorithm):
                 best_move_depth = new_depth
             
             # Skip low probability moves if depth is too low
-            if new_depth <= 0 and child_node is None:
-                if total_move_weight > 0.85 and i >= 2:
+            if new_depth <= -2 * math.log(node.U + 1e-6) and child_node is None:
+                if total_move_weight > 0.80 and i >= 2:
                     continue
             
             # Create child node if needed

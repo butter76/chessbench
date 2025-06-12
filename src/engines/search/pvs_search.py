@@ -218,7 +218,13 @@ class PVSSearch(SearchAlgorithm):
 
             # Update policy if re-searches occurred
             if child_re_searches > 0:
-                new_policy = node.policy[i][1] * math.exp(child_re_searches * RE_SEARCH_DEPTH)
+                if node_type == NodeType.CUT_NODE:
+                    # This is a CUT node, so have to update the policy quickly
+                    new_policy = node.policy[i][1] * math.exp(child_re_searches * RE_SEARCH_DEPTH)
+                else:
+                    # This is a PV or ALL node, so we can afford to do a slower update
+                    new_policy = min(node.policy[i][1] * math.exp(child_re_searches * RE_SEARCH_DEPTH), node.policy[i][1] + 0.1)
+                
                 node.policy[i] = (move, new_policy, child_node)
                 node.sort_and_normalize()
                 best_move_depth = max(best_move_depth, new_depth)

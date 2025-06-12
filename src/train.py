@@ -21,10 +21,6 @@ from searchless_chess.src.puzzles import evaluate_puzzle_from_pandas_row
 from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
 
-# Suppress FutureWarning about torch.load weights_only parameter
-import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
-
 
 def train(
     train_config: config_lib.TrainConfig,
@@ -48,7 +44,7 @@ def train(
     checkpoint = None
     compiled = False
     if checkpoint_path is not None and os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
         model_config =  checkpoint['model_config']
         step = checkpoint['step']
 

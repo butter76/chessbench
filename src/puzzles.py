@@ -41,10 +41,6 @@ from searchless_chess.src.constants import CODERS
 import searchless_chess.src.utils as utils
 from apache_beam import coders
 
-# Suppress FutureWarning about torch.load weights_only parameter
-import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
-
 class WorkerTimeoutError(Exception):
     """Raised when worker evaluation takes longer than the allowed timeout."""
     pass
@@ -429,11 +425,6 @@ def main(argv: Sequence[str]) -> None:
         for i in range(1000000):
             if len(positions_to_evaluate) >= 10000:
                 break
-                
-            if (i % 100 == 0):
-                explore = True
-            if not explore:
-                continue
 
             element = next(val_iter)
             fen, move, win_prob = lichess_coder.decode(element)

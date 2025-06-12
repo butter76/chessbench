@@ -24,10 +24,6 @@ from searchless_chess.src.engines.search import (
     AlphaBetaSearch, PVSSearch, MTDFSearch, MCTSSearch
 )
 
-# Suppress FutureWarning about torch.load weights_only parameter
-import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
-
 torch.set_default_dtype(torch.float32)
 torch.set_printoptions(profile="full")
 
@@ -70,7 +66,7 @@ class MyTransformerEngine(engine.Engine):
             search_ordering_strategy = MoveSelectionStrategy(search_ordering_strategy)
         self.search_ordering_strategy = search_ordering_strategy
 
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
         model_config =  checkpoint['model_config']
 
         # Create model that matches the checkpoint

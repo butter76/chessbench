@@ -7,6 +7,8 @@ from enum import Enum, auto
 from .base import SearchAlgorithm, SearchResult
 from searchless_chess.src.engines.utils.node import Node, TTEntry
 from searchless_chess.src.engines.utils.nnutils import reduced_fen
+import numpy as np
+import searchless_chess.src.data_loader as data_loader
 
 
 class NodeType(Enum):
@@ -289,16 +291,19 @@ class PVSSearch(SearchAlgorithm):
             policies = output['hardest_policy'].float().cpu().numpy()
             policy, _, perplexity = get_policy(board, policies[0])
 
-            wdl = output['wdl'].float().cpu().numpy()
+
+            hl_logits = output['hl'].float().cpu().numpy()[0]  # Shape: (81,)
+            hl_probs = np.exp(hl_logits - np.max(hl_logits))  # Softmax numerically stable
+            hl_probs = hl_probs / np.sum(hl_probs)
             
-            # Apply softmax to WDL
-            import numpy as np
-            wdl_exp = np.exp(wdl[0] - np.max(wdl[0]))  # Subtract max for numerical stability
-            wdl_softmax = wdl_exp / np.sum(wdl_exp)
+            # Bin centers for 81 evenly spaced intervals in [0, 1]
+            bin_centers = np.array([(2 * i + 1) / (2 * data_loader.NUM_BINS) for i in range(data_loader.NUM_BINS)])
             
-            W, D, L = wdl_softmax[0], wdl_softmax[1], wdl_softmax[2]
+            # Compute variance: E[X^2] - E[X]^2
+            hl_mean = np.sum(hl_probs * bin_centers)
+            hl_variance = np.sum(hl_probs * bin_centers**2) - hl_mean**2
             
-            wdl_variance = (max(1 - D - value ** 2, 0.0) ** 0.5)
+            wdl_variance = math.sqrt(max(0, hl_variance * 4))
         else:
             # Default values for when inference_func is not available
             value = 0.0

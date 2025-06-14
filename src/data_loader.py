@@ -213,8 +213,9 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
 
     wdl = np.array([int(-result + 1)])
     probs = _process_prob(Q)
+    draw_probs = _process_prob(D)
 
-    return state, legal_actions, policy, soft_policy, hard_policy, hardest_policy, probs, wdl, np.array([Q]), np.array([D]), np.array([plies_left])
+    return state, legal_actions, policy, soft_policy, hard_policy, hardest_policy, probs, draw_probs, wdl, np.array([Q]), np.array([D]), np.array([plies_left])
 
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,

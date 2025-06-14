@@ -7,8 +7,8 @@ from enum import Enum, auto
 from .base import SearchAlgorithm, SearchResult
 from searchless_chess.src.engines.utils.node import Node, TTEntry
 from searchless_chess.src.engines.utils.nnutils import reduced_fen
-import numpy as np
 import searchless_chess.src.data_loader as data_loader
+import numpy as np
 
 
 class NodeType(Enum):
@@ -291,12 +291,13 @@ class PVSSearch(SearchAlgorithm):
             policies = output['hardest_policy'].float().cpu().numpy()
             policy, _, perplexity = get_policy(board, policies[0])
 
+            D = output['draw'][0, 0].item()
 
             hl_logits = output['hl'].float().cpu().numpy()[0]  # Shape: (81,)
             hl_probs = np.exp(hl_logits - np.max(hl_logits))  # Softmax numerically stable
             hl_probs = hl_probs / np.sum(hl_probs)
             
-            # Bin centers for 81 evenly spaced intervals in [0, 1]
+            # Bin centers for NUM_BINS evenly spaced intervals in [0, 1]
             bin_centers = np.array([(2 * i + 1) / (2 * data_loader.NUM_BINS) for i in range(data_loader.NUM_BINS)])
             
             # Compute variance: E[X^2] - E[X]^2

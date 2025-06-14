@@ -123,7 +123,7 @@ def train(
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
 
-            x, legal_actions, policy, soft_policy, hard_policy, hardest_policy, hl, wdl, value_prob, draw_prob, plies_left = next(train_iter)
+            x, legal_actions, policy, soft_policy, hard_policy, hardest_policy, hl, dhl, wdl, value_prob, draw_prob, plies_left = next(train_iter)
                 
             x = x.to(torch.long).to(device)
             legal_actions = legal_actions.to(torch.float32).to(device)
@@ -132,6 +132,7 @@ def train(
             hard_policy = hard_policy.to(torch.float32).to(device)
             hardest_policy = hardest_policy.to(torch.float32).to(device)
             hl = hl.to(torch.float32).to(device)
+            dhl = dhl.to(torch.float32).to(device)
             wdl = wdl.to(torch.long).to(device)
             value_prob = value_prob.to(torch.float32).to(device)
             draw_prob = draw_prob.to(torch.float32).to(device)
@@ -145,6 +146,7 @@ def train(
                 'soft_policy': soft_policy,
                 'hard_policy': hard_policy,
                 'hardest_policy': hardest_policy,
+                'dhl': dhl,
                 'wdl': wdl,
                 'draw': draw_prob,
             }
@@ -197,7 +199,7 @@ def train(
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
-                x, legal_actions, policy, soft_policy, hard_policy, hardest_policy, hl, wdl, value_prob, draw_prob, plies_left = next(val_iter)
+                x, legal_actions, policy, soft_policy, hard_policy, hardest_policy, hl, dhl, wdl, value_prob, draw_prob, plies_left = next(val_iter)
                     
                 x = x.to(torch.long).to(device)
                 legal_actions = legal_actions.to(torch.float32).to(device)
@@ -206,6 +208,7 @@ def train(
                 hard_policy = hard_policy.to(torch.float32).to(device)
                 hardest_policy = hardest_policy.to(torch.float32).to(device)
                 hl = hl.to(torch.float32).to(device)
+                dhl = dhl.to(torch.float32).to(device)
                 wdl = wdl.to(torch.long).to(device)
                 value_prob = value_prob.to(torch.float32).to(device)
                 draw_prob = draw_prob.to(torch.float32).to(device)
@@ -219,6 +222,7 @@ def train(
                     'soft_policy': soft_policy,
                     'hard_policy': hard_policy,
                     'hardest_policy': hardest_policy,
+                    'dhl': dhl,
                     'wdl': wdl,
                     'draw': draw_prob,
                 }
@@ -328,7 +332,7 @@ def main():
         num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p2-max-policy-16x/',
+        save_checkpoint_path='../checkpoints/p2-dhl/',
     )
     
     # Train model

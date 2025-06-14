@@ -277,6 +277,12 @@ class ChessTransformer(nn.Module):
             nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
         )
 
+        self.draw_head = nn.Sequential(
+            nn.Linear(config.embedding_dim, config.embedding_dim // 2),
+            nn.GELU(),
+            nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
+        )
+
         self.wdl_head = nn.Linear(config.embedding_dim, 3)
 
         # Complex Projection for action matrix
@@ -326,13 +332,15 @@ class ChessTransformer(nn.Module):
 
         wdl = self.wdl_head(x[:, -1, :])
 
-        draw = F.softmax(wdl, dim=-1)
+        dhl = self.draw_head(x[:, -2, :])
+        draw = torch.sum(F.softmax(dhl, dim=-1) * bin_centers, dim=-1, keepdim=True)
 
         return {
             'self': self.self_head(x),
             'value': value,
-            'draw': draw[:, 1:2],
+            'draw': draw,
             'hl': hl,
+            'dhl': dhl,
             'wdl': wdl,
             'legal': attn_scores[:, :, :, 0],
             'policy': attn_scores[:, :, :, 1],
@@ -381,9 +389,10 @@ class ChessTransformer(nn.Module):
             'draw': F.mse_loss(output['draw'], target['draw']),
             'wdl': F.cross_entropy(output['wdl'].view(-1, 3), target['wdl'].view(-1)) * 0.01,
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
+            'dhl': -0.01 * torch.sum(target['dhl'] * F.log_softmax(output['dhl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
-            'policy': policy_loss * 0.1 * 1.6,
-            'soft_policy': soft_policy_loss * 0.8 * 1.6,
-            'hard_policy': hard_policy_loss * 0.075 * 1.6,
-            'hardest_policy': hardest_policy_loss * 0.025 * 1.6,
+            'policy': policy_loss * 0.1 * 1.5,
+            'soft_policy': soft_policy_loss * 0.8 * 1.5,
+            'hard_policy': hard_policy_loss * 0.075 * 1.5,
+            'hardest_policy': hardest_policy_loss * 0.025 * 1.5,
         }

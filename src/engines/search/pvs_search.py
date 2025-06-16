@@ -180,11 +180,11 @@ class PVSSearch(SearchAlgorithm):
 
                 if i > 0 and score > alpha:
                     # This move improved alpha
-                    child_re_searches += 1
                     
                     if new_depth < best_move_depth:
                         # Re-search with deeper depth
                         new_depth += RE_SEARCH_DEPTH
+                        child_re_searches += 1
                         continue
                     else:
                         if node_type == NodeType.PV_NODE:
@@ -212,20 +212,20 @@ class PVSSearch(SearchAlgorithm):
                                 rec_depth + 1
                             )
                         score = -score
-                elif child_re_searches > 0:
-                    # Drop re-search depth
-                    new_depth -= RE_SEARCH_DEPTH
-                    child_re_searches -= 1
                 break
 
             # Update policy if re-searches occurred
             if child_re_searches > 0:
-                if node_type == NodeType.CUT_NODE:
-                    # This is a CUT node, so have to update the policy quickly
+                if node_type == NodeType.CUT_NODE and score > alpha:
+                    # This is a CUT node and the move is best, so have to update the policy quickly
                     new_policy = node.policy[i][1] * math.exp(child_re_searches * RE_SEARCH_DEPTH)
                 else:
                     # This is a PV or ALL node, so we can afford to do a slower update
-                    new_policy = min(node.policy[i][1] * math.exp(child_re_searches * RE_SEARCH_DEPTH), node.policy[i][1] + 0.1)
+                    new_policy = node.policy[i][1] + 0.1
+                    if not (score > alpha):
+                        # This is not the best move, so clip the policy
+                        clip = max(node.policy[0][1] * 0.98, node.policy[i][1])
+                        new_policy = min(new_policy, clip)
                 
                 node.policy[i] = (move, new_policy, child_node)
                 node.sort_and_normalize()

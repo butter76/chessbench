@@ -105,13 +105,16 @@ class PVSSearch(SearchAlgorithm):
             if tt_score is not None:
                 self.tt_hits += 1
                 return tt_score, None
+
+        # Multiply likelihood with the variance of this node
+        depth_reduction = -2 * math.log(node.U + 1e-6)
         
         # Leaf node evaluation
         if node.is_leaf():
             total_move_weight = 0
             unexpanded_count = 0
             for i, (move, prob, child_node) in enumerate(node.policy):
-                if total_move_weight > 0.80 and i >= 2:
+                if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
                     break
                 total_move_weight += prob
                 if child_node is None:
@@ -120,7 +123,7 @@ class PVSSearch(SearchAlgorithm):
                     if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
                         unexpanded_count += 1
 
-            if depth <= math.log(unexpanded_count + 1e-6) - 2 * math.log(node.U + 1e-6):
+            if depth <= math.log(unexpanded_count + 1e-6) + depth_reduction:
                 return node.value, None
         
         # Safety check against excessive recursion
@@ -145,11 +148,12 @@ class PVSSearch(SearchAlgorithm):
                 best_move_depth = new_depth
             
             # Skip low probability moves if depth is too low
-            if new_depth <= -2 * math.log(node.U + 1e-6) and child_node is None:
-                if total_move_weight > 0.80 and i >= 2:
+            if new_depth <= depth_reduction and child_node is None:
+                if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
                     new_board = board.copy()
                     new_board.push(move)
                     if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
+                        total_move_weight += move_weight
                         continue
             
             # Create child node if needed

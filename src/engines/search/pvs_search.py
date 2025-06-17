@@ -85,7 +85,7 @@ class PVSSearch(SearchAlgorithm):
     
     def _pvs(self, node: Node, depth: float, alpha: float, beta: float, 
              history: Dict[str, int], tt: Dict[str, TTEntry], 
-             node_type: NodeType = NodeType.PV_NODE, rec_depth: int = 0) -> tuple[float, Optional[chess.Move]]:
+             node_type: NodeType = NodeType.PV_NODE, rec_depth: int = 0, soft_create: bool = False) -> tuple[float, Optional[chess.Move]]:
         """
         PVS with policy-based move ordering and depth extension.
         """
@@ -106,16 +106,7 @@ class PVSSearch(SearchAlgorithm):
                 self.tt_hits += 1
                 return tt_score, None
         
-        # Leaf node evaluation
-        if node.is_leaf():
-            total_move_weight = 0
-            count = 0
-            while total_move_weight <= 0.80:
-                total_move_weight += node.policy[count][1]
-                count += 1
-            count = max(count, 2)
-            if depth <= math.log(count) - 2 * math.log(node.U + 1e-6):
-                return node.value, None
+        
         
         # Safety check against excessive recursion
         if rec_depth > 50:
@@ -141,7 +132,10 @@ class PVSSearch(SearchAlgorithm):
             # Skip low probability moves if depth is too low
             if new_depth <= -2 * math.log(node.U + 1e-6) and child_node is None:
                 if total_move_weight > 0.80 and i >= 2:
-                    continue
+                    new_board = board.copy()
+                    new_board.push(move)
+                    if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
+                        continue
             
             # Create child node if needed
             if child_node is None:
@@ -260,7 +254,7 @@ class PVSSearch(SearchAlgorithm):
         
         return max_eval, best_move
     
-    def _create_node(self, board: chess.Board, inference_func=None, parent: Optional[Node] = None, tt: Dict[str, TTEntry] = None) -> Node:
+    def _create_node(self, board: chess.Board, inference_func=None, parent: Optional[Node] = None, tt: Dict[str, TTEntry] = None, soft_create: bool = False) -> Node | None:
         """Create a node with static evaluation and policy."""
         position_key = reduced_fen(board)
         
@@ -278,6 +272,9 @@ class PVSSearch(SearchAlgorithm):
         if tt is not None and position_key in tt and tt[position_key] is not None:
             tt_entry = tt[position_key]
             return Node(board=board, parent=parent, value=tt_entry.static_value, policy=tt_entry.policy, U=tt_entry.U)
+        
+        if soft_create:
+            return None
         
         self.metrics['num_nodes'] += 1
         

@@ -106,7 +106,22 @@ class PVSSearch(SearchAlgorithm):
                 self.tt_hits += 1
                 return tt_score, None
         
-        
+        # Leaf node evaluation
+        if node.is_leaf():
+            total_move_weight = 0
+            unexpanded_count = 0
+            for i, (move, prob, child_node) in enumerate(node.policy):
+                if total_move_weight > 0.80 and i >= 2:
+                    break
+                total_move_weight += prob
+                if child_node is None:
+                    new_board = board.copy()
+                    new_board.push(move)
+                    if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
+                        unexpanded_count += 1
+
+            if depth <= math.log(unexpanded_count + 1e-6) - 2 * math.log(node.U + 1e-6):
+                return node.value, None
         
         # Safety check against excessive recursion
         if rec_depth > 50:

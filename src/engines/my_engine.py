@@ -54,6 +54,7 @@ class MyTransformerEngine(engine.Engine):
             'num_searches': 0,
             'bf': 0,
             'depth': 0,
+            'pv': 0,
         }
         
         # Convert string to enum if needed
@@ -148,6 +149,7 @@ class MyTransformerEngine(engine.Engine):
         self.metrics['num_nodes'] += search_algorithm.metrics.get('num_nodes', 0)
         self.metrics['depth'] += search_algorithm.metrics.get('depth', self.search_depth)
         self.metrics['bf'] += search_algorithm.metrics.get('bf', 0)
+        self.metrics['pv'] += search_algorithm.metrics.get('pv', 0)
         
         return result.move
     
@@ -158,6 +160,7 @@ class MyTransformerEngine(engine.Engine):
             'num_searches': 0,
             'bf': 0,
             'depth': 0,
+            'pv': 0,
         }
     
     def analyse_batch(self, boards):

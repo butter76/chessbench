@@ -35,6 +35,7 @@ class PVSSearch(SearchAlgorithm):
             'bf': 0,
             'depth': 0,
             'parent_nodes': 0,
+            'pv': 0,
         }
     
     def search(self, board: chess.Board, inference_func, batch_inference_func=None, depth=2.0, **kwargs) -> SearchResult:
@@ -79,6 +80,11 @@ class PVSSearch(SearchAlgorithm):
                 best_move = list(board.legal_moves)[0]
 
         self.metrics['bf'] = self.metrics['num_nodes'] / max(1, self.metrics['parent_nodes'])
+
+        pv = root
+        while pv is not None:
+            self.metrics['pv'] += 1
+            pv = pv.policy[0][2]
         
         return SearchResult(
             move=best_move,
@@ -88,7 +94,8 @@ class PVSSearch(SearchAlgorithm):
                 'nodes': self.metrics['num_nodes'],
                 'bf': self.metrics['bf'],
                 'tt_hits': self.tt_hits,
-                'tt_entries': len([entry for entry in tt.values() if entry is not None])
+                'tt_entries': len([entry for entry in tt.values() if entry is not None]),
+                'pv': self.metrics['pv']
             }
         )
     

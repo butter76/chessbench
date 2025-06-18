@@ -381,6 +381,7 @@ def main(argv: Sequence[str]) -> None:
                     'num_searches': 0,
                     'bf': 0,
                     'depth': 0,
+                    'pv': 0,
                 }
                 
                 for result in pbar:
@@ -401,6 +402,7 @@ def main(argv: Sequence[str]) -> None:
                         stats['nodes'] = f'{total_metrics["num_nodes"] / total_metrics["num_searches"]:.2f}'
                         stats['bf'] = f'{total_metrics["bf"] / total_metrics["num_searches"]:.3f}'
                         stats['depth'] = f'{total_metrics["depth"] / total_metrics["num_searches"]:.2f}'
+                        stats['pv'] = f'{total_metrics["pv"] / total_metrics["num_searches"]:.2f}'
                     pbar.set_postfix(stats)
                     
             print(f'{name}: {num_correct / len(puzzles):.2%}')
@@ -444,6 +446,7 @@ def main(argv: Sequence[str]) -> None:
             'num_searches': 0,
             'bf': 0,
             'depth': 0,
+            'pv': 0,
         }
         
         # Use multiprocessing Pool with initializer
@@ -476,7 +479,7 @@ def main(argv: Sequence[str]) -> None:
                     stats['nodes'] = f'{total_metrics["num_nodes"] / total_metrics["num_searches"]:.2f}'
                     stats['bf'] = f'{total_metrics["bf"] / total_metrics["num_searches"]:.3f}'
                     stats['depth'] = f'{total_metrics["depth"] / total_metrics["num_searches"]:.2f}'
-                
+                    stats['pv'] = f'{total_metrics["pv"] / total_metrics["num_searches"]:.2f}'
                 pbar.set_postfix(stats)
 
         print(f"Lichess Top-1 move match rate: {total_top1_match/total_positions:.4f}")

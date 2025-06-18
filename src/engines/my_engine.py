@@ -52,7 +52,7 @@ class MyTransformerEngine(engine.Engine):
         self.metrics = {
             'num_nodes': 0,
             'num_searches': 0,
-            'policy_perplexity': 0,
+            'bf': 0,
             'depth': 0,
         }
         
@@ -147,7 +147,7 @@ class MyTransformerEngine(engine.Engine):
         self.metrics['num_searches'] += 1
         self.metrics['num_nodes'] += search_algorithm.metrics.get('num_nodes', 0)
         self.metrics['depth'] += search_algorithm.metrics.get('depth', self.search_depth)
-        self.metrics['policy_perplexity'] += search_algorithm.metrics.get('policy_perplexity', 0)
+        self.metrics['bf'] += search_algorithm.metrics.get('bf', 0)
         
         return result.move
     
@@ -156,7 +156,7 @@ class MyTransformerEngine(engine.Engine):
         self.metrics = {
             'num_nodes': 0,
             'num_searches': 0,
-            'policy_perplexity': 0,
+            'bf': 0,
             'depth': 0,
         }
     

@@ -26,6 +26,16 @@ class PVSSearch(SearchAlgorithm):
     def __init__(self):
         super().__init__("pvs")
         self.tt_hits = 0  # Track transposition table hits
+
+    def reset_metrics(self):
+        """Reset engine metrics."""
+        self.metrics = {
+            'num_nodes': 0,
+            'num_searches': 0,
+            'bf': 0,
+            'depth': 0,
+            'parent_nodes': 0,
+        }
     
     def search(self, board: chess.Board, inference_func, batch_inference_func=None, depth=2.0, **kwargs) -> SearchResult:
         """
@@ -67,6 +77,8 @@ class PVSSearch(SearchAlgorithm):
                 best_move = root.policy[0][0]
             else:
                 best_move = list(board.legal_moves)[0]
+
+        self.metrics['bf'] = self.metrics['num_nodes'] / max(1, self.metrics['parent_nodes'])
         
         return SearchResult(
             move=best_move,
@@ -74,6 +86,7 @@ class PVSSearch(SearchAlgorithm):
             metadata={
                 'depth': current_depth,
                 'nodes': self.metrics['num_nodes'],
+                'bf': self.metrics['bf'],
                 'tt_hits': self.tt_hits,
                 'tt_entries': len([entry for entry in tt.values() if entry is not None])
             }
@@ -110,25 +123,30 @@ class PVSSearch(SearchAlgorithm):
         depth_reduction = -2 * math.log(node.U + 1e-6)
         
         # Leaf node evaluation
-        if node.is_leaf():
-            total_move_weight = 0
-            unexpanded_count = 0
-            for i, (move, prob, child_node) in enumerate(node.policy):
-                if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
-                    break
-                total_move_weight += prob
-                if child_node is None:
-                    new_board = board.copy()
-                    new_board.push(move)
-                    if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
+        total_move_weight = 0
+        weight_divisor = 1.0
+        unexpanded_count = 0
+        for i, (move, prob, child_node) in enumerate(node.policy):
+            if child_node is None:
+                new_board = board.copy()
+                new_board.push(move)
+                if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
+                    if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
+                        weight_divisor -= prob
+                    else:
                         unexpanded_count += 1
+            
+            total_move_weight += prob
 
-            if depth <= math.log(unexpanded_count + 1e-6) + depth_reduction:
-                return node.value, None
+        if node.is_leaf() and depth <= math.log(unexpanded_count + 1e-6) + depth_reduction:
+            return node.value, None
         
         # Safety check against excessive recursion
         if rec_depth > 50:
             return node.value, None
+
+        if node.is_leaf():
+            self.metrics['parent_nodes'] += 1
         
         max_eval = -float('inf')
         history[position_key] += 1
@@ -142,7 +160,7 @@ class PVSSearch(SearchAlgorithm):
             assert move_weight > 0.0
 
             # Compute new depth with policy extension
-            new_depth = depth + math.log(move_weight + 1e-6) - 0.1
+            new_depth = depth + math.log(move_weight + 1e-6) - math.log(weight_divisor + 1e-6) - 0.1
 
             if best_move_depth is None:
                 best_move_depth = new_depth

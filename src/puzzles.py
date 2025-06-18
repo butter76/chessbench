@@ -379,7 +379,7 @@ def main(argv: Sequence[str]) -> None:
                 total_metrics = {
                     'num_nodes': 0,
                     'num_searches': 0,
-                    'policy_perplexity': 0,
+                    'bf': 0,
                     'depth': 0,
                 }
                 
@@ -399,7 +399,7 @@ def main(argv: Sequence[str]) -> None:
                     }
                     if MY_ENGINE and total_metrics['num_searches'] > 0:
                         stats['nodes'] = f'{total_metrics["num_nodes"] / total_metrics["num_searches"]:.2f}'
-                        stats['perplexity'] = f'{total_metrics["policy_perplexity"] / max(1, total_metrics["num_nodes"]):.2f}'
+                        stats['bf'] = f'{total_metrics["bf"] / total_metrics["num_searches"]:.3f}'
                         stats['depth'] = f'{total_metrics["depth"] / total_metrics["num_searches"]:.2f}'
                     pbar.set_postfix(stats)
                     
@@ -442,7 +442,7 @@ def main(argv: Sequence[str]) -> None:
         total_metrics = {
             'num_nodes': 0,
             'num_searches': 0,
-            'policy_perplexity': 0,
+            'bf': 0,
             'depth': 0,
         }
         
@@ -474,7 +474,7 @@ def main(argv: Sequence[str]) -> None:
                 }
                 if MY_ENGINE and total_metrics['num_searches'] > 0:
                     stats['nodes'] = f'{total_metrics["num_nodes"] / total_metrics["num_searches"]:.2f}'
-                    stats['perplexity'] = f'{total_metrics["policy_perplexity"] / max(1, total_metrics["num_nodes"]):.2f}'
+                    stats['bf'] = f'{total_metrics["bf"] / total_metrics["num_searches"]:.3f}'
                     stats['depth'] = f'{total_metrics["depth"] / total_metrics["num_searches"]:.2f}'
                 
                 pbar.set_postfix(stats)

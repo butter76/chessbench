@@ -219,9 +219,9 @@ class PVSSearch(SearchAlgorithm):
                 if i > 0 and score > alpha:
                     # This move improved alpha
                     
-                    if new_depth < best_move_depth:
+                    if new_depth < best_move_depth + RE_SEARCH_DEPTH:
                         # Re-search with deeper depth
-                        new_depth += RE_SEARCH_DEPTH
+                        new_depth = min(new_depth + RE_SEARCH_DEPTH, best_move_depth + RE_SEARCH_DEPTH)
                         child_re_searches += 1
                         continue
                     else:

@@ -82,7 +82,8 @@ class PVSSearch(SearchAlgorithm):
         self.metrics['bf'] = self.metrics['num_nodes'] / max(1, self.metrics['parent_nodes'])
 
         pv = root
-        while pv is not None:
+        self.metrics['pv'] += 1
+        while not pv.is_terminal() and not pv.is_leaf():
             self.metrics['pv'] += 1
             pv = pv.policy[0][2]
         

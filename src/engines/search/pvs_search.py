@@ -136,13 +136,10 @@ class PVSSearch(SearchAlgorithm):
         unexpanded_count = 0
         for i, (move, prob, child_node) in enumerate(node.policy):
             if child_node is None:
-                new_board = board.copy()
-                new_board.push(move)
-                if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
-                    if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
-                        weight_divisor -= prob
-                    else:
-                        unexpanded_count += 1
+                if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
+                    weight_divisor -= prob
+                else:
+                    unexpanded_count += 1
             
             total_move_weight += prob
 
@@ -176,11 +173,8 @@ class PVSSearch(SearchAlgorithm):
             # Skip low probability moves if depth is too low
             if new_depth <= depth_reduction and child_node is None:
                 if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
-                    new_board = board.copy()
-                    new_board.push(move)
-                    if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
-                        total_move_weight += move_weight
-                        continue
+                    total_move_weight += move_weight
+                    continue
             
             # Create child node if needed
             if child_node is None:

@@ -3,7 +3,8 @@ from typing import Optional, List, Tuple, cast
 import chess
 from collections.abc import Sequence
 from searchless_chess.src.engines.utils.nnutils import reduced_fen
-
+import uuid
+import math
 
 class TTEntry:
     """
@@ -36,6 +37,24 @@ class TTEntry:
         
         # Lower bound entries: (score, depth) - score >= beta (fail high)
         self.lower_bound: Optional[Tuple[float, float]] = None
+
+        self.search_id = None
+        self.attached_nodes = {}
+
+    def attach_node(self, search_id: str, node_id: str, depth: float) -> float:
+        resolved_depth = depth
+        if self.search_id != search_id:
+            self.attached_nodes[node_id] = max(self.attached_nodes.get(node_id, -20), depth)
+            resolved_depth = math.log(sum([math.exp(depth) for depth in self.attached_nodes.values()]))
+
+            self.search_id = search_id
+            self.attached_nodes = {}
+
+        self.attached_nodes[node_id] = max(self.attached_nodes.get(node_id, -20), depth)
+
+        return resolved_depth
+
+    
     
     def store_exact(self, score: float, depth: float) -> None:
         """Store an exact score (PV node result)."""
@@ -51,7 +70,7 @@ class TTEntry:
         """Store a lower bound (fail high result)."""
         if self.lower_bound is None or depth >= self.lower_bound[1]:
             self.lower_bound = (score, depth)
-    
+
     def query(self, alpha: float, beta: float, depth: float) -> Optional[float]:
         """
         Query the transposition table entry for a usable score.
@@ -128,6 +147,8 @@ class Node:
             self.policy: List[Tuple[chess.Move, float, Optional['Node']]] = []
         self.terminal = terminal
         self.U = U
+
+        self.id = str(uuid.uuid4())
         
     def is_root(self) -> bool:
         """Check if this node is the root of the tree (has no parent)."""

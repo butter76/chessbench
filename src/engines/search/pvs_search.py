@@ -9,7 +9,7 @@ from searchless_chess.src.engines.utils.node import Node, TTEntry
 from searchless_chess.src.engines.utils.nnutils import reduced_fen
 import searchless_chess.src.data_loader as data_loader
 import numpy as np
-
+import uuid
 
 class NodeType(Enum):
     PV_NODE = auto()
@@ -49,9 +49,9 @@ class PVSSearch(SearchAlgorithm):
         self.tt_hits = 0  # Reset TT hit counter
         
         # Create root node
-        root = self._create_node(board, inference_func)
-        history = defaultdict(int)
         tt = defaultdict(lambda: None)
+        root = self._create_node(board, inference_func, tt=tt)
+        history = defaultdict(int)
         
         start_depth = 2.0
         node_count = self.metrics['num_nodes']
@@ -102,14 +102,16 @@ class PVSSearch(SearchAlgorithm):
     
     def _pvs_root(self, root: Node, depth: float, history: Dict[str, int], tt: Dict[str, TTEntry], f=None) -> tuple[float, Optional[chess.Move]]:
         """Root level PVS call."""
-        return self._pvs(root, depth, -1.0, 1.0, history, tt, NodeType.PV_NODE, 0)
+        search_id = str(uuid.uuid4())
+        return self._pvs(root, depth, -1.0, 1.0, history, tt, NodeType.PV_NODE, 0, search_id)
     
     def _pvs(self, node: Node, depth: float, alpha: float, beta: float, 
              history: Dict[str, int], tt: Dict[str, TTEntry], 
-             node_type: NodeType = NodeType.PV_NODE, rec_depth: int = 0, soft_create: bool = False) -> tuple[float, Optional[chess.Move]]:
+             node_type: NodeType = NodeType.PV_NODE, rec_depth: int = 0, search_id: str = None, re_search: bool = False, soft_create: bool = False) -> tuple[float, Optional[chess.Move]]:
         """
         PVS with policy-based move ordering and depth extension.
         """
+        assert search_id is not None
         board = node.board
         position_key = reduced_fen(board)
 
@@ -119,7 +121,11 @@ class PVSSearch(SearchAlgorithm):
         if history[position_key] >= 1:
             # This position has been seen before, so we can return a draw
             return 0.0, None
-        
+
+        # Adjust depth based on transpositions
+        if not re_search:
+            depth = tt[position_key].attach_node(search_id, node.id, depth)
+
         # Query transposition table
         if position_key in tt and tt[position_key] is not None:
             tt_score = tt[position_key].query(alpha, beta, depth)
@@ -207,7 +213,9 @@ class PVSSearch(SearchAlgorithm):
                     history,
                     tt,
                     child_node_type,
-                    rec_depth + 1
+                    rec_depth + 1,
+                    search_id,
+                    re_search=(child_re_searches > 0),
                 )
                 score = -score  # Negate for current player's perspective
 
@@ -230,7 +238,9 @@ class PVSSearch(SearchAlgorithm):
                                 history,
                                 tt,
                                 NodeType.PV_NODE,
-                                rec_depth + 1
+                                rec_depth + 1,
+                                search_id,
+                                re_search=True,
                             )
                         else:
                             # Re-search with full window
@@ -242,7 +252,9 @@ class PVSSearch(SearchAlgorithm):
                                 history,
                                 tt,
                                 child_node_type,
-                                rec_depth + 1
+                                rec_depth + 1,
+                                search_id,
+                                re_search=True,
                             )
                         score = -score
                 break

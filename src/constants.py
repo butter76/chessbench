@@ -177,7 +177,7 @@ CODERS['lc0_data_with_U'] = coders.TupleCoder((
   coders.VarIntCoder(),                                # plies_left
   CODERS['move'],                                      # move
   coders.IterableCoder(                                # U
-    coders.TupleCoder((CODERS['move'], CODERS['win_prob']))
+    coders.TupleCoder((CODERS['move'], CODERS['win_prob'], CODERS['win_prob'], CODERS['win_prob']))
   )
 ))
 

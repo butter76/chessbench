@@ -18,6 +18,7 @@ import os
 from typing import List, Tuple, Dict, Any
 import torch
 import torch.nn.functional as F
+torch.set_float32_matmul_precision('high')
 import chess
 import chess.engine
 from tqdm import tqdm
@@ -46,7 +47,7 @@ def load_checkpoint(checkpoint_path: str, device: str = "cuda") -> ChessTransfor
     if checkpoint.get('compiled', False):
         model = torch.compile(model)
     
-    model.load_state_dict(checkpoint['model'])
+    model.load_state_dict(checkpoint['model'], strict=False)
     model.eval()
     
     print(f"Loaded model from checkpoint: {checkpoint_path}")
@@ -70,7 +71,10 @@ def generate_child_positions(fen: str) -> List[Tuple[str, chess.Move]]:
         if not child_board.is_checkmate() and not child_board.is_stalemate() and not child_board.is_insufficient_material() and not child_board.is_fifty_moves():
             children.append((child_board.fen(), move))
         else:
-            children.append(("", move))
+            if child_board.is_checkmate():
+                children.append(("-1", move))
+            else:
+                children.append(("0", move))
     
     return children
 
@@ -81,7 +85,7 @@ def batch_tokenize_positions(fens) -> torch.Tensor:
     
     for _, policy, result, root_q, root_d, played_q, played_d, plies_left, move, child_fens in fens:
         for child_fen, _ in child_fens:
-            if child_fen == "":
+            if len(child_fen) <= 2:
                 continue
             
             # Use the tokenizer module's tokenize function
@@ -101,7 +105,7 @@ def main():
     if len(sys.argv) > 1:
         checkpoint_path = sys.argv[1]
     else:
-        checkpoint_path = "../checkpoints/p2-dhl/checkpoint_300000.pt"
+        checkpoint_path = "../checkpoints/p2-dhl-2x/checkpoint_300000.pt"
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -122,6 +126,7 @@ def main():
     # Create output directory
     output_dir = "../data/child_data"
     os.makedirs(output_dir, exist_ok=True)
+    MAX_POSITIONS = 200_000_000
 
     with bagz.BagWriter('../data/child_data/child_data.bag') as writer:
 
@@ -142,7 +147,7 @@ def main():
                 print(f"Processed {total_positions} positions")
 
 
-            if len(fens) >= 100 or total_positions >= 20_000_000:
+            if len(fens) >= 100 or total_positions >= MAX_POSITIONS:
                 encoded_positions = batch_tokenize_positions(fens)
                 
                 with torch.inference_mode():
@@ -156,19 +161,28 @@ def main():
                     hl_mean = torch.sum(hl_probs * bin_centers, dim=-1)
                     hl_variance = torch.sum(hl_probs * bin_centers**2, dim=-1) - hl_mean**2
                     wdl_variance = hl_variance
+
+                    value = output['value']
+                    draw = output['draw']
                     
                 wdl_variance = wdl_variance.cpu().numpy()
+                value = value.cpu().numpy()
+                draw = draw.cpu().numpy()
                 
                 idx = 0
                 for fen, policy, result, root_q, root_d, played_q, played_d, plies_left, move, child_fens in fens:
                     Us = []
                     for child_fen, child_move in child_fens:
-                        if child_fen == "":
+                        if len(child_fen) <= 2:
                             U = 0
+                            Q = 0 if child_fen == "-1" else 0.5
+                            D = 1 if child_fen == "0" else 0
                         else:
                             U = wdl_variance[idx]
+                            Q = value[idx]
+                            D = draw[idx]
                             idx += 1
-                        Us.append((child_move.uci(), U))
+                        Us.append((child_move.uci(), U, Q, D))
                     output = CODERS['lc0_data_with_U'].encode((fen, policy, result, root_q, root_d, played_q, played_d, plies_left, move, Us))
 
                     writer.write(output)
@@ -177,7 +191,7 @@ def main():
             
             
             # Stop after processing the specified number of records
-            if total_positions >= 20_000_000:
+            if total_positions >= MAX_POSITIONS:
                 break
     
     print(f"\nCompleted processing!")

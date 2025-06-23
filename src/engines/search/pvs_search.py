@@ -8,6 +8,7 @@ from .base import SearchAlgorithm, SearchResult
 from searchless_chess.src.engines.utils.node import Node, TTEntry
 from searchless_chess.src.engines.utils.nnutils import reduced_fen
 import searchless_chess.src.data_loader as data_loader
+from searchless_chess.src.engines.utils.nnutils import get_policy
 import numpy as np
 
 
@@ -134,7 +135,7 @@ class PVSSearch(SearchAlgorithm):
         total_move_weight = 0
         weight_divisor = 1.0
         unexpanded_count = 0
-        for i, (move, prob, child_node) in enumerate(node.policy):
+        for i, (move, prob, child_node, metadata) in enumerate(node.policy):
             if child_node is None:
                 if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
                     weight_divisor -= prob
@@ -161,7 +162,7 @@ class PVSSearch(SearchAlgorithm):
         best_move = None
         original_alpha = alpha
         
-        for i, (move, move_weight, child_node) in enumerate(node.policy):
+        for i, (move, move_weight, child_node, metadata) in enumerate(node.policy):
             assert move_weight > 0.0
 
             # Compute new depth with policy extension
@@ -169,6 +170,10 @@ class PVSSearch(SearchAlgorithm):
 
             if best_move_depth is None:
                 best_move_depth = new_depth
+
+
+            if child_node is None:
+                depth_reduction = -2 * math.log(metadata['U'] + 1e-6)
             
             # Skip low probability moves if depth is too low
             if new_depth <= depth_reduction and child_node is None:
@@ -260,7 +265,7 @@ class PVSSearch(SearchAlgorithm):
                         clip = max(node.policy[0][1] * 0.98, node.policy[i][1])
                         new_policy = min(new_policy, clip)
                 
-                node.policy[i] = (move, new_policy, child_node)
+                node.policy[i] = (move, new_policy, child_node, node.policy[i][3])
                 node.sort_and_normalize()
                 best_move_depth = max(best_move_depth, new_depth)
 
@@ -317,34 +322,27 @@ class PVSSearch(SearchAlgorithm):
         
         self.metrics['num_nodes'] += 1
         
-        # Get model evaluation if inference function is available
-        if inference_func:
-            output = inference_func(board)
-            value = output['value'][0, 0].item() * 2.0 - 1.0  # Convert from [0,1] to [-1,1]
-            
-            # Get policy for move ordering
-            from searchless_chess.src.engines.utils.nnutils import get_policy
-            policies = output['hardest_policy'].float().cpu().numpy()
-            policy, _, perplexity = get_policy(board, policies[0])
+        output = inference_func(board)
+        value = output['value'][0, 0].item() * 2.0 - 1.0  # Convert from [0,1] to [-1,1]
+        
+        policies = output['hardest_policy'].float().cpu().numpy()
+        U = output['U'].float().cpu().numpy()
+        policy, _, perplexity = get_policy(board, policies[0], U[0])
 
-            D = output['draw'][0, 0].item()
+        D = output['draw'][0, 0].item()
 
-            hl_logits = output['hl'].float().cpu().numpy()[0]  # Shape: (81,)
-            hl_probs = np.exp(hl_logits - np.max(hl_logits))  # Softmax numerically stable
-            hl_probs = hl_probs / np.sum(hl_probs)
-            
-            # Bin centers for NUM_BINS evenly spaced intervals in [0, 1]
-            bin_centers = np.array([(2 * i + 1) / (2 * data_loader.NUM_BINS) for i in range(data_loader.NUM_BINS)])
-            
-            # Compute variance: E[X^2] - E[X]^2
-            hl_mean = np.sum(hl_probs * bin_centers)
-            hl_variance = np.sum(hl_probs * bin_centers**2) - hl_mean**2
-            
-            wdl_variance = math.sqrt(max(0, hl_variance * 4))
-        else:
-            # Default values for when inference_func is not available
-            value = 0.0
-            policy = [(move, 1.0/len(list(board.legal_moves))) for move in board.legal_moves]
+        hl_logits = output['hl'].float().cpu().numpy()[0]  # Shape: (81,)
+        hl_probs = np.exp(hl_logits - np.max(hl_logits))  # Softmax numerically stable
+        hl_probs = hl_probs / np.sum(hl_probs)
+        
+        # Bin centers for NUM_BINS evenly spaced intervals in [0, 1]
+        bin_centers = np.array([(2 * i + 1) / (2 * data_loader.NUM_BINS) for i in range(data_loader.NUM_BINS)])
+        
+        # Compute variance: E[X^2] - E[X]^2
+        hl_mean = np.sum(hl_probs * bin_centers)
+        hl_variance = np.sum(hl_probs * bin_centers**2) - hl_mean**2
+        
+        wdl_variance = math.sqrt(max(0, hl_variance * 4))
         
         new_node = Node(board=board, parent=parent, value=value, policy=policy, U=wdl_variance)
 

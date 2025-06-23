@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Optional, List, Tuple, cast
+from typing import Optional, List, Tuple, cast, Dict
 import chess
 from collections.abc import Sequence
 from searchless_chess.src.engines.utils.nnutils import reduced_fen
@@ -121,11 +121,11 @@ class Node:
         self.moves = list(self.board.generate_legal_moves())
         self.parent = parent
         self.value = value
-        # Convert policy to new format: (move, probability, child_node_or_none)
+        # Convert policy to new format: (move, probability, child_node_or_none, metadata_dict)
         if policy is not None:
-            self.policy: List[Tuple[chess.Move, float, Optional['Node']]] = [(move, prob, None) for move, prob in policy]
+            self.policy: List[Tuple[chess.Move, float, Optional['Node'], Dict[str, float]]] = [(move, prob, None, metadata) for move, prob, metadata in policy]
         else:
-            self.policy: List[Tuple[chess.Move, float, Optional['Node']]] = []
+            self.policy: List[Tuple[chess.Move, float, Optional['Node'], Dict[str, float]]] = []
         self.terminal = terminal
         self.U = U
         
@@ -135,7 +135,7 @@ class Node:
     
     def is_leaf(self) -> bool:
         """Check if this node is a leaf node (has no expanded children)."""
-        return not any(child is not None for _, _, child in self.policy)
+        return not any(child is not None for _, _, child, _ in self.policy)
 
     def is_terminal(self) -> bool:
         """Check if this node is a terminal state (checkmate, stalemate, etc.)."""
@@ -146,22 +146,22 @@ class Node:
         Check if all possible moves from this position have been expanded.
         This checks if all policy entries have corresponding child nodes.
         """
-        return all(child is not None for _, _, child in self.policy)
+        return all(child is not None for _, _, child, _ in self.policy)
     
     def get_children(self) -> List['Node']:
         """Get all expanded child nodes."""
-        return [child for _, _, child in self.policy if child is not None]
+        return [child for _, _, child, _ in self.policy if child is not None]
     
     def get_child_count(self) -> int:
         """Get the number of expanded children."""
-        return sum(1 for _, _, child in self.policy if child is not None)
+        return sum(1 for _, _, child, _ in self.policy if child is not None)
     
     def add_child(self, child: 'Node', move: chess.Move) -> None:
         """Add a child node for the specified move."""
-        for i, (policy_move, prob, existing_child) in enumerate(self.policy):
+        for i, (policy_move, prob, existing_child, metadata) in enumerate(self.policy):
             if policy_move == move:
                 if existing_child is None:
-                    self.policy[i] = (policy_move, prob, child)
+                    self.policy[i] = (policy_move, prob, child, metadata)
                     return
                 else:
                     raise ValueError(f"Child already exists for move {move}")
@@ -186,17 +186,32 @@ class Node:
     
     def get_move_to_child(self, child: 'Node') -> Optional[chess.Move]:
         """Find the move that leads to a specific child node."""
-        for move, _, node in self.policy:
+        for move, _, node, _ in self.policy:
             if node is child:
                 return move
         return None
     
     def get_child_for_move(self, move: chess.Move) -> Optional['Node']:
         """Get the child node for a specific move, if it exists."""
-        for policy_move, _, child in self.policy:
+        for policy_move, _, child, _ in self.policy:
             if policy_move == move:
                 return child
         return None
+    
+    def get_metadata_for_move(self, move: chess.Move) -> Optional[Dict[str, float]]:
+        """Get the metadata dictionary for a specific move, if it exists."""
+        for policy_move, _, _, metadata in self.policy:
+            if policy_move == move:
+                return metadata
+        return None
+    
+    def update_metadata_for_move(self, move: chess.Move, metadata: Dict[str, float]) -> None:
+        """Update the metadata dictionary for a specific move."""
+        for i, (policy_move, prob, child, existing_metadata) in enumerate(self.policy):
+            if policy_move == move:
+                self.policy[i] = (policy_move, prob, child, metadata)
+                return
+        raise ValueError(f"Move {move} not found in policy")
     
     def __str__(self) -> str:
         """String representation of the node."""
@@ -204,7 +219,7 @@ class Node:
         value_str = f"{self.value:.4f}"
         move_count = len(self.policy)
         child_count = self.get_child_count()
-        return f"Node({self.board.fen()}, Value={value_str}, Moves={move_count}, Children={child_count}, policy: {[(m, p) for m, p, _ in self.policy]})"
+        return f"Node({self.board.fen()}, Value={value_str}, Moves={move_count}, Children={child_count}, policy: {[(m, p) for m, p, _, _ in self.policy]})"
         
     def print_lineage(self) -> str:
         """
@@ -255,7 +270,7 @@ class Node:
         Sort and normalize the policy while maintaining the child correspondence.
         
         Sorts the policy by probability (descending) and normalizes all probabilities 
-        to sum to 1. The child nodes move with their corresponding policy entries.
+        to sum to 1. The child nodes and metadata move with their corresponding policy entries.
         """
         if not self.policy:
             return
@@ -264,9 +279,9 @@ class Node:
         self.policy.sort(key=lambda x: x[1], reverse=True)
         
         # Normalize all probabilities to sum to 1
-        total_prob = sum(prob for _, prob, _ in self.policy)
+        total_prob = sum(prob for _, prob, _, _ in self.policy)
         if total_prob > 0:
-            self.policy = [(move, prob / total_prob, child) for move, prob, child in self.policy]
+            self.policy = [(move, prob / total_prob, child, metadata) for move, prob, child, metadata in self.policy]
 
 class MCTSNode(Node):
     def __init__(self, board: chess.Board, parent: Optional['MCTSNode'] = None, value: float = 0.0, policy: Optional[List[Tuple[chess.Move, float]]] = None, terminal: bool = False):

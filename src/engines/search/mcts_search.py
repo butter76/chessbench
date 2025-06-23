@@ -51,57 +51,61 @@ class MCTSSearch(SearchAlgorithm):
         # Select best move based on visit count
         best_move = None
         best_N = 0
-        for move, _, child in root.policy:
+        for move, _, child, _ in root.policy:
             if child is not None and child.N > best_N:
                 best_N = child.N
                 best_move = move
-
+        
+        if best_move is None:
+            # Fallback to highest policy move
+            best_move = root.get_highest_policy_move()
+            if best_move is None and root.policy:
+                best_move = root.policy[0][0]
+        
         return SearchResult(
             move=best_move,
             score=root.get_value(),
             metadata={
                 'rollouts': num_rollouts,
                 'nodes': self.metrics['num_nodes'],
-                'root_visits': root.N
+                'root_visits': root.N,
+                'best_child_visits': best_N
             }
         )
     
     def _choose_node(self, node: MCTSNode, inference_func) -> Tuple[MCTSNode, bool]:
-        """
-        Chooses a child node to expand based on the UCT formula.
-        Returns (selected_node, is_new_node).
-        """
-        c_puct = 2.1
-        fpu_factor = 0.9
-        best_q = -float('inf')
-        best_idx = -1
-        total_policy = 0.0
+        """Choose which node to expand next using UCB1."""
+        if node.is_terminal():
+            return node, False
         
-        for i, (move, p, child) in enumerate(node.policy):
+        # If not all children are expanded, expand a new one
+        if not node.is_fully_expanded():
+            # Find first unexpanded move
+            for move, prob, child, metadata in node.policy:
+                if child is None:
+                    # Create new child
+                    child_board = node.board.copy()
+                    child_board.push(move)
+                    new_child = self._create_mcts_node(child_board, inference_func, parent=node)
+                    node.add_child(new_child, move)
+                    return new_child, True
+        
+        # All children expanded, select best child using UCB1
+        best_child = None
+        best_ucb = float('-inf')
+        
+        for move, prob, child, metadata in node.policy:
             if child is not None:
-                q = -1 * child.get_value()
-                n = child.N
-                total_policy += p
-            else:
-                # First Play Urgency (FPU)
-                q = node.get_value() - fpu_factor * ((total_policy) ** 0.5)
-                n = 0
-            
-            u = c_puct * p * math.sqrt(node.N) / (1 + n)
-            if q + u > best_q:
-                best_q = q + u
-                best_idx = i
-
-        move, p, child = node.policy[best_idx]
-        if child is None:
-            # Create a new child node
-            child_board = node.board.copy()
-            child_board.push(move)
-            child_node = self._create_mcts_node(child_board, inference_func, parent=node)
-            node.add_child(child_node, move)
-            return child_node, True
+                # UCB1 formula
+                exploitation = child.get_value()
+                exploration = math.sqrt(2 * math.log(node.N) / child.N)
+                ucb_value = exploitation + exploration
+                
+                if ucb_value > best_ucb:
+                    best_ucb = ucb_value
+                    best_child = child
         
-        return child, False
+        return best_child, False
     
     def _create_mcts_node(self, board: chess.Board, inference_func, parent: Optional[MCTSNode] = None) -> MCTSNode:
         """Create an MCTS node with static evaluation and policy."""

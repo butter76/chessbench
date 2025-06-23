@@ -78,7 +78,7 @@ class MyTransformerEngine(engine.Engine):
         if checkpoint['compiled']:
             self.model = cast(ChessTransformer, torch.compile(self.model))
 
-        self.model.load_state_dict(checkpoint['model'])
+        self.model.load_state_dict(checkpoint['model'], strict=False)
 
         # Initialize search algorithms
         self.search_algorithms = {

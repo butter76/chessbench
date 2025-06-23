@@ -292,6 +292,13 @@ class ChessTransformer(nn.Module):
         self.final_scaling = self.final_head_dim ** -0.5
 
 
+        self.post_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
+        self.post_out_proj = nn.Sequential(
+            nn.Linear(self.final_num_heads, 
+                    self.final_num_heads),
+            nn.GELU(),
+            nn.Linear(self.final_num_heads, 1),
+        )
         self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
         self.final_out_proj = nn.Sequential(
             nn.Linear(self.final_num_heads, 
@@ -323,6 +330,15 @@ class ChessTransformer(nn.Module):
 
         attn_scores = self.final_out_proj(attn_scores)
 
+
+        post_qk = self.post_qk_proj(x)
+        post_qk = post_qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
+        post_q, post_k = post_qk.unbind(dim=2)
+        post_attn_scores = torch.einsum('bhid,bhjd->bhij', post_q, post_k) * self.final_scaling
+        post_attn_scores = torch.tanh(post_attn_scores)
+        post_attn_scores = post_attn_scores.permute(0, 2, 3, 1)
+        post_attn_scores = self.post_out_proj(post_attn_scores)
+
         bin_width = 1.0 / (data_loader.NUM_BINS)
         bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
 
@@ -347,14 +363,17 @@ class ChessTransformer(nn.Module):
             'soft_policy': attn_scores[:, :, :, 2],
             'hard_policy': attn_scores[:, :, :, 3],
             'hardest_policy': attn_scores[:, :, :, 4],
-            ## TODO: Add draw probability + plies left
+            'U': post_attn_scores[:, :, :, 0],
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
 
         legal_moves = target['legal'] == 1
+        batch_size = target['legal'].shape[0]
 
-
+        # # Zero out U loss if not in legal moves
+        # output_U = output['U'].clone()
+        # output_U[~legal_moves] = -1e9
 
         # Policy loss with masking
         batch_size = output['policy'].shape[0]
@@ -395,4 +414,5 @@ class ChessTransformer(nn.Module):
             'soft_policy': soft_policy_loss * 0.8 * 1.5,
             'hard_policy': hard_policy_loss * 0.075 * 1.5,
             'hardest_policy': hardest_policy_loss * 0.025 * 1.5,
+            # 'U': ((F.binary_cross_entropy_with_logits(output_U, target['U'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean()
         }

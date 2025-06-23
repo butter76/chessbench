@@ -217,12 +217,34 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
 
     return state, legal_actions, policy, soft_policy, hard_policy, hardest_policy, probs, draw_probs, wdl, np.array([Q]), np.array([D]), np.array([plies_left])
 
+
+class ConvertLeelaDataToSequenceWithU(ConvertToSequence):
+  """Converts the fen, move, and win probability into a sequence of integers."""
+  def map(
+    self, element: bytes
+  ):
+    fen, policy, result, root_q, root_d, played_q, played_d, plies_left, _, U_moves = constants.CODERS['lc0_data_with_U'].decode(element)
+    state = _process_fen(fen)
+
+    legal_actions = np.zeros((S, S))
+    U_values = np.zeros((S, S))
+    flip = fen.split(' ')[1] == 'b'
+
+    for move, u_val in U_moves:
+      s1, s2 = utils.move_to_indices(chess.Move.from_uci(move), flip)
+      U_values[s1, s2] = (u_val * 4 + 1e-6) ** 0.5
+      legal_actions[s1, s2] = 1
+
+    return state, legal_actions, U_values
+
+
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,
     'action_value': ConvertActionValueDataToSequence,
     'action_values': ConvertActionValuesDataToSequence,
     'state_value': ConvertStateValueDataToSequence,
     'lc0_data': ConvertLeelaDataToSequence,
+    'lc0_data_with_U': ConvertLeelaDataToSequenceWithU,
 }
 
 # Follows the base_constants.DataLoaderBuilder protocol.

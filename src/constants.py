@@ -163,6 +163,24 @@ CODERS['lc0_data'] = coders.TupleCoder((
   CODERS['move']                                       # move
 ))
 
+# Add coder for LC0DataRecord
+CODERS['lc0_data_with_U'] = coders.TupleCoder((
+  CODERS['fen'],                                       # fen
+  coders.IterableCoder(                                # policy
+    coders.TupleCoder((CODERS['move'], CODERS['win_prob']))
+  ),
+  CODERS['win_prob'],                                  # result
+  CODERS['win_prob'],                                  # root_q
+  CODERS['win_prob'],                                  # root_d
+  CODERS['win_prob'],                                  # played_q
+  CODERS['win_prob'],                                  # played_d
+  coders.VarIntCoder(),                                # plies_left
+  CODERS['move'],                                      # move
+  coders.IterableCoder(                                # U
+    coders.TupleCoder((CODERS['move'], CODERS['win_prob']))
+  )
+))
+
 def encode_lc0_data(data: LC0DataRecord) -> bytes:
   return CODERS['lc0_data'].encode((
     data.fen,

@@ -18,6 +18,8 @@ import threading
 import queue
 import time
 from cachetools import LRUCache
+from datetime import datetime
+import re
 
 # Import custom modules
 from searchless_chess.src.bagz import BagReader, BagWriter
@@ -332,7 +334,118 @@ def parse_args():
     # Deduplication options
     parser.add_argument('--cache-size', type=int, default=20_000_000, help='LRU cache size for deduplication (default: 1,000,000)')
     
+    # Date filtering options
+    parser.add_argument('--start-date', help='Start date for filtering files (format: YYYY-MM-DD, YYYYMMDD, YYYY-MM-DD_HH:MM, or YYYYMMDD_HHMM)')
+    parser.add_argument('--end-date', help='End date for filtering files (format: YYYY-MM-DD, YYYYMMDD, YYYY-MM-DD_HH:MM, or YYYYMMDD_HHMM)')
+    
     return parser.parse_args()
+
+
+def parse_timestamp_from_filename(filename):
+    """
+    Parse timestamp from LC0 bag filename
+    
+    Args:
+        filename: Filename in format 'lc0_data_YYYYMMDD_HHMM.bag'
+        
+    Returns:
+        datetime object or None if parsing fails
+    """
+    try:
+        # Extract timestamp from filename using regex
+        match = re.search(r'lc0_data_(\d{8})_(\d{4})\.bag', filename)
+        if match:
+            date_str = match.group(1)  # YYYYMMDD
+            time_str = match.group(2)  # HHMM
+            
+            # Parse date and time
+            year = int(date_str[:4])
+            month = int(date_str[4:6])
+            day = int(date_str[6:8])
+            hour = int(time_str[:2])
+            minute = int(time_str[2:4])
+            
+            return datetime(year, month, day, hour, minute)
+        else:
+            logging.warning(f"Could not parse timestamp from filename: {filename}")
+            return None
+    except Exception as e:
+        logging.warning(f"Error parsing timestamp from {filename}: {e}")
+        return None
+
+
+def filter_files_by_date(bag_files, start_date=None, end_date=None):
+    """
+    Filter bag files by date range
+    
+    Args:
+        bag_files: List of bag file keys
+        start_date: datetime object for start date (inclusive)
+        end_date: datetime object for end date (inclusive)
+        
+    Returns:
+        Filtered list of bag file keys
+    """
+    if not start_date and not end_date:
+        return bag_files
+    
+    filtered_files = []
+    for bag_file in bag_files:
+        filename = os.path.basename(bag_file)
+        file_datetime = parse_timestamp_from_filename(filename)
+        
+        if file_datetime is None:
+            # If we can't parse the timestamp, include the file with a warning
+            logging.warning(f"Including file with unparseable timestamp: {bag_file}")
+            filtered_files.append(bag_file)
+            continue
+        
+        # Check if file is within date range
+        include_file = True
+        
+        if start_date and file_datetime < start_date:
+            include_file = False
+        
+        if end_date and file_datetime > end_date:
+            include_file = False
+        
+        if include_file:
+            filtered_files.append(bag_file)
+        else:
+            logging.debug(f"Excluding file outside date range: {bag_file} ({file_datetime})")
+    
+    logging.info(f"Filtered {len(bag_files)} files to {len(filtered_files)} files within date range")
+    return filtered_files
+
+
+def parse_date_arg(date_string):
+    """
+    Parse date string in various formats
+    
+    Args:
+        date_string: Date string in format YYYY-MM-DD, YYYYMMDD, or YYYY-MM-DD_HH:MM
+        
+    Returns:
+        datetime object
+    """
+    if not date_string:
+        return None
+    
+    # Try different date formats
+    formats = [
+        '%Y-%m-%d_%H:%M',  # YYYY-MM-DD_HH:MM
+        '%Y-%m-%d',        # YYYY-MM-DD
+        '%Y%m%d',          # YYYYMMDD
+        '%Y%m%d_%H%M',     # YYYYMMDD_HHMM
+    ]
+    
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_string, fmt)
+        except ValueError:
+            continue
+    
+    raise ValueError(f"Invalid date format: {date_string}. Use YYYY-MM-DD, YYYYMMDD, YYYY-MM-DD_HH:MM, or YYYYMMDD_HHMM")
 
 
 def main():
@@ -341,6 +454,17 @@ def main():
     setup_logging(args.verbose)
     
     try:
+        # Parse date arguments
+        start_date = parse_date_arg(args.start_date)
+        end_date = parse_date_arg(args.end_date)
+        
+        if start_date:
+            logging.info(f"Start date filter: {start_date.strftime('%Y-%m-%d %H:%M')}")
+        if end_date:
+            logging.info(f"End date filter: {end_date.strftime('%Y-%m-%d %H:%M')}")
+        if start_date and end_date and start_date > end_date:
+            raise ValueError("Start date must be before or equal to end date")
+        
         # Create S3 client
         s3_client = create_s3_client(
             args.access_key, 
@@ -367,6 +491,14 @@ def main():
         # If specific key provided, download and process it
         if args.key:
             logging.info(f"Downloading and processing specific file: {args.key}")
+            
+            # Check if the specific file is within date range
+            if start_date or end_date:
+                filtered_files = filter_files_by_date([args.key], start_date, end_date)
+                if not filtered_files:
+                    logging.info(f"File {args.key} is outside the specified date range. Skipping.")
+                    return
+            
             bag_path = download_bag_file(s3_client, args.bucket, args.key, args.output_dir)
             output_bag = os.path.join(args.output_bag, f"processed_{os.path.basename(args.key)}")
             
@@ -390,7 +522,16 @@ def main():
                 logging.info(f"No .bag files found in bucket {args.bucket} with prefix '{args.prefix}'")
                 return
             
-            logging.info(f"Found {len(bag_files)} .bag files to process")
+            logging.info(f"Found {len(bag_files)} .bag files before filtering")
+            
+            # Apply date filtering
+            bag_files = filter_files_by_date(bag_files, start_date, end_date)
+            
+            if not bag_files:
+                logging.info("No .bag files remaining after date filtering")
+                return
+            
+            logging.info(f"Processing {len(bag_files)} .bag files after date filtering")
             
             # Set up queue for communication between threads
             file_queue = queue.Queue()

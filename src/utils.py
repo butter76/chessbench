@@ -39,20 +39,11 @@ def move_to_indices(move: chess.Move, flip: bool) -> tuple[int, int]:
     target_file = move_uci[2]
     
     if promotion == chess.ROOK:
-      if flip:
-        base_indices = [0, 64, 5]  # left, forward, right
-      else:
-        base_indices = [chess.square_mirror(0), 64, chess.square_mirror(5)]
+      base_indices = [chess.square_mirror(0), 64, chess.square_mirror(5)]
     elif promotion == chess.BISHOP:
-      if flip:
-        base_indices = [1, 65, 6]  # left, forward, right
-      else:
-        base_indices = [chess.square_mirror(1), 65, chess.square_mirror(6)]
+      base_indices = [chess.square_mirror(1), 65, chess.square_mirror(6)]
     elif promotion == chess.KNIGHT:
-      if flip:
-        base_indices = [2, 66, 7]  # left, forward, right
-      else:
-        base_indices = [chess.square_mirror(2), 66, chess.square_mirror(7)]
+      base_indices = [chess.square_mirror(2), 66, chess.square_mirror(7)]
     
     if source_file == target_file:
       # Forward move

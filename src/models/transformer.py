@@ -297,7 +297,7 @@ class ChessTransformer(nn.Module):
             nn.Linear(self.final_num_heads, 
                     self.final_num_heads),
             nn.GELU(),
-            nn.Linear(self.final_num_heads, 1),
+            nn.Linear(self.final_num_heads, 3),
         )
         self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
         self.final_out_proj = nn.Sequential(
@@ -364,6 +364,8 @@ class ChessTransformer(nn.Module):
             'hard_policy': attn_scores[:, :, :, 3],
             'hardest_policy': attn_scores[:, :, :, 4],
             'U': post_attn_scores[:, :, :, 0],
+            'Q': post_attn_scores[:, :, :, 1],
+            'D': post_attn_scores[:, :, :, 2],
         }
     
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -372,47 +374,55 @@ class ChessTransformer(nn.Module):
         batch_size = target['legal'].shape[0]
 
         # # Zero out U loss if not in legal moves
-        # output_U = output['U'].clone()
-        # output_U[~legal_moves] = -1e9
+        output_U = output['U'].clone()
+        output_U[~legal_moves] = -1e9
 
-        # Policy loss with masking
-        batch_size = output['policy'].shape[0]
-        # Clone policy logits to avoid modifying the original
-        masked_policy = output['policy'].clone()
-        masked_soft_policy = output['soft_policy'].clone()
-        masked_hard_policy = output['hard_policy'].clone()
-        masked_hardest_policy = output['hardest_policy'].clone()
-        # Apply masking - set illegal moves to large negative value
-        masked_policy[~legal_moves] = -1e9  
-        masked_soft_policy[~legal_moves] = -1e9
-        masked_hard_policy[~legal_moves] = -1e9
-        masked_hardest_policy[~legal_moves] = -1e9
+        output_Q = output['Q'].clone()
+        output_Q[~legal_moves] = -1e9
 
-        # Reshape for softmax over all possible moves
-        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, S*S]
-        masked_soft_policy_flat = masked_soft_policy.view(batch_size, -1)  # [batch_size, S*S]
-        masked_hard_policy_flat = masked_hard_policy.view(batch_size, -1)  # [batch_size, S*S]
-        masked_hardest_policy_flat = masked_hardest_policy.view(batch_size, -1)  # [batch_size, S*S]
-        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, S*S]
-        target_soft_policy_flat = target['soft_policy'].view(batch_size, -1)  # [batch_size, S*S]
-        target_hard_policy_flat = target['hard_policy'].view(batch_size, -1)  # [batch_size, S*S]
-        target_hardest_policy_flat = target['hardest_policy'].view(batch_size, -1)  # [batch_size, S*S]
-        # Compute cross entropy loss
-        policy_loss = -torch.sum(target_policy_flat * F.log_softmax(masked_policy_flat, dim=-1), dim=-1).mean()
-        soft_policy_loss = -torch.sum(target_soft_policy_flat * F.log_softmax(masked_soft_policy_flat, dim=-1), dim=-1).mean()
-        hard_policy_loss = -torch.sum(target_hard_policy_flat * F.log_softmax(masked_hard_policy_flat, dim=-1), dim=-1).mean()
-        hardest_policy_loss = -torch.sum(target_hardest_policy_flat * F.log_softmax(masked_hardest_policy_flat, dim=-1), dim=-1).mean()
+        output_D = output['D'].clone()
+        output_D[~legal_moves] = -1e9
+
+        # # Policy loss with masking
+        # batch_size = output['policy'].shape[0]
+        # # Clone policy logits to avoid modifying the original
+        # masked_policy = output['policy'].clone()
+        # masked_soft_policy = output['soft_policy'].clone()
+        # masked_hard_policy = output['hard_policy'].clone()
+        # masked_hardest_policy = output['hardest_policy'].clone()
+        # # Apply masking - set illegal moves to large negative value
+        # masked_policy[~legal_moves] = -1e9  
+        # masked_soft_policy[~legal_moves] = -1e9
+        # masked_hard_policy[~legal_moves] = -1e9
+        # masked_hardest_policy[~legal_moves] = -1e9
+
+        # # Reshape for softmax over all possible moves
+        # masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, S*S]
+        # masked_soft_policy_flat = masked_soft_policy.view(batch_size, -1)  # [batch_size, S*S]
+        # masked_hard_policy_flat = masked_hard_policy.view(batch_size, -1)  # [batch_size, S*S]
+        # masked_hardest_policy_flat = masked_hardest_policy.view(batch_size, -1)  # [batch_size, S*S]
+        # target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, S*S]
+        # target_soft_policy_flat = target['soft_policy'].view(batch_size, -1)  # [batch_size, S*S]
+        # target_hard_policy_flat = target['hard_policy'].view(batch_size, -1)  # [batch_size, S*S]
+        # target_hardest_policy_flat = target['hardest_policy'].view(batch_size, -1)  # [batch_size, S*S]
+        # # Compute cross entropy loss
+        # policy_loss = -torch.sum(target_policy_flat * F.log_softmax(masked_policy_flat, dim=-1), dim=-1).mean()
+        # soft_policy_loss = -torch.sum(target_soft_policy_flat * F.log_softmax(masked_soft_policy_flat, dim=-1), dim=-1).mean()
+        # hard_policy_loss = -torch.sum(target_hard_policy_flat * F.log_softmax(masked_hard_policy_flat, dim=-1), dim=-1).mean()
+        # hardest_policy_loss = -torch.sum(target_hardest_policy_flat * F.log_softmax(masked_hardest_policy_flat, dim=-1), dim=-1).mean()
         return {
-            'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
-            'value': F.mse_loss(output['value'], target['value']),
-            'draw': F.mse_loss(output['draw'], target['draw']),
-            'wdl': F.cross_entropy(output['wdl'].view(-1, 3), target['wdl'].view(-1)) * 0.01,
-            'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
-            'dhl': -0.01 * torch.sum(target['dhl'] * F.log_softmax(output['dhl'], dim=-1), dim=-1).mean(),
-            'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
-            'policy': policy_loss * 0.1 * 1.5,
-            'soft_policy': soft_policy_loss * 0.8 * 1.5,
-            'hard_policy': hard_policy_loss * 0.075 * 1.5,
-            'hardest_policy': hardest_policy_loss * 0.025 * 1.5,
-            # 'U': ((F.binary_cross_entropy_with_logits(output_U, target['U'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean()
+            # 'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
+            # 'value': F.mse_loss(output['value'], target['value']),
+            # 'draw': F.mse_loss(output['draw'], target['draw']),
+            # 'wdl': F.cross_entropy(output['wdl'].view(-1, 3), target['wdl'].view(-1)) * 0.01,
+            # 'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
+            # 'dhl': -0.01 * torch.sum(target['dhl'] * F.log_softmax(output['dhl'], dim=-1), dim=-1).mean(),
+            # 'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
+            # 'policy': policy_loss * 0.1 * 1.5,
+            # 'soft_policy': soft_policy_loss * 0.8 * 1.5,
+            # 'hard_policy': hard_policy_loss * 0.075 * 1.5,
+            # 'hardest_policy': hardest_policy_loss * 0.025 * 1.5,
+            'U': ((F.binary_cross_entropy_with_logits(output_U, target['U'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'Q': ((F.binary_cross_entropy_with_logits(output_Q, target['Q'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'D': 0.2 * ((F.binary_cross_entropy_with_logits(output_D, target['D'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
         }

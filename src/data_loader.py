@@ -228,14 +228,18 @@ class ConvertLeelaDataToSequenceWithU(ConvertToSequence):
 
     legal_actions = np.zeros((S, S))
     U_values = np.zeros((S, S))
+    Q_values = np.zeros((S, S))
+    D_values = np.zeros((S, S))
     flip = fen.split(' ')[1] == 'b'
 
-    for move, u_val in U_moves:
+    for move, u_val, q_val, d_val in U_moves:
       s1, s2 = utils.move_to_indices(chess.Move.from_uci(move), flip)
       U_values[s1, s2] = (u_val * 4 + 1e-6) ** 0.5
       legal_actions[s1, s2] = 1
+      Q_values[s1, s2] = q_val
+      D_values[s1, s2] = d_val
 
-    return state, legal_actions, U_values
+    return state, legal_actions, U_values, Q_values, D_values
 
 
 _TRANSFORMATION_BY_POLICY = {

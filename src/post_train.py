@@ -80,7 +80,7 @@ def post_train(
     scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1.0,
-        end_factor=0.3,
+        end_factor=0.25,
         total_iters=train_config.num_steps // train_config.ckpt_frequency,
         last_epoch=-1
     )
@@ -97,6 +97,8 @@ def post_train(
         model.train()
         total_loss = 0
         total_u_loss = 0
+        total_q_loss = 0
+        total_d_loss = 0
         
         pbar = tqdm(total=train_config.ckpt_frequency, desc=f'Post-train Epoch {epoch+1}/{num_epochs}')
         
@@ -104,15 +106,19 @@ def post_train(
             step += 1
             
             # Get batch: state, legal_actions, U_values
-            x, legal_actions, u_values = next(train_iter)
+            x, legal_actions, u_values, q_values, d_values = next(train_iter)
             
             x = x.to(torch.long).to(device)
             legal_actions = legal_actions.to(torch.float32).to(device)
             u_values = u_values.to(torch.float32).to(device)
+            q_values = q_values.to(torch.float32).to(device)
+            d_values = d_values.to(torch.float32).to(device)
             
             target = {
                 'legal': legal_actions,
                 'U': u_values,
+                'Q': q_values,
+                'D': d_values,
             }
             
             with autocast(device, dtype=torch.bfloat16):
@@ -120,11 +126,16 @@ def post_train(
                 outputs = model(x)
                 
                 # Compute only U loss (since other weights are frozen)
-                u_loss = model.losses(outputs, target)['U']
+                losses = model.losses(outputs, target)
+                u_loss = losses['U']
+                q_loss = losses['Q']
+                d_loss = losses['D']
+
+                loss = u_loss + q_loss + d_loss
             
             # Backward pass
             optimizer.zero_grad()
-            scaler.scale(u_loss).backward()
+            scaler.scale(loss).backward()
             
             if train_config.max_grad_norm is not None:
                 scaler.unscale_(optimizer)
@@ -137,16 +148,22 @@ def post_train(
             scaler.update()
             
             # Update metrics
-            total_loss += u_loss.item()
+            total_loss += loss.item()
             total_u_loss += u_loss.item()
+            total_q_loss += q_loss.item()
+            total_d_loss += d_loss.item()
             
             # Update progress bar
             avg_loss = total_loss / (step_in_epoch + 1)
             avg_u_loss = total_u_loss / (step_in_epoch + 1)
+            avg_q_loss = total_q_loss / (step_in_epoch + 1)
+            avg_d_loss = total_d_loss / (step_in_epoch + 1)
             
             pbar.set_postfix({
                 'avg_loss': f'{avg_loss:.6f}',
                 'u_loss': f'{avg_u_loss:.6f}',
+                'q_loss': f'{avg_q_loss:.6f}',
+                'd_loss': f'{avg_d_loss:.6f}',
                 'lr': f'{scheduler.get_last_lr()[0]:.6f}'
             })
             pbar.update(1)
@@ -157,6 +174,8 @@ def post_train(
         print({
             "epoch": epoch + 1,
             "u_loss": f'{avg_u_loss:.6f}',
+            'q_loss': f'{avg_q_loss:.6f}',
+            'd_loss': f'{avg_d_loss:.6f}',
             'lr': f'{scheduler.get_last_lr()[0]:.6f}',
             'step': step,
         })
@@ -219,9 +238,9 @@ def main():
     
     # Configuration for post-training
     train_config = config_lib.TrainConfig(
-        learning_rate=3e-4,  # Lower learning rate for post-training
+        learning_rate=4e-4,  # Lower learning rate for post-training
         data=config_lib.DataConfig(
-            batch_size=1024,  # Smaller batch size
+            batch_size=2048,  # Smaller batch size
             shuffle=True,
             seed=42,
             worker_count=8,
@@ -242,13 +261,13 @@ def main():
         ),
         compile=True,
         max_grad_norm=1.0,
-        num_steps=20_000,  # Fewer steps for post-training
-        ckpt_frequency=1_000,
-        save_checkpoint_path='../checkpoints/p2-dhl-post-train-u/',
+        num_steps=100_000,  # Fewer steps for post-training
+        ckpt_frequency=1_500,
+        save_checkpoint_path='../checkpoints/p2-dhl-2x-post-train-u/',
     )
     
     # Path to the original trained checkpoint
-    checkpoint_path = '../checkpoints/p2-dhl/checkpoint_300000.pt'  # Adjust as needed
+    checkpoint_path = '../checkpoints/p2-dhl-2x/checkpoint_300000.pt'  # Adjust as needed
     
     # Post-train the model
     model = post_train(

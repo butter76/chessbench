@@ -8,6 +8,7 @@ def get_policy(board: chess.Board, output: torch.Tensor, U: torch.Tensor):
     is_legal = np.zeros((68, 68), dtype=bool)
     for move in board.legal_moves:
         s1, s2 = move_to_indices(move, flip=board.turn == chess.BLACK)
+        assert is_legal[s1, s2] == False, f'{move} is already in the legal actions, board:{board.fen()}'
         is_legal[s1, s2] = True
     output[~is_legal] = float('-inf')
 

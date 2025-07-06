@@ -172,6 +172,7 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     self, element: bytes
   ):
     fen, leela_policy, result, root_q, root_d, played_q, played_d, plies_left, _move = constants.CODERS['lc0_data'].decode(element)
+    
     state = _process_fen(fen)
     Q = (root_q + 1) / 2
     D = root_d
@@ -183,12 +184,12 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     hardest_policy = np.zeros((S, S))
     flip = fen.split(' ')[1] == 'b'
 
-
     max_p = max(p for _, p in leela_policy)
     # First pass to get raw policy values
     for move, p in leela_policy:
         s1, s2 = utils.move_to_indices(chess.Move.from_uci(move), flip)
         policy[s1, s2] = p
+        assert legal_actions[s1, s2] == 0, f'{move} is already in the legal actions, board:{fen}'
         legal_actions[s1, s2] = 1
         if p >= max_p * 0.98:
             hardest_policy[s1, s2] = 1

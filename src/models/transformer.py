@@ -414,7 +414,7 @@ class ChessTransformer(nn.Module):
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
             'draw': F.mse_loss(output['draw'], target['draw']),
-            'wdl': F.cross_entropy(output['wdl'].view(-1, 3), target['wdl'].view(-1)) * 0.01,
+            # 'wdl': F.cross_entropy(output['wdl'].view(-1, 3), target['wdl'].view(-1)) * 0.01,
             'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
             'dhl': -0.02 * torch.sum(target['dhl'] * F.log_softmax(output['dhl'], dim=-1), dim=-1).mean(),
             'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),

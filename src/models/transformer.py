@@ -12,6 +12,8 @@ from searchless_chess.src import config as config_lib
 from searchless_chess.src import data_loader
 from searchless_chess.src import tokenizer
 
+S = tokenizer.SEQUENCE_LENGTH
+
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
     """Hyperparameters used in the Transformer architectures."""
@@ -106,6 +108,17 @@ class MultiHeadAttention(nn.Module):
         self.E_head = E_total // nheads
         self.bias = bias
 
+        self.flatten = nn.Linear(E_q, 32)
+        self.smolgen = nn.Sequential(
+            nn.Linear(32 * S, 256),
+            nn.LayerNorm(256, eps=1e-5),
+            nn.Linear(256, 256 * self.nheads),
+        )
+        self.smolgen_shared = nn.Sequential(
+            nn.LayerNorm(256, eps=1e-5),
+            nn.Linear(256, S * S),
+        )
+
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None, is_causal=False) -> torch.Tensor:
         """
         Forward pass; runs the following process:
@@ -124,6 +137,10 @@ class MultiHeadAttention(nn.Module):
         Returns:
             attn_output (torch.Tensor): output of shape (N, L_t, E_q)
         """
+        flat = self.flatten(query).view(query.size(0), -1)
+        smol = self.smolgen(flat).view(-1, self.nheads, 256)
+        smol_bias = self.smolgen_shared(smol).view(-1, self.nheads, S, S)
+
         # Step 1. Apply input projection
         if self._qkv_same_embed_dim:
             if query is key and key is value:
@@ -157,7 +174,7 @@ class MultiHeadAttention(nn.Module):
         #     SDPBackend.CUDNN_ATTENTION
         # ):
         attn_output = F.scaled_dot_product_attention(
-            query, key, value, is_causal=is_causal)
+            query, key, value, is_causal=is_causal, attn_mask=smol_bias)
         # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)
 
@@ -306,6 +323,8 @@ class ChessTransformer(nn.Module):
             nn.GELU(),
             nn.Linear(self.final_num_heads, 5),
         )
+
+        
         
         
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:

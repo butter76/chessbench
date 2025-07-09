@@ -172,8 +172,8 @@ class PVSSearch(SearchAlgorithm):
                 best_move_depth = new_depth
 
 
-            if child_node is None:
-                depth_reduction = -2 * math.log(metadata['U'] + 1e-6)
+            # if child_node is None:
+            #     depth_reduction = -2 * math.log(metadata['U'] + 1e-6)
             
             # Skip low probability moves if depth is too low
             if new_depth <= depth_reduction and child_node is None:

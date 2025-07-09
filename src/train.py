@@ -94,12 +94,23 @@ def train(
     #     eta_min=train_config.learning_rate / 100  # Minimum learning rate
     # )
 
-    scheduler = torch.optim.lr_scheduler.LinearLR(
+    scheduler1 = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1.0,
-        end_factor=0.25,  # 4e-4 -> 1e-4
-        total_iters=100,  # Number of epochs for the decay
-        last_epoch=-1
+        end_factor=0.77,
+        total_iters=90,
+    )
+
+    scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=80,
+        eta_min=0.01,
+    )
+
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[scheduler1, scheduler2],
+        milestones=[90],
     )
 
     if checkpoint is not None and 'scheduler' in checkpoint:
@@ -299,16 +310,16 @@ def main():
     
     # Create model config
     model_config = TransformerConfig(
-        embedding_dim=256,
+        embedding_dim=512,
         num_layers=16,
-        num_heads=16,
+        num_heads=32,
         widening_factor=3,
         dropout=0,
     )
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=0.2,
+        learning_rate=0.1,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -332,10 +343,10 @@ def main():
         compile=True,
         max_grad_norm=1.0,
         log_frequency=1,
-        num_steps=100 * 1000 * 3,
+        num_steps=170 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p2-dhl-2x-splus/',
+        save_checkpoint_path='../checkpoints/p2/',
     )
     
     # Train model

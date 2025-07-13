@@ -3,18 +3,14 @@ import { Group } from '@visx/group';
 import { Tree, hierarchy } from '@visx/hierarchy';
 import { LinkHorizontal } from '@visx/shape';
 import { Zoom } from '@visx/zoom';
-import { TreeNode, TreeStructure } from '../types/SearchLog';
+import { TreeNode } from '../types/SearchLog';
 import { parseSearchLogs, formatNodeDetails } from '../utils/logParser';
 
 interface SearchTreeViewerProps {
   logText: string;
 }
 
-interface TreeNodeWithCoords extends TreeNode {
-  x: number;
-  y: number;
-  children: TreeNodeWithCoords[];
-}
+
 
 const NODE_WIDTH = 120;
 const NODE_HEIGHT = 40;
@@ -58,9 +54,75 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
   const innerHeight = treeHeight - MARGIN.top - MARGIN.bottom;
 
   return (
-    <div style={{ display: 'flex', height: '100vh' }}>
-      {/* Tree visualization */}
-      <div style={{ flex: 1, position: 'relative' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      {/* Control Panel */}
+      <div style={{
+        backgroundColor: '#f8f9fa',
+        borderBottom: '1px solid #dee2e6',
+        padding: '10px 20px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '30px',
+        flexShrink: 0
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <label style={{ fontSize: '14px', fontWeight: '500', minWidth: '50px' }}>
+            Width:
+          </label>
+          <input
+            type="range"
+            min="800"
+            max="10000"
+            step="50"
+            value={treeWidth}
+            onChange={(e) => setTreeWidth(Number(e.target.value))}
+            style={{ width: '150px' }}
+          />
+          <span style={{ fontSize: '14px', minWidth: '60px', fontFamily: 'monospace' }}>
+            {treeWidth}px
+          </span>
+        </div>
+        
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <label style={{ fontSize: '14px', fontWeight: '500', minWidth: '50px' }}>
+            Height:
+          </label>
+          <input
+            type="range"
+            min="600"
+            max="10000"
+            step="50"
+            value={treeHeight}
+            onChange={(e) => setTreeHeight(Number(e.target.value))}
+            style={{ width: '150px' }}
+          />
+          <span style={{ fontSize: '14px', minWidth: '60px', fontFamily: 'monospace' }}>
+            {treeHeight}px
+          </span>
+        </div>
+        
+        <button
+          onClick={() => {
+            setTreeWidth(1200);
+            setTreeHeight(800);
+          }}
+          style={{
+            padding: '5px 10px',
+            fontSize: '12px',
+            backgroundColor: '#e9ecef',
+            border: '1px solid #ced4da',
+            borderRadius: '4px',
+            cursor: 'pointer'
+          }}
+        >
+          Reset
+        </button>
+      </div>
+      
+      {/* Main content area */}
+      <div style={{ display: 'flex', flex: 1 }}>
+        {/* Tree visualization */}
+        <div style={{ flex: 1, position: 'relative' }}>
         <Zoom<SVGSVGElement>
           width={treeWidth}
           height={treeHeight}
@@ -108,15 +170,70 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
                 >
                   {(tree) => (
                     <Group top={MARGIN.top} left={MARGIN.left}>
-                      {tree.links().map((link, i) => (
-                        <LinkHorizontal
-                          key={i}
-                          data={link}
-                          stroke="#dee2e6"
-                          strokeWidth="2"
-                          fill="none"
-                        />
-                      ))}
+                      {tree.links().map((link, i) => {
+                        const parentNode = link.source.data;
+                        const childNode = link.target.data;
+                        
+                        // Find the probability for this connection
+                        let probability = 0;
+                        
+                        if (parentNode.potentialChildren.length > 0) {
+                          // Find the index of this child in the parent's children array
+                          const childIndex = parentNode.children.findIndex(child => child.id === childNode.id);
+                          
+                          // Get the corresponding potential child (they're ordered by probability)
+                          if (childIndex >= 0 && childIndex < parentNode.potentialChildren.length) {
+                            const potentialChild = parentNode.potentialChildren[childIndex];
+                            probability = potentialChild.probability;
+                          }
+                        }
+                        
+                        // Calculate stroke width based on probability (1-8 range)
+                        const strokeWidth = Math.max(1, Math.min(8, 1 + (probability * 7)));
+                        
+                        // Calculate midpoint for text placement
+                        const midX = (link.source.y + link.target.y) / 2;
+                        const midY = (link.source.x + link.target.x) / 2;
+                        
+                        return (
+                          <Group key={i}>
+                            <LinkHorizontal
+                              data={link}
+                              stroke="#dee2e6"
+                              strokeWidth={strokeWidth}
+                              fill="none"
+                            />
+                            {probability > 0 && (
+                              <Group>
+                                {/* Background for text */}
+                                <rect
+                                  x={midX - 20}
+                                  y={midY - 8}
+                                  width={40}
+                                  height={16}
+                                  fill="rgba(255, 255, 255, 0.9)"
+                                  stroke="#dee2e6"
+                                  strokeWidth={0.5}
+                                  rx={4}
+                                />
+                                {/* Probability percentage text */}
+                                <text
+                                  x={midX}
+                                  y={midY}
+                                  dy="0.3em"
+                                  fontSize={10}
+                                  fontFamily="monospace"
+                                  textAnchor="middle"
+                                  fill="#495057"
+                                  style={{ pointerEvents: 'none' }}
+                                >
+                                  {(probability * 100).toFixed(1)}%
+                                </text>
+                              </Group>
+                            )}
+                          </Group>
+                        );
+                      })}
                       {tree.descendants().map((node, key) => {
                         const nodeData = node.data;
                         const isSelected = selectedNode?.id === nodeData.id;
@@ -172,58 +289,59 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
             </svg>
           )}
         </Zoom>
-      </div>
+        </div>
 
-      {/* Node details panel */}
-      <div style={{
-        width: '400px',
-        backgroundColor: '#ffffff',
-        borderLeft: '1px solid #dee2e6',
-        padding: '20px',
-        overflowY: 'auto',
-        fontFamily: 'monospace',
-        fontSize: '14px'
-      }}>
-        {selectedNode ? (
-          <div>
-            <h3 style={{ margin: '0 0 15px 0', color: '#495057' }}>
-              Node Details
-            </h3>
-            <pre style={{
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              margin: 0,
-              lineHeight: '1.5'
-            }}>
-              {formatNodeDetails(selectedNode)}
-            </pre>
-          </div>
-        ) : (
-          <div style={{ color: '#6c757d', textAlign: 'center' }}>
-            <p>Click on a node to view details</p>
-            <div style={{ marginTop: '30px' }}>
-              <h4>Legend:</h4>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '20px', height: '20px', backgroundColor: '#51cf66', borderRadius: '4px' }}></div>
-                  <span>Positive value (&gt; 0.5)</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '20px', height: '20px', backgroundColor: '#ff8cc8', borderRadius: '4px' }}></div>
-                  <span>Negative value (&lt; -0.5)</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '20px', height: '20px', backgroundColor: '#74c0fc', borderRadius: '4px' }}></div>
-                  <span>Neutral value</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '20px', height: '20px', backgroundColor: '#ff6b6b', borderRadius: '4px' }}></div>
-                  <span>Terminal node</span>
+        {/* Node details panel */}
+        <div style={{
+          width: '400px',
+          backgroundColor: '#ffffff',
+          borderLeft: '1px solid #dee2e6',
+          padding: '20px',
+          overflowY: 'auto',
+          fontFamily: 'monospace',
+          fontSize: '14px'
+        }}>
+          {selectedNode ? (
+            <div>
+              <h3 style={{ margin: '0 0 15px 0', color: '#495057' }}>
+                Node Details
+              </h3>
+              <pre style={{
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                margin: 0,
+                lineHeight: '1.5'
+              }}>
+                {formatNodeDetails(selectedNode)}
+              </pre>
+            </div>
+          ) : (
+            <div style={{ color: '#6c757d', textAlign: 'center' }}>
+              <p>Click on a node to view details</p>
+              <div style={{ marginTop: '30px' }}>
+                <h4>Legend:</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ width: '20px', height: '20px', backgroundColor: '#51cf66', borderRadius: '4px' }}></div>
+                    <span>Positive value (&gt; 0.5)</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ width: '20px', height: '20px', backgroundColor: '#ff8cc8', borderRadius: '4px' }}></div>
+                    <span>Negative value (&lt; -0.5)</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ width: '20px', height: '20px', backgroundColor: '#74c0fc', borderRadius: '4px' }}></div>
+                    <span>Neutral value</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ width: '20px', height: '20px', backgroundColor: '#ff6b6b', borderRadius: '4px' }}></div>
+                    <span>Terminal node</span>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );

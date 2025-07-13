@@ -1,4 +1,4 @@
-import { SearchLogEntry, TreeNode, TreeStructure, PotentialChild } from '../types/SearchLog';
+import { SearchLogEntry, TreeNode, TreeStructure } from '../types/SearchLog';
 
 export function parseSearchLogs(logText: string): TreeStructure {
   const lines = logText.trim().split('\n');

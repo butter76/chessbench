@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@types/chess.js": "^0.13.7",
     "@types/node": "^16.18.91",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
-    "@visx/hierarchy": "^3.3.0",
     "@visx/group": "^3.3.0",
+    "@visx/hierarchy": "^3.3.0",
     "@visx/shape": "^3.3.0",
     "@visx/zoom": "^3.3.0",
+    "chess.js": "^1.4.0",
+    "chessboardjsx": "^2.4.7",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-scripts": "5.0.1",
@@ -40,4 +43,4 @@
       "last 1 safari version"
     ]
   }
-} 
+}

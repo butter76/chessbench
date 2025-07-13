@@ -5,6 +5,7 @@ import { LinkHorizontal } from '@visx/shape';
 import { Zoom } from '@visx/zoom';
 import { TreeNode } from '../types/SearchLog';
 import { parseSearchLogs, formatNodeDetails } from '../utils/logParser';
+import ChessBoard from './ChessBoard';
 
 interface SearchTreeViewerProps {
   logText: string;
@@ -12,8 +13,8 @@ interface SearchTreeViewerProps {
 
 
 
-const NODE_WIDTH = 120;
-const NODE_HEIGHT = 40;
+const NODE_WIDTH = 140;
+const NODE_HEIGHT = 160;
 const MARGIN = { top: 20, left: 40, right: 40, bottom: 20 };
 
 const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
@@ -30,12 +31,7 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
     setSelectedNode(node);
   }, []);
 
-  const getNodeColor = useCallback((node: TreeNode) => {
-    if (node.isTerminal) return '#ff6b6b';
-    if (node.value > 0.5) return '#51cf66';
-    if (node.value < -0.5) return '#ff8cc8';
-    return '#74c0fc';
-  }, []);
+
 
   const getNodeBorderColor = useCallback((node: TreeNode) => {
     return selectedNode?.id === node.id ? '#339af0' : '#adb5bd';
@@ -246,12 +242,13 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
                             onClick={() => handleNodeClick(nodeData)}
                             style={{ cursor: 'pointer' }}
                           >
+                            {/* Background container */}
                             <rect
                               x={-NODE_WIDTH / 2}
                               y={-NODE_HEIGHT / 2}
                               width={NODE_WIDTH}
                               height={NODE_HEIGHT}
-                              fill={getNodeColor(nodeData)}
+                              fill="white"
                               stroke={getNodeBorderColor(nodeData)}
                               strokeWidth={isSelected ? 3 : 1}
                               rx={8}
@@ -259,25 +256,37 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
                                 filter: isSelected ? 'drop-shadow(0 0 6px rgba(51, 154, 240, 0.4))' : 'none'
                               }}
                             />
+                            
+                            {/* ChessBoard */}
+                            <foreignObject
+                              x={-NODE_WIDTH / 2 + 10}
+                              y={-NODE_HEIGHT / 2 + 10}
+                              width={NODE_WIDTH - 20}
+                              height={NODE_WIDTH - 20}
+                            >
+                              <ChessBoard fen={nodeData.fen} size={NODE_WIDTH - 20} />
+                            </foreignObject>
+                            
+                            {/* Value information */}
                             <text
-                              dy="-0.5em"
-                              fontSize={12}
+                              y={NODE_HEIGHT / 2 - 15}
+                              fontSize={10}
                               fontFamily="monospace"
                               textAnchor="middle"
                               fill="#212529"
                               style={{ pointerEvents: 'none' }}
                             >
-                              {nodeData.value.toFixed(3)}
+                              Q: {nodeData.value.toFixed(3)}
                             </text>
                             <text
-                              dy="0.8em"
+                              y={NODE_HEIGHT / 2 - 4}
                               fontSize={10}
                               fontFamily="monospace"
                               textAnchor="middle"
                               fill="#495057"
                               style={{ pointerEvents: 'none' }}
                             >
-                              {nodeData.children.length}/{nodeData.potentialChildren.length}
+                              U: {nodeData.U.toFixed(3)}
                             </text>
                           </Group>
                         );

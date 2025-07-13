@@ -32,7 +32,8 @@ def get_policy(board: chess.Board, output: torch.Tensor, U: torch.Tensor, Q: tor
         U_val = 1 / (1 + np.exp(-U[s1, s2].item()))
         Q_val = 1 / (1 + np.exp(-Q[s1, s2].item()))
         D_val = 1 / (1 + np.exp(-D[s1, s2].item()))
-        Q_val = (Q_val * 2 - 1)
+        # Child's Q is from the parent's perspective, so we need to flip it
+        Q_val = (Q_val * 2 - 1) * -1
         result.append((move, policy, {'U': U_val, 'Q': Q_val, 'D': D_val}))
         policy_map[move] = policy
     # Sort by policy in descending order

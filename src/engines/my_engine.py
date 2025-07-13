@@ -43,11 +43,13 @@ class MyTransformerEngine(engine.Engine):
         search_depth: int | float = 2,
         num_nodes: int = 400,
         search_ordering_strategy: Union[MoveSelectionStrategy, str, None] = MoveSelectionStrategy.AVS,
+        verbose: bool = False,
     ) -> None:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._limit = limit
         self.search_depth = search_depth
         self.num_nodes = num_nodes
+        self.verbose = verbose
         # Initialize metrics tracking
         self.metrics = {
             'num_nodes': 0,
@@ -92,8 +94,8 @@ class MyTransformerEngine(engine.Engine):
             MoveSelectionStrategy.OPT_POLICY_SPLIT: PolicySearch("opt_policy_split"),
             MoveSelectionStrategy.NEGAMAX: NegamaxSearch(self.search_ordering_strategy),
             MoveSelectionStrategy.ALPHA_BETA: AlphaBetaSearch(self.search_ordering_strategy),
-            MoveSelectionStrategy.ALPHA_BETA_NODE: PVSSearch(),  # Legacy name for PVS
-            MoveSelectionStrategy.PVS: PVSSearch(),
+            MoveSelectionStrategy.ALPHA_BETA_NODE: PVSSearch(verbose=self.verbose),  # Legacy name for PVS
+            MoveSelectionStrategy.PVS: PVSSearch(verbose=self.verbose),
             MoveSelectionStrategy.MTDF: MTDFSearch(),
             MoveSelectionStrategy.MCTS: MCTSSearch(),
         }

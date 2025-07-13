@@ -1,5 +1,7 @@
 import chess
 import math
+import json
+import sys
 from typing import Optional, Dict
 from collections import defaultdict
 from enum import Enum, auto
@@ -24,9 +26,15 @@ NULL_EPS = 0.0001
 class PVSSearch(SearchAlgorithm):
     """Principal Variation Search with policy-based move ordering and depth extension."""
     
-    def __init__(self):
+    def __init__(self, verbose=False):
         super().__init__("pvs")
         self.tt_hits = 0  # Track transposition table hits
+        self.verbose = verbose
+        self.node_counter = 0  # Unique node ID counter
+        self.logged_nodes = set()  # Track which nodes have been logged
+        
+        if self.verbose:
+            print("=== PVS SEARCH TREE LOG START ===", file=sys.stderr)
 
     def reset_metrics(self):
         """Reset engine metrics."""
@@ -38,7 +46,62 @@ class PVSSearch(SearchAlgorithm):
             'parent_nodes': 0,
             'pv': 0,
         }
+        if self.verbose:
+            self.node_counter = 0
+            self.logged_nodes.clear()
     
+    def _generate_node_id(self, board: chess.Board) -> str:
+        """Generate a unique node ID based on position and counter."""
+        self.node_counter += 1
+        return f"node_{self.node_counter}_{reduced_fen(board)}"
+    
+    def _log_node_expansion(self, node: Node, node_id: str):
+        """Log node expansion with all potential children."""
+        if not self.verbose or node_id in self.logged_nodes:
+            return
+            
+        self.logged_nodes.add(node_id)
+        
+        # Get parent ID
+        parent_id = None
+        if node.parent is not None:
+            parent_id = getattr(node.parent, '_log_id', None)
+        
+        # Get all potential children from policy
+        potential_children = []
+        for i, (move, prob, child_node, metadata) in enumerate(node.policy):
+            child_info = {
+                'move': move.uci(),
+                'move_san': node.board.san(move),
+                'probability': float(prob),
+                'U': float(metadata.get('U', 0.0)),
+                'Q': float(metadata.get('Q', 0.0)),
+                'D': float(metadata.get('D', 0.0))
+            }
+            potential_children.append(child_info)
+        
+        # Create log entry
+        log_entry = {
+            'event': 'node_expansion',
+            'node_id': node_id,
+            'parent_id': parent_id,
+            'fen': node.board.fen(),
+            'value': float(node.value),
+            'U': float(node.U),
+            'expval': float(node.expval),
+            'expoppval': float(node.expoppval),
+            'is_terminal': node.is_terminal(),
+            'potential_children': potential_children,
+            'num_potential_children': len(potential_children),
+            'timestamp': self.node_counter
+        }
+        
+        # Output as JSON line
+        print(json.dumps(log_entry), file=sys.stdout)
+        sys.stdout.flush()
+
+
+
     def search(self, board: chess.Board, inference_func, batch_inference_func=None, depth=2.0, **kwargs) -> SearchResult:
         """
         Perform PVS search with iterative deepening.
@@ -87,6 +150,9 @@ class PVSSearch(SearchAlgorithm):
         while not pv.is_terminal() and not pv.is_leaf():
             self.metrics['pv'] += 1
             pv = pv.policy[0][2]
+        
+        if self.verbose:
+            print("=== PVS SEARCH TREE LOG END ===", file=sys.stderr)
         
         return SearchResult(
             move=best_move,
@@ -404,12 +470,24 @@ class PVSSearch(SearchAlgorithm):
             terminal_value = 0.0
 
         if terminal_value is not None:
-            return Node(board=board, parent=parent, value=terminal_value, terminal=True, expval = math.exp(terminal_value/2+1/2), expoppval = math.exp(-terminal_value/2+1/2))
+            new_node = Node(board=board, parent=parent, value=terminal_value, terminal=True, expval = math.exp(terminal_value/2+1/2), expoppval = math.exp(-terminal_value/2+1/2))
+            # Assign node ID for logging
+            if self.verbose:
+                node_id = self._generate_node_id(board)
+                new_node._log_id = node_id
+                self._log_node_expansion(new_node, node_id)
+            return new_node
 
         # Check transposition table for cached evaluation
         if tt is not None and position_key in tt and tt[position_key] is not None:
             tt_entry = tt[position_key]
-            return Node(board=board, parent=parent, value=tt_entry.static_value, policy=tt_entry.policy, U=tt_entry.U, expval=tt_entry.expval, expoppval=tt_entry.expoppval)
+            new_node = Node(board=board, parent=parent, value=tt_entry.static_value, policy=tt_entry.policy, U=tt_entry.U, expval=tt_entry.expval, expoppval=tt_entry.expoppval)
+            # Assign node ID for logging
+            if self.verbose:
+                node_id = self._generate_node_id(board)
+                new_node._log_id = node_id
+                self._log_node_expansion(new_node, node_id)
+            return new_node
         
         if soft_create:
             return None
@@ -447,5 +525,11 @@ class PVSSearch(SearchAlgorithm):
         # Store static evaluation in transposition table
         if tt is not None:
             tt[position_key] = TTEntry(static_value=value, policy=policy, U=wdl_variance, expval=expval, expoppval=expoppval)
+
+        # Assign node ID for logging
+        if self.verbose:
+            node_id = self._generate_node_id(board)
+            new_node._log_id = node_id
+            self._log_node_expansion(new_node, node_id)
 
         return new_node 

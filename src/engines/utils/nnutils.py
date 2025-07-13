@@ -2,7 +2,7 @@ import chess
 from searchless_chess.src.utils import move_to_indices
 import torch
 import numpy as np
-def get_policy(board: chess.Board, output: torch.Tensor, U: torch.Tensor):
+def get_policy(board: chess.Board, output: torch.Tensor, U: torch.Tensor, Q: torch.Tensor, D: torch.Tensor):
     if len(list(board.legal_moves)) == 0:
         return [], {}
     is_legal = np.zeros((68, 68), dtype=bool)
@@ -30,7 +30,10 @@ def get_policy(board: chess.Board, output: torch.Tensor, U: torch.Tensor):
         s1, s2 = move_to_indices(move, flip=board.turn == chess.BLACK)
         policy = output[s1, s2].item()
         U_val = 1 / (1 + np.exp(-U[s1, s2].item()))
-        result.append((move, policy, {'U': U_val}))
+        Q_val = 1 / (1 + np.exp(-Q[s1, s2].item()))
+        D_val = 1 / (1 + np.exp(-D[s1, s2].item()))
+        Q_val = (Q_val * 2 - 1)
+        result.append((move, policy, {'U': U_val, 'Q': Q_val, 'D': D_val}))
         policy_map[move] = policy
     # Sort by policy in descending order
     result.sort(key=lambda x: x[1], reverse=True)

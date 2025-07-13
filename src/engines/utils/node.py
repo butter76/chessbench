@@ -16,7 +16,7 @@ class TTEntry:
     - Lower bound score + depth (for nodes that fail high, score >= beta)
     """
     
-    def __init__(self, static_value: float, policy: List[Tuple[chess.Move, float]], U: float = 0.0):
+    def __init__(self, static_value: float, policy: List[Tuple[chess.Move, float]], U: float = 0.0, expval: float = 0.0, expoppval: float = 0.0):
         """
         Initialize a transposition table entry.
         
@@ -27,7 +27,8 @@ class TTEntry:
         self.static_value = static_value
         self.policy = policy
         self.U = U
-        
+        self.expval = expval
+        self.expoppval = expoppval
         # Exact score entries: (score, depth)
         self.exact_score: Optional[Tuple[float, float]] = None
         
@@ -106,6 +107,8 @@ class Node:
                  value: float = 0.0,
                  policy: Optional[List[Tuple[chess.Move, float]]] = None,
                  U: float = 0.0,
+                 expval: float = 0.0,
+                 expoppval: float = 0.0,
                  terminal: bool = False):
         """
         Initialize a new Node in the search tree.
@@ -128,6 +131,8 @@ class Node:
             self.policy: List[Tuple[chess.Move, float, Optional['Node'], Dict[str, float]]] = []
         self.terminal = terminal
         self.U = U
+        self.expval = expval
+        self.expoppval = expoppval
         
     def is_root(self) -> bool:
         """Check if this node is the root of the tree (has no parent)."""

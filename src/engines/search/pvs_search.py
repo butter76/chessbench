@@ -130,6 +130,8 @@ class PVSSearch(SearchAlgorithm):
 
         # Multiply likelihood with the variance of this node
         depth_reduction = -2 * math.log(node.U + 1e-6)
+
+        node.sort_and_normalize()
         
         # Leaf node evaluation
         total_move_weight = 0
@@ -171,9 +173,9 @@ class PVSSearch(SearchAlgorithm):
             if best_move_depth is None:
                 best_move_depth = new_depth
 
-
-            # if child_node is None:
-            #     depth_reduction = -2 * math.log(metadata['U'] + 1e-6)
+            # NEW: Using the uncertainty of the child node here
+            if child_node is None:
+                depth_reduction = -2 * math.log(metadata['U'] + 1e-6)
             
             # Skip low probability moves if depth is too low
             if new_depth <= depth_reduction and child_node is None:
@@ -187,6 +189,8 @@ class PVSSearch(SearchAlgorithm):
                 child_board.push(move)
                 child_node = self._create_node(child_board, inference_func=self.inference_func, parent=node, tt=tt)
                 node.add_child(child_node, move)
+
+                self._backpropagate_policy_updates(child_node, move=move)
 
             child_re_searches = 0
             RE_SEARCH_DEPTH = 0.2
@@ -266,7 +270,6 @@ class PVSSearch(SearchAlgorithm):
                         new_policy = min(new_policy, clip)
                 
                 node.policy[i] = (move, new_policy, child_node, node.policy[i][3])
-                node.sort_and_normalize()
                 best_move_depth = max(best_move_depth, new_depth)
 
             if score > max_eval:
@@ -298,6 +301,97 @@ class PVSSearch(SearchAlgorithm):
         
         return max_eval, best_move
     
+    def _backpropagate_policy_updates(self, new_node: Node, move: Optional[chess.Move] = None):
+        """
+        Backpropagate policy updates from a newly created node up to the root.
+        
+        Args:
+            new_node: The newly created node
+            value: The value of the new node
+            wdl_stdev: The uncertainty (standard deviation) of the new node
+        """
+        
+        parent = new_node.parent
+        if parent is None:
+            return
+        
+        # Compute backup values
+        # backup_other_turn and backup_same_turn range analysis:
+        # Given value ∈ [-1, 1] and wdl_stdev ∈ [0, 1]:
+        backup_other_turn = (new_node.expoppval - parent.expval) / (math.exp(1) - 1)
+        backup_same_turn = (new_node.expval - parent.expoppval) / (math.exp(1) - 1)
+        
+        
+        # Safety check for backup values
+        if backup_other_turn > 1 or backup_other_turn < -1:
+            assert False, f"backup_other_turn={backup_other_turn} is outside expected range [-1, 1]. expoppval={new_node.expoppval}, expval={parent.expval}"
+        
+        if backup_same_turn > 1 or backup_same_turn < -1:
+            assert False, f"backup_same_turn={backup_same_turn} is outside expected range [-1, 1]. expval={new_node.expval}, expoppval={parent.expoppval}"
+
+        
+        
+        # Find the path from parent to root and update policies
+
+        # Find the policy value from parent to the newly created node
+        parent_to_node_policy = 1.0  # Default value
+        found_policy_entry = False
+        for policy_move, prob, _, _ in parent.policy:
+            if policy_move == move:
+                parent_to_node_policy = prob
+                found_policy_entry = True
+                break
+        
+        if not found_policy_entry:
+            assert found_policy_entry, "Could not find policy entry from parent to new node"
+        
+        depth_factor = parent_to_node_policy 
+        
+        current_node = parent
+        distance_from_current = 1  # Distance from the newly created node
+
+        while current_node is not None and current_node.parent is not None:
+            distance_from_current += 1
+            
+            # Find the move that leads from current_node to its parent
+            parent_node = current_node.parent
+            move_to_parent = None
+            policy_value = 1  # Default policy value
+            policy_index = -1
+            
+            for i, (policy_move, policy_prob, policy_child, _) in enumerate(parent_node.policy):
+                if policy_child is current_node:
+                    move_to_parent = policy_move
+                    policy_value = policy_prob
+                    policy_index = i
+                    break
+            
+            if move_to_parent is not None:
+                value_effect = .95 #scalar 0 to 1. 0 is no updating, 1 is full updating.
+
+                if distance_from_current % 2 == 0:  # Even distance from current node #=1 in the other-same swapped version
+                    # Update with backup_same_turn
+                    policy_update = depth_factor * backup_same_turn*value_effect * policy_value
+                    new_policy_prob = policy_value + policy_update
+                else:  # Odd distance from current node
+                    # Update with backup_other_turn
+                    policy_update = depth_factor * backup_other_turn*value_effect * policy_value
+                    new_policy_prob = policy_value + policy_update
+                
+                # Update the policy entry
+                parent_node.policy[policy_index] = (move_to_parent, new_policy_prob, current_node, parent_node.policy[policy_index][3])
+                
+
+                # Update depth_factor recursively
+                depth_factor = depth_factor * policy_value
+
+                #we will normalize only right before we call on a node!
+                #parent_node.normalize()
+            
+            current_node = parent_node
+        
+        return
+    
     def _create_node(self, board: chess.Board, inference_func=None, parent: Optional[Node] = None, tt: Dict[str, TTEntry] = None, soft_create: bool = False) -> Node | None:
         """Create a node with static evaluation and policy."""
         position_key = reduced_fen(board)
@@ -310,12 +404,12 @@ class PVSSearch(SearchAlgorithm):
             terminal_value = 0.0
 
         if terminal_value is not None:
-            return Node(board=board, parent=parent, value=terminal_value, terminal=True)
+            return Node(board=board, parent=parent, value=terminal_value, terminal=True, expval = math.exp(terminal_value/2+1/2), expoppval = math.exp(-terminal_value/2+1/2))
 
         # Check transposition table for cached evaluation
         if tt is not None and position_key in tt and tt[position_key] is not None:
             tt_entry = tt[position_key]
-            return Node(board=board, parent=parent, value=tt_entry.static_value, policy=tt_entry.policy, U=tt_entry.U)
+            return Node(board=board, parent=parent, value=tt_entry.static_value, policy=tt_entry.policy, U=tt_entry.U, expval=tt_entry.expval, expoppval=tt_entry.expoppval)
         
         if soft_create:
             return None
@@ -327,9 +421,9 @@ class PVSSearch(SearchAlgorithm):
         
         policies = output['hardest_policy'].float().cpu().numpy()
         U = output['U'].float().cpu().numpy()
-        policy, _, perplexity = get_policy(board, policies[0], U[0])
-
-        D = output['draw'][0, 0].item()
+        Q = output['Q'].float().cpu().numpy()
+        D = output['D'].float().cpu().numpy()
+        policy, _, perplexity = get_policy(board, policies[0], U[0], Q[0], D[0])
 
         hl_logits = output['hl'].float().cpu().numpy()[0]  # Shape: (81,)
         hl_probs = np.exp(hl_logits - np.max(hl_logits))  # Softmax numerically stable
@@ -343,11 +437,15 @@ class PVSSearch(SearchAlgorithm):
         hl_variance = np.sum(hl_probs * bin_centers**2) - hl_mean**2
         
         wdl_variance = math.sqrt(max(0, hl_variance * 4))
+
+        #E(exp(value)) we compute
+        expval = np.sum(hl_probs * np.exp(bin_centers))
+        expoppval = np.sum(hl_probs * np.exp(1-bin_centers))
         
-        new_node = Node(board=board, parent=parent, value=value, policy=policy, U=wdl_variance)
+        new_node = Node(board=board, parent=parent, value=value, policy=policy, U=wdl_variance, expval=expval, expoppval=expoppval)
 
         # Store static evaluation in transposition table
         if tt is not None:
-            tt[position_key] = TTEntry(static_value=value, policy=policy, U=wdl_variance)
+            tt[position_key] = TTEntry(static_value=value, policy=policy, U=wdl_variance, expval=expval, expoppval=expoppval)
 
         return new_node 

@@ -37,13 +37,9 @@ def test_search_logging():
     
     # Test positions
     test_positions = [
-        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",  # Starting position
-        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",  # After 1.e4
-        "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/3P1N2/PPP2PPP/RNBQK2R b KQkq - 0 4",  # Italian game
+        "2q5/5P1k/5Qpp/p2p4/3P4/P2b2PB/5K1P/1r6 w - - 1 44",  # Starting position
     ]
     
-    print("Testing search tree logging...")
-    print("=" * 60)
     
     for i, fen in enumerate(test_positions, 1):
         print(f"\n--- Test Position {i} ---", file=sys.stderr)

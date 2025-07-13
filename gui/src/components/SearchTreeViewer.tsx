@@ -5,6 +5,7 @@ import { LinkHorizontal } from '@visx/shape';
 import { Zoom } from '@visx/zoom';
 import { TreeNode } from '../types/SearchLog';
 import { parseSearchLogs, formatNodeDetails } from '../utils/logParser';
+import { getLastMoveForNode } from '../utils/moveUtils';
 import ChessBoard from './ChessBoard';
 
 interface SearchTreeViewerProps {
@@ -264,7 +265,11 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
                               width={NODE_WIDTH - 20}
                               height={NODE_WIDTH - 20}
                             >
-                              <ChessBoard fen={nodeData.fen} size={NODE_WIDTH - 20} />
+                              <ChessBoard 
+                                fen={nodeData.fen} 
+                                size={NODE_WIDTH - 20} 
+                                lastMove={getLastMoveForNode(nodeData, treeData.nodes)}
+                              />
                             </foreignObject>
                             
                             {/* Value information */}

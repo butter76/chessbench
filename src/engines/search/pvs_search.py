@@ -55,7 +55,7 @@ class PVSSearch(SearchAlgorithm):
         self.node_counter += 1
         return f"node_{self.node_counter}_{reduced_fen(board)}"
     
-    def _log_node_expansion(self, node: Node, node_id: str):
+    def _log_node_expansion(self, node: Node, node_id: str, parent_move: Optional[chess.Move] = None):
         """Log node expansion with all potential children."""
         if not self.verbose or node_id in self.logged_nodes:
             return
@@ -80,11 +80,20 @@ class PVSSearch(SearchAlgorithm):
             }
             potential_children.append(child_info)
         
+        # Get parent move info
+        parent_move_uci = None
+        parent_move_san = None
+        if parent_move is not None and node.parent is not None:
+            parent_move_uci = parent_move.uci()
+            parent_move_san = node.parent.board.san(parent_move)
+        
         # Create log entry
         log_entry = {
             'event': 'node_expansion',
             'node_id': node_id,
             'parent_id': parent_id,
+            'parent_move': parent_move_uci,
+            'parent_move_san': parent_move_san,
             'fen': node.board.fen(),
             'value': float(node.value),
             'U': float(node.U),
@@ -113,7 +122,7 @@ class PVSSearch(SearchAlgorithm):
         self.tt_hits = 0  # Reset TT hit counter
         
         # Create root node
-        root = self._create_node(board, inference_func)
+        root = self._create_node(board, inference_func, parent_move=None)
         history = defaultdict(int)
         tt = defaultdict(lambda: None)
         
@@ -253,7 +262,7 @@ class PVSSearch(SearchAlgorithm):
             if child_node is None:
                 child_board = board.copy()
                 child_board.push(move)
-                child_node = self._create_node(child_board, inference_func=self.inference_func, parent=node, tt=tt)
+                child_node = self._create_node(child_board, inference_func=self.inference_func, parent=node, tt=tt, parent_move=move)
                 node.add_child(child_node, move)
 
                 self._backpropagate_policy_updates(child_node, move=move)
@@ -458,7 +467,7 @@ class PVSSearch(SearchAlgorithm):
         
         return
     
-    def _create_node(self, board: chess.Board, inference_func=None, parent: Optional[Node] = None, tt: Dict[str, TTEntry] = None, soft_create: bool = False) -> Node | None:
+    def _create_node(self, board: chess.Board, inference_func=None, parent: Optional[Node] = None, tt: Dict[str, TTEntry] = None, soft_create: bool = False, parent_move: Optional[chess.Move] = None) -> Node | None:
         """Create a node with static evaluation and policy."""
         position_key = reduced_fen(board)
         
@@ -475,7 +484,7 @@ class PVSSearch(SearchAlgorithm):
             if self.verbose:
                 node_id = self._generate_node_id(board)
                 new_node._log_id = node_id
-                self._log_node_expansion(new_node, node_id)
+                self._log_node_expansion(new_node, node_id, parent_move)
             return new_node
 
         # Check transposition table for cached evaluation
@@ -486,7 +495,7 @@ class PVSSearch(SearchAlgorithm):
             if self.verbose:
                 node_id = self._generate_node_id(board)
                 new_node._log_id = node_id
-                self._log_node_expansion(new_node, node_id)
+                self._log_node_expansion(new_node, node_id, parent_move)
             return new_node
         
         if soft_create:
@@ -530,6 +539,6 @@ class PVSSearch(SearchAlgorithm):
         if self.verbose:
             node_id = self._generate_node_id(board)
             new_node._log_id = node_id
-            self._log_node_expansion(new_node, node_id)
+            self._log_node_expansion(new_node, node_id, parent_move)
 
         return new_node 

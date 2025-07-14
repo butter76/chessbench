@@ -11,6 +11,8 @@ export interface SearchLogEntry {
   event: 'node_expansion';
   node_id: string;
   parent_id: string | null;
+  parent_move: string | null;
+  parent_move_san: string | null;
   fen: string;
   value: number;
   U: number;
@@ -25,6 +27,8 @@ export interface SearchLogEntry {
 export interface TreeNode {
   id: string;
   parentId: string | null;
+  parentMove: string | null;
+  parentMoveSan: string | null;
   fen: string;
   value: number;
   U: number;

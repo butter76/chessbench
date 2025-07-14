@@ -27,6 +27,8 @@ export function parseSearchLogs(logText: string): TreeStructure {
     const node: TreeNode = {
       id: entry.node_id,
       parentId: entry.parent_id,
+      parentMove: entry.parent_move,
+      parentMoveSan: entry.parent_move_san,
       fen: entry.fen,
       value: entry.value,
       U: entry.U,
@@ -59,8 +61,8 @@ export function parseSearchLogs(logText: string): TreeStructure {
     }
   }
 
-  // Note: Children are already added in the order they appear in the logs,
-  // which should correspond to the order of expansion (highest probability first)
+  // Note: Children are added in the order they appear in the logs,
+  // which corresponds to the order of expansion (not necessarily by probability)
 
   return { nodes, root, maxDepth };
 }
@@ -95,9 +97,8 @@ export function formatNodeDetails(node: TreeNode): string {
     details.push('');
     details.push('Potential Moves:');
     node.potentialChildren.forEach((child, index) => {
-      // Simple heuristic: assume the top N moves (by probability) are expanded 
-      // if there are N children, since moves are typically expanded in probability order
-      const isExpanded = index < node.children.length;
+      // Check if this move was actually expanded by looking for a child with matching parent move
+      const isExpanded = node.children.some(childNode => childNode.parentMove === child.move);
       
       details.push(
         `  ${index + 1}. ${child.move_san} (${child.move}) - ` +

@@ -79,13 +79,9 @@ export function getLastMoveForNode(node: TreeNode, nodes: Map<string, TreeNode>)
     return null;
   }
 
-  // Find the move that led to this node by matching the child node
-  // Children are stored in the order they were expanded, corresponding to potential_children order
-  const childIndex = parentNode.children.findIndex(child => child.id === node.id);
-  
-  if (childIndex >= 0 && childIndex < parentNode.potentialChildren.length) {
-    const potentialChild = parentNode.potentialChildren[childIndex];
-    return parseUCIMove(potentialChild.move);
+  // Use the parent move information directly from the node
+  if (node.parentMove) {
+    return parseUCIMove(node.parentMove);
   }
 
   return null;

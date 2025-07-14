@@ -35,3 +35,4 @@ processed_data/
 
 downloaded_data/
 node_modules/
+*.jsonl

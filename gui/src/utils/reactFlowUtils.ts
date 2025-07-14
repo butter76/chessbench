@@ -71,17 +71,19 @@ export function convertTreeToReactFlow(treeData: TreeStructure): {
     });
 
     // Create edges for children
-    node.children.forEach((child, index) => {
-      // Find the corresponding potential child for this connection
+    node.children.forEach((child) => {
+      // Find the corresponding potential child for this connection by matching parent move
       let probability = 0;
       let move = '';
       let move_san = '';
       
-      if (index < node.potentialChildren.length) {
-        const potentialChild = node.potentialChildren[index];
-        probability = potentialChild.probability;
-        move = potentialChild.move;
-        move_san = potentialChild.move_san;
+      if (child.parentMove) {
+        const potentialChild = node.potentialChildren.find(pc => pc.move === child.parentMove);
+        if (potentialChild) {
+          probability = potentialChild.probability;
+          move = potentialChild.move;
+          move_san = potentialChild.move_san;
+        }
       }
 
       edges.push({

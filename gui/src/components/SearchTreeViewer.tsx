@@ -429,13 +429,12 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
                 </thead>
                 <tbody>
                   {node.potentialChildren.map((child, index) => {
-                    const isExpanded = index < node.children.length;
+                    // Check if this move was actually expanded by finding the child with matching parent move
+                    const childNode = node.children.find(cn => cn.parentMove === child.move);
+                    const isExpanded = childNode !== undefined;
                     
                     const handleRowClick = () => {
-                      if (isExpanded) {
-                        // The expanded children are the first node.children.length entries
-                        // in the potentialChildren array, so we can use the index directly
-                        const childNode = node.children[index];
+                      if (isExpanded && childNode) {
                         setSelectedNode(childNode);
                       }
                     };

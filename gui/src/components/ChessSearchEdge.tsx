@@ -5,6 +5,7 @@ interface ChessSearchEdgeData extends Record<string, unknown> {
   probability: number;
   move: string;
   move_san: string;
+  isInSelectedSubtree?: boolean;
 }
 
 const ChessSearchEdge: React.FC<EdgeProps> = memo(({
@@ -22,6 +23,7 @@ const ChessSearchEdge: React.FC<EdgeProps> = memo(({
   const edgeData = data as ChessSearchEdgeData;
   const probability = edgeData?.probability || 0;
   const move_san = edgeData?.move_san || '';
+  const isInSelectedSubtree = edgeData?.isInSelectedSubtree || false;
   
   // Calculate stroke width based on probability (1-8 range)
   const strokeWidth = Math.max(1, Math.min(8, 1 + (probability * 7)));
@@ -44,8 +46,9 @@ const ChessSearchEdge: React.FC<EdgeProps> = memo(({
         style={{
           ...style,
           strokeWidth,
-          stroke: '#dee2e6',
+          stroke: isInSelectedSubtree ? '#4ecdc4' : '#dee2e6',
           fill: 'none',
+          transition: 'stroke 0.2s ease-in-out',
         }}
         className="react-flow__edge-path"
         d={edgePath}
@@ -61,10 +64,11 @@ const ChessSearchEdge: React.FC<EdgeProps> = memo(({
             y={labelY - 12}
             width={50}
             height={24}
-            fill="rgba(255, 255, 255, 0.9)"
-            stroke="#dee2e6"
+            fill={isInSelectedSubtree ? 'rgba(78, 205, 196, 0.1)' : 'rgba(255, 255, 255, 0.9)'}
+            stroke={isInSelectedSubtree ? '#4ecdc4' : '#dee2e6'}
             strokeWidth={0.5}
             rx={4}
+            style={{ transition: 'fill 0.2s ease-in-out, stroke 0.2s ease-in-out' }}
           />
           
           {/* Move notation */}

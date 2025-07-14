@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { 
   ReactFlow, 
   Background, 
@@ -44,6 +44,34 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, , onEdgesChange] = useEdgesState(initialEdges);
+
+  // Auto layout when tree data is first loaded
+  useEffect(() => {
+    if (treeData && nodes.length > 0) {
+      const layoutedNodes = autoLayoutNodes(nodes, edges);
+      setNodes(layoutedNodes);
+    }
+  }, [treeData, nodes.length, edges, setNodes]);
+
+  // Update visual selection when selectedNode changes
+  useEffect(() => {
+    if (selectedNode) {
+      setNodes(currentNodes => 
+        currentNodes.map(node => ({
+          ...node,
+          selected: (node.data as ReactFlowNodeData).node.id === selectedNode.id
+        }))
+      );
+    } else {
+      // Clear all selections
+      setNodes(currentNodes => 
+        currentNodes.map(node => ({
+          ...node,
+          selected: false
+        }))
+      );
+    }
+  }, [selectedNode, setNodes]);
 
   const handleNodeClick = useCallback((event: React.MouseEvent, node: Node) => {
     const nodeData = node.data as ReactFlowNodeData;
@@ -202,11 +230,35 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
                 <tbody>
                   {node.potentialChildren.map((child, index) => {
                     const isExpanded = index < node.children.length;
+                    
+                    const handleRowClick = () => {
+                      if (isExpanded) {
+                        // The expanded children are the first node.children.length entries
+                        // in the potentialChildren array, so we can use the index directly
+                        const childNode = node.children[index];
+                        setSelectedNode(childNode);
+                      }
+                    };
+                    
                     return (
-                      <tr key={index} style={{ 
-                        backgroundColor: isExpanded ? '#e8f5e8' : '#ffffff',
-                        borderBottom: '1px solid #dee2e6'
-                      }}>
+                      <tr 
+                        key={index} 
+                        onClick={handleRowClick}
+                        style={{ 
+                          backgroundColor: isExpanded ? '#e8f5e8' : '#ffffff',
+                          borderBottom: '1px solid #dee2e6',
+                          cursor: isExpanded ? 'pointer' : 'default',
+                          transition: 'background-color 0.2s'
+                        }}
+                        onMouseEnter={(e) => {
+                          if (isExpanded) {
+                            e.currentTarget.style.backgroundColor = '#d4edda';
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.backgroundColor = isExpanded ? '#e8f5e8' : '#ffffff';
+                        }}
+                      >
                         <td style={{ 
                           padding: '6px', 
                           fontFamily: 'monospace',

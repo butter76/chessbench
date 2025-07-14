@@ -37,7 +37,7 @@ def test_search_logging():
     
     # Test positions
     test_positions = [
-        "2q5/5P1k/5Qpp/p2p4/3P4/P2b2PB/5K1P/1r6 w - - 1 44",  # Starting position
+        "3r1r1k/pbp3pp/1p1b4/5p2/3Q4/1BP1P3/PP3n1P/2K1R1R1 b - - 3 4",  # Starting position
     ]
     
     

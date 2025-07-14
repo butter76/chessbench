@@ -121,9 +121,9 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
       </div>
       
       {/* Main content area */}
-      <div style={{ display: 'flex', flex: 1 }}>
+      <div style={{ flex: 1, position: 'relative' }}>
         {/* Tree visualization */}
-        <div style={{ flex: 1, position: 'relative' }}>
+        <div style={{ width: '100%', height: '100%' }}>
         <Zoom<SVGSVGElement>
           width={treeWidth}
           height={treeHeight}
@@ -321,31 +321,168 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
         </Zoom>
         </div>
 
-        {/* Node details panel */}
-        <div style={{
-          width: '400px',
-          backgroundColor: '#ffffff',
-          borderLeft: '1px solid #dee2e6',
-          padding: '20px',
-          overflowY: 'auto',
-          fontFamily: 'monospace',
-          fontSize: '14px'
-        }}>
-          {selectedNode ? (
-            <div>
-              <h3 style={{ margin: '0 0 15px 0', color: '#495057' }}>
+        {/* Globally positioned node details panel */}
+        {selectedNode && (
+          <div style={{
+            position: 'fixed',
+            top: '80px', // Account for the control panel height
+            right: '20px',
+            width: '600px',
+            maxHeight: 'calc(100vh - 100px)', // Leave space for control panel and margins
+            backgroundColor: '#ffffff',
+            border: '1px solid #dee2e6',
+            borderRadius: '8px',
+            padding: '20px',
+            overflowY: 'auto',
+            fontFamily: 'monospace',
+            fontSize: '14px',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+            zIndex: 1000
+          }}>
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '15px',
+              borderBottom: '1px solid #dee2e6',
+              paddingBottom: '10px'
+            }}>
+              <h3 style={{ margin: '0', color: '#495057' }}>
                 Node Details
               </h3>
-              <pre style={{
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                margin: 0,
-                lineHeight: '1.5'
-              }}>
-                {formatNodeDetails(selectedNode)}
-              </pre>
+              <button
+                onClick={() => setSelectedNode(null)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  fontSize: '18px',
+                  cursor: 'pointer',
+                  color: '#6c757d',
+                  padding: '0',
+                  width: '24px',
+                  height: '24px',
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f8f9fa';
+                  e.currentTarget.style.color = '#dc3545';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                  e.currentTarget.style.color = '#6c757d';
+                }}
+                title="Close details panel"
+              >
+                ×
+              </button>
             </div>
-          ) : (
+            <div style={{ lineHeight: '1.5' }}>
+              <div style={{ marginBottom: '15px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                  <div><strong>Node ID:</strong> {selectedNode.id}</div>
+                  <div><strong>Depth:</strong> {selectedNode.depth}</div>
+                  <div><strong>Value:</strong> {selectedNode.value.toFixed(4)}</div>
+                  <div><strong>U (Uncertainty):</strong> {selectedNode.U.toFixed(4)}</div>
+                  <div><strong>Expected Value:</strong> {selectedNode.expval.toFixed(4)}</div>
+                  <div><strong>Expected Opp Value:</strong> {selectedNode.expoppval.toFixed(4)}</div>
+                  <div><strong>Terminal:</strong> {selectedNode.isTerminal ? 'Yes' : 'No'}</div>
+                  <div><strong>Children:</strong> {selectedNode.children.length}</div>
+                </div>
+                <div style={{ marginTop: '10px' }}>
+                  <div><strong>FEN:</strong></div>
+                  <div style={{ 
+                    backgroundColor: '#f8f9fa', 
+                    padding: '8px', 
+                    borderRadius: '4px', 
+                    fontSize: '12px',
+                    wordBreak: 'break-all',
+                    marginTop: '5px'
+                  }}>
+                    {selectedNode.fen}
+                  </div>
+                </div>
+              </div>
+              
+              {selectedNode.potentialChildren.length > 0 && (
+                <div>
+                  <h4 style={{ margin: '0 0 10px 0', color: '#495057' }}>
+                    Potential Moves ({selectedNode.potentialChildren.length})
+                  </h4>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{
+                      width: '100%',
+                      borderCollapse: 'collapse',
+                      fontSize: '12px'
+                    }}>
+                      <thead>
+                        <tr style={{ backgroundColor: '#f8f9fa' }}>
+                          <th style={{ padding: '8px', textAlign: 'left', borderBottom: '1px solid #dee2e6' }}>#</th>
+                          <th style={{ padding: '8px', textAlign: 'left', borderBottom: '1px solid #dee2e6' }}>Move</th>
+                          <th style={{ padding: '8px', textAlign: 'left', borderBottom: '1px solid #dee2e6' }}>UCI</th>
+                          <th style={{ padding: '8px', textAlign: 'right', borderBottom: '1px solid #dee2e6' }}>Prob</th>
+                          <th style={{ padding: '8px', textAlign: 'right', borderBottom: '1px solid #dee2e6' }}>U</th>
+                          <th style={{ padding: '8px', textAlign: 'right', borderBottom: '1px solid #dee2e6' }}>Q</th>
+                          <th style={{ padding: '8px', textAlign: 'right', borderBottom: '1px solid #dee2e6' }}>D</th>
+                          <th style={{ padding: '8px', textAlign: 'center', borderBottom: '1px solid #dee2e6' }}>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedNode.potentialChildren.map((child, index) => {
+                          const isExpanded = index < selectedNode.children.length;
+                          return (
+                            <tr key={index} style={{ 
+                              backgroundColor: isExpanded ? '#e8f5e8' : 'transparent',
+                              borderBottom: '1px solid #f1f3f4'
+                            }}>
+                              <td style={{ padding: '6px 8px' }}>{index + 1}</td>
+                              <td style={{ padding: '6px 8px', fontWeight: 'bold' }}>{child.move_san}</td>
+                              <td style={{ padding: '6px 8px', color: '#6c757d' }}>{child.move}</td>
+                              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{child.probability.toFixed(4)}</td>
+                              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{child.U.toFixed(4)}</td>
+                              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{child.Q.toFixed(4)}</td>
+                              <td style={{ padding: '6px 8px', textAlign: 'right' }}>{child.D.toFixed(4)}</td>
+                              <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                                <span style={{
+                                  padding: '2px 6px',
+                                  borderRadius: '3px',
+                                  fontSize: '10px',
+                                  backgroundColor: isExpanded ? '#d4edda' : '#f8d7da',
+                                  color: isExpanded ? '#155724' : '#721c24'
+                                }}>
+                                  {isExpanded ? 'EXPANDED' : 'NOT EXPANDED'}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Legend - positioned when no node is selected */}
+        {!selectedNode && (
+          <div style={{
+            position: 'fixed',
+            top: '80px',
+            right: '20px',
+            width: '400px',
+            backgroundColor: '#ffffff',
+            border: '1px solid #dee2e6',
+            borderRadius: '8px',
+            padding: '20px',
+            fontFamily: 'monospace',
+            fontSize: '14px',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+            zIndex: 1000
+          }}>
             <div style={{ color: '#6c757d', textAlign: 'center' }}>
               <p>Click on a node to view details</p>
               <div style={{ marginTop: '30px' }}>
@@ -370,8 +507,8 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
                 </div>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );

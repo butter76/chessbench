@@ -8,7 +8,8 @@ import {
   useEdgesState,
   Node,
   ReactFlowProvider,
-  Panel
+  Panel,
+  XYPosition
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { TreeNode } from '../types/SearchLog';
@@ -31,6 +32,8 @@ const edgeTypes = {
 
 const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
+  const [draggedSubtree, setDraggedSubtree] = useState<Set<string>>(new Set());
+  const [dragStartPositions, setDragStartPositions] = useState<Map<string, XYPosition>>(new Map());
 
   const treeData = useMemo(() => {
     if (!logText.trim()) return null;
@@ -44,6 +47,77 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, , onEdgesChange] = useEdgesState(initialEdges);
+
+  // Helper function to find all descendant node IDs
+  const findSubtreeNodeIds = useCallback((nodeId: string, edges: any[]): Set<string> => {
+    const subtreeIds = new Set<string>();
+    subtreeIds.add(nodeId);
+    
+    const findChildren = (currentId: string) => {
+      const childEdges = edges.filter(edge => edge.source === currentId);
+      childEdges.forEach(edge => {
+        if (!subtreeIds.has(edge.target)) {
+          subtreeIds.add(edge.target);
+          findChildren(edge.target);
+        }
+      });
+    };
+    
+    findChildren(nodeId);
+    return subtreeIds;
+  }, []);
+
+  // Handle drag start - identify the subtree and store initial positions
+  const handleNodeDragStart = useCallback((event: React.MouseEvent, node: Node) => {
+    const subtreeIds = findSubtreeNodeIds(node.id, edges);
+    setDraggedSubtree(subtreeIds);
+    
+    // Store initial positions for all nodes in the subtree
+    const initialPositions = new Map<string, XYPosition>();
+    nodes.forEach(n => {
+      if (subtreeIds.has(n.id)) {
+        initialPositions.set(n.id, { x: n.position.x, y: n.position.y });
+      }
+    });
+    setDragStartPositions(initialPositions);
+  }, [nodes, edges, findSubtreeNodeIds]);
+
+  // Handle drag - move the entire subtree
+  const handleNodeDrag = useCallback((event: React.MouseEvent, node: Node) => {
+    if (draggedSubtree.size === 0) return;
+    
+    const draggedNodeStartPos = dragStartPositions.get(node.id);
+    if (!draggedNodeStartPos) return;
+    
+    // Calculate the offset from the original position
+    const deltaX = node.position.x - draggedNodeStartPos.x;
+    const deltaY = node.position.y - draggedNodeStartPos.y;
+    
+    // Update positions of all nodes in the subtree
+    setNodes(currentNodes => 
+      currentNodes.map(n => {
+        if (draggedSubtree.has(n.id) && n.id !== node.id) {
+          const startPos = dragStartPositions.get(n.id);
+          if (startPos) {
+            return {
+              ...n,
+              position: {
+                x: startPos.x + deltaX,
+                y: startPos.y + deltaY
+              }
+            };
+          }
+        }
+        return n;
+      })
+    );
+  }, [draggedSubtree, dragStartPositions, setNodes]);
+
+  // Handle drag stop - clear the dragged subtree state
+  const handleNodeDragStop = useCallback((event: React.MouseEvent, node: Node) => {
+    setDraggedSubtree(new Set());
+    setDragStartPositions(new Map());
+  }, []);
 
   // Auto layout when tree data is first loaded
   useEffect(() => {
@@ -73,6 +147,34 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
     }
   }, [selectedNode, setNodes]);
 
+  // Update node styles to show which nodes are being dragged
+  useEffect(() => {
+    if (draggedSubtree.size > 0) {
+      setNodes(currentNodes => 
+        currentNodes.map(node => ({
+          ...node,
+          style: {
+            ...node.style,
+            opacity: draggedSubtree.has(node.id) ? 0.8 : 1.0,
+            outline: draggedSubtree.has(node.id) ? '2px solid #4ecdc4' : 'none'
+          }
+        }))
+      );
+    } else {
+      // Clear drag styling
+      setNodes(currentNodes => 
+        currentNodes.map(node => ({
+          ...node,
+          style: {
+            ...node.style,
+            opacity: 1.0,
+            outline: 'none'
+          }
+        }))
+      );
+    }
+  }, [draggedSubtree, setNodes]);
+
   const handleNodeClick = useCallback((event: React.MouseEvent, node: Node) => {
     const nodeData = node.data as ReactFlowNodeData;
     setSelectedNode(nodeData.node);
@@ -88,6 +190,73 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
   const handleClearSelection = useCallback(() => {
     setSelectedNode(null);
   }, []);
+
+  // Auto layout function for subtrees
+  const autoLayoutSubtree = useCallback((rootNodeId: string) => {
+    const subtreeNodeIds = findSubtreeNodeIds(rootNodeId, edges);
+    const subtreeNodes = nodes.filter(node => subtreeNodeIds.has(node.id));
+    
+    if (subtreeNodes.length === 0) return;
+    
+    // Find the root node in the subtree
+    const rootNode = subtreeNodes.find(node => node.id === rootNodeId);
+    if (!rootNode) return;
+    
+    // Group subtree nodes by their depth relative to the subtree root
+    const rootDepth = (rootNode.data as ReactFlowNodeData).node.depth;
+    const nodesByLevel = new Map<number, Node<ReactFlowNodeData>[]>();
+    
+    subtreeNodes.forEach(node => {
+      const treeNode = (node.data as ReactFlowNodeData).node;
+      const relativeLevel = treeNode.depth - rootDepth;
+      
+      if (!nodesByLevel.has(relativeLevel)) {
+        nodesByLevel.set(relativeLevel, []);
+      }
+      nodesByLevel.get(relativeLevel)!.push(node);
+    });
+    
+    // Layout constants
+    const NODE_WIDTH = 160;
+    const LEVEL_HEIGHT = 250;
+    const MIN_NODE_SPACING = 20;
+    
+    // Calculate new positions relative to the root node
+    const rootPosition = rootNode.position;
+    const updatedPositions = new Map<string, { x: number; y: number }>();
+    
+    nodesByLevel.forEach((levelNodes, level) => {
+      const totalWidth = levelNodes.length * (NODE_WIDTH + MIN_NODE_SPACING);
+      const startX = rootPosition.x - totalWidth / 2;
+      
+      levelNodes.forEach((node, index) => {
+        const x = startX + (index * (NODE_WIDTH + MIN_NODE_SPACING)) + (NODE_WIDTH / 2);
+        const y = rootPosition.y + (level * LEVEL_HEIGHT);
+        
+        updatedPositions.set(node.id, { x, y });
+      });
+    });
+    
+    // Update node positions
+    setNodes(currentNodes => 
+      currentNodes.map(node => {
+        const newPosition = updatedPositions.get(node.id);
+        if (newPosition) {
+          return {
+            ...node,
+            position: newPosition
+          };
+        }
+        return node;
+      })
+    );
+  }, [nodes, edges, findSubtreeNodeIds, setNodes]);
+
+  const handleSubtreeAutoLayout = useCallback(() => {
+    if (selectedNode) {
+      autoLayoutSubtree(selectedNode.id);
+    }
+  }, [selectedNode, autoLayoutSubtree]);
 
   // Component to render formatted node details
   const NodeDetailsPanel: React.FC<{ node: TreeNode }> = ({ node }) => {
@@ -105,6 +274,37 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
 
     return (
       <div>
+        {/* Subtree Auto Layout Button */}
+        <div style={{ marginBottom: '20px' }}>
+          <button
+            onClick={handleSubtreeAutoLayout}
+            style={{
+              width: '100%',
+              padding: '8px 12px',
+              fontSize: '13px',
+              backgroundColor: '#007bff',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px',
+              transition: 'background-color 0.2s'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = '#0056b3';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = '#007bff';
+            }}
+            title={`Auto-layout this subtree to organize its ${findSubtreeNodeIds(node.id, edges).size} nodes`}
+          >
+            🔄 Auto Layout Subtree ({findSubtreeNodeIds(node.id, edges).size} nodes)
+          </button>
+        </div>
+
         {/* Basic Node Information */}
         <div style={{ marginBottom: '20px' }}>
           <div style={{ 
@@ -347,6 +547,9 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onNodeClick={handleNodeClick}
+          onNodeDragStart={handleNodeDragStart}
+          onNodeDrag={handleNodeDrag}
+          onNodeDragStop={handleNodeDragStop}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           fitView
@@ -413,8 +616,27 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
                 fontSize: '12px',
                 color: '#666',
                 fontFamily: 'monospace',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '2px'
               }}>
-                Nodes: {nodes.length} | Max Depth: {treeData.maxDepth}
+                <div>Nodes: {nodes.length} | Max Depth: {treeData.maxDepth}</div>
+                {draggedSubtree.size > 0 && (
+                  <div style={{ 
+                    color: '#4ecdc4',
+                    fontWeight: 'bold',
+                    fontSize: '11px'
+                  }}>
+                    Dragging subtree: {draggedSubtree.size} nodes
+                  </div>
+                )}
+                <div style={{ 
+                  fontSize: '10px',
+                  color: '#999',
+                  fontStyle: 'italic'
+                }}>
+                  💡 Drag any node to move its entire subtree
+                </div>
               </div>
             </div>
           </Panel>

@@ -5,7 +5,7 @@ import { LinkHorizontal } from '@visx/shape';
 import { Zoom } from '@visx/zoom';
 import { TreeNode } from '../types/SearchLog';
 import { parseSearchLogs, formatNodeDetails } from '../utils/logParser';
-import { getLastMoveForNode } from '../utils/moveUtils';
+import { getLastMoveForNode, getBorderColorForPosition } from '../utils/moveUtils';
 import ChessBoard from './ChessBoard';
 
 interface SearchTreeViewerProps {
@@ -35,7 +35,11 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
 
 
   const getNodeBorderColor = useCallback((node: TreeNode) => {
-    return selectedNode?.id === node.id ? '#339af0' : '#adb5bd';
+    return getBorderColorForPosition(node.fen);
+  }, []);
+
+  const isNodeSelected = useCallback((node: TreeNode) => {
+    return selectedNode?.id === node.id;
   }, [selectedNode]);
 
   if (!treeData || !treeData.root) {
@@ -243,7 +247,19 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
                             onClick={() => handleNodeClick(nodeData)}
                             style={{ cursor: 'pointer' }}
                           >
-                            {/* Background container */}
+                            {/* Background container with double border effect */}
+                            {/* Outer black border for visibility */}
+                            <rect
+                              x={-NODE_WIDTH / 2 - 1}
+                              y={-NODE_HEIGHT / 2 - 1}
+                              width={NODE_WIDTH + 2}
+                              height={NODE_HEIGHT + 2}
+                              fill="none"
+                              stroke="#000000"
+                              strokeWidth={1}
+                              rx={8}
+                            />
+                            {/* Main background with colored border */}
                             <rect
                               x={-NODE_WIDTH / 2}
                               y={-NODE_HEIGHT / 2}
@@ -251,10 +267,10 @@ const SearchTreeViewer: React.FC<SearchTreeViewerProps> = ({ logText }) => {
                               height={NODE_HEIGHT}
                               fill="white"
                               stroke={getNodeBorderColor(nodeData)}
-                              strokeWidth={isSelected ? 3 : 1}
+                              strokeWidth={3}
                               rx={8}
                               style={{
-                                filter: isSelected ? 'drop-shadow(0 0 6px rgba(51, 154, 240, 0.4))' : 'none'
+                                filter: isNodeSelected(nodeData) ? 'drop-shadow(0 0 8px rgba(51, 154, 240, 0.6))' : 'none'
                               }}
                             />
                             

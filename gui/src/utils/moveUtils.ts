@@ -25,6 +25,47 @@ export function parseUCIMove(moveString: string): LastMove | null {
 }
 
 /**
+ * Parses FEN notation to determine whose turn it is to move
+ * @param fen FEN string like "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+ * @returns 'w' for white, 'b' for black, or null if invalid
+ */
+export function getActivePlayerFromFEN(fen: string): 'w' | 'b' | null {
+  if (!fen) {
+    return null;
+  }
+
+  const parts = fen.split(' ');
+  if (parts.length < 2) {
+    return null;
+  }
+
+  const activeColor = parts[1];
+  if (activeColor === 'w' || activeColor === 'b') {
+    return activeColor;
+  }
+
+  return null;
+}
+
+/**
+ * Gets the border color for a chess position based on whose turn it is
+ * @param fen FEN string
+ * @returns CSS color string for the border
+ */
+export function getBorderColorForPosition(fen: string): string {
+  const activePlayer = getActivePlayerFromFEN(fen);
+  
+  switch (activePlayer) {
+    case 'w':
+      return '#ffffff'; // White border for white to move
+    case 'b':
+      return '#000000'; // Black border for black to move
+    default:
+      return '#adb5bd'; // Default gray border if unable to determine
+  }
+}
+
+/**
  * Determines the last move that led to a specific node by looking at its parent's potential children
  */
 export function getLastMoveForNode(node: TreeNode, nodes: Map<string, TreeNode>): LastMove | null {

@@ -31,7 +31,7 @@ def test_search_logging():
         limit=chess.engine.Limit(time=1.0),
         strategy=MoveSelectionStrategy.PVS,  # Use PVS search
         search_depth=2.0,
-        num_nodes=50,  # Small number for testing
+        num_nodes=400,
         verbose=True  # Enable logging
     )
     

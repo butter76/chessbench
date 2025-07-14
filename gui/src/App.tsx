@@ -53,7 +53,7 @@ const App: React.FC = () => {
     setLogText(sampleLogText);
     setFileName('sample_data.json');
     setError('');
-  }, []);
+  }, [sampleLogText]);
 
   if (logText.trim()) {
     return <SearchTreeViewer logText={logText} />;

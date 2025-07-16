@@ -265,7 +265,7 @@ class PVSSearch(SearchAlgorithm):
                 child_node = self._create_node(child_board, inference_func=self.inference_func, parent=node, tt=tt, parent_move=move)
                 node.add_child(child_node, move)
 
-                self._backpropagate_policy_updates(child_node, move=move)
+                self._backpropagate_policy_updates(child_node, max_eval, move=move)
 
             child_re_searches = 0
             RE_SEARCH_DEPTH = 0.2
@@ -376,7 +376,7 @@ class PVSSearch(SearchAlgorithm):
         
         return max_eval, best_move
     
-    def _backpropagate_policy_updates(self, new_node: Node, move: Optional[chess.Move] = None):
+    def _backpropagate_policy_updates(self, new_node: Node, max_eval: float, move: Optional[chess.Move] = None):
         """
         Backpropagate policy updates from a newly created node up to the root.
         
@@ -389,81 +389,45 @@ class PVSSearch(SearchAlgorithm):
         parent = new_node.parent
         if parent is None:
             return
-        
-        # Compute backup values
-        # backup_other_turn and backup_same_turn range analysis:
-        # Given value ∈ [-1, 1] and wdl_stdev ∈ [0, 1]:
-        backup_other_turn = (new_node.expoppval - parent.expval) / (math.exp(1) - 1)
-        backup_same_turn = (new_node.expval - parent.expoppval) / (math.exp(1) - 1)
-        
-        
-        # Safety check for backup values
-        if backup_other_turn > 1 or backup_other_turn < -1:
-            assert False, f"backup_other_turn={backup_other_turn} is outside expected range [-1, 1]. expoppval={new_node.expoppval}, expval={parent.expval}"
-        
-        if backup_same_turn > 1 or backup_same_turn < -1:
-            assert False, f"backup_same_turn={backup_same_turn} is outside expected range [-1, 1]. expval={new_node.expval}, expoppval={parent.expoppval}"
-
-        
-        
-        # Find the path from parent to root and update policies
 
         # Find the policy value from parent to the newly created node
-        parent_to_node_policy = 1.0  # Default value
+        parent_to_node_policy = 1.0
         found_policy_entry = False
-        for policy_move, prob, _, _ in parent.policy:
+        parent_metadata_of_child = None
+        parent_policy_index_of_child = None
+        for policy_index, (policy_move, prob, _, metadata) in enumerate(parent.policy):
             if policy_move == move:
                 parent_to_node_policy = prob
                 found_policy_entry = True
+                parent_metadata_of_child = metadata
+                parent_policy_index_of_child = policy_index
                 break
         
         if not found_policy_entry:
             assert found_policy_entry, "Could not find policy entry from parent to new node"
+
+        backup = ((new_node.value * -1) - parent_metadata_of_child['Q']) / (parent.value + 1.01)
+
+        if backup > 0:
+            backup *= (math.e - 1)
+
+
+        if backup < 0:
+            backup /= (math.e - 1)
+
+
+        backup = max(-0.8, backup)
+
+
+        policy_update = parent_to_node_policy * backup
+
+        policy_update = max(min(0.5, policy_update), 0)
+
+        new_policy_prob = parent_to_node_policy + policy_update
+
+        parent.policy[parent_policy_index_of_child] = (move, new_policy_prob, new_node, parent.policy[parent_policy_index_of_child][3])
         
-        depth_factor = parent_to_node_policy 
         
-        current_node = parent
-        distance_from_current = 1  # Distance from the newly created node
-
-        while current_node is not None and current_node.parent is not None:
-            distance_from_current += 1
-            
-            # Find the move that leads from current_node to its parent
-            parent_node = current_node.parent
-            move_to_parent = None
-            policy_value = 1  # Default policy value
-            policy_index = -1
-            
-            for i, (policy_move, policy_prob, policy_child, _) in enumerate(parent_node.policy):
-                if policy_child is current_node:
-                    move_to_parent = policy_move
-                    policy_value = policy_prob
-                    policy_index = i
-                    break
-            
-            if move_to_parent is not None:
-                value_effect = .95 #scalar 0 to 1. 0 is no updating, 1 is full updating.
-
-                if distance_from_current % 2 == 0:  # Even distance from current node #=1 in the other-same swapped version
-                    # Update with backup_same_turn
-                    policy_update = depth_factor * backup_same_turn*value_effect * policy_value
-                    new_policy_prob = policy_value + policy_update
-                else:  # Odd distance from current node
-                    # Update with backup_other_turn
-                    policy_update = depth_factor * backup_other_turn*value_effect * policy_value
-                    new_policy_prob = policy_value + policy_update
-                
-                # Update the policy entry
-                parent_node.policy[policy_index] = (move_to_parent, new_policy_prob, current_node, parent_node.policy[policy_index][3])
-                
-
-                # Update depth_factor recursively
-                depth_factor = depth_factor * policy_value
-
-                #we will normalize only right before we call on a node!
-                #parent_node.normalize()
-            
-            current_node = parent_node
         
         return
     

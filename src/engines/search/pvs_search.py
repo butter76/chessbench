@@ -408,22 +408,7 @@ class PVSSearch(SearchAlgorithm):
 
         backup = ((new_node.value * -1) - parent_metadata_of_child['Q']) / (parent.value + 1.01)
 
-        if backup > 0:
-            backup *= (math.e - 1)
-
-
-        if backup < 0:
-            backup /= (math.e - 1)
-
-
-        backup = max(-0.8, backup)
-
-
-        policy_update = parent_to_node_policy * backup
-
-        policy_update = max(min(0.5, policy_update), 0)
-
-        new_policy_prob = parent_to_node_policy + policy_update
+        new_policy_prob = parent_to_node_policy * math.exp(backup)
 
         parent.policy[parent_policy_index_of_child] = (move, new_policy_prob, new_node, parent.policy[parent_policy_index_of_child][3])
         

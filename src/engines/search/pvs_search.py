@@ -178,6 +178,7 @@ class PVSSearch(SearchAlgorithm):
     
     def _pvs_root(self, root: Node, depth: float, history: Dict[str, int], tt: Dict[str, TTEntry], f=None) -> tuple[float, Optional[chess.Move]]:
         """Root level PVS call."""
+        self.root_depth = depth
         return self._pvs(root, depth, -1.0, 1.0, history, tt, NodeType.PV_NODE, 0)
     
     def _pvs(self, node: Node, depth: float, alpha: float, beta: float, 
@@ -209,6 +210,11 @@ class PVSSearch(SearchAlgorithm):
         node.sort_and_normalize()
         
         # Leaf node evaluation
+        entropy_before = self.root_depth - depth
+        entropy_after = 0
+        DEPTH_WINDOW = -0.3
+        HARD_DEPTH_WINDOW = -0.6
+        reduction_error = -depth_reduction/20
         total_move_weight = 0
         weight_divisor = 1.0
         unexpanded_count = 0
@@ -221,8 +227,17 @@ class PVSSearch(SearchAlgorithm):
             
             total_move_weight += prob
 
-        if node.is_leaf() and depth <= math.log(max(0, unexpanded_count) + 1e-6) + depth_reduction:
-            return node.value, None
+            new_depth = depth + math.log(prob + 1e-6) - 0.1
+
+            if child_node is None:
+                if new_depth < depth_reduction + DEPTH_WINDOW + reduction_error:
+                    continue
+                    
+            entropy_after += max((self.root_depth - depth_reduction), self.root_depth - new_depth) * (1.05 * prob)
+
+        if node.is_leaf():
+            if depth <= depth_reduction or entropy_before > entropy_after:
+                return node.value, None
         
         # Safety check against excessive recursion
         if rec_depth > 50:
@@ -253,9 +268,8 @@ class PVSSearch(SearchAlgorithm):
                 depth_reduction = -2 * math.log(metadata['U'] + 1e-6)
             
             # Skip low probability moves if depth is too low
-            if new_depth <= depth_reduction and child_node is None:
-                if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
-                    total_move_weight += move_weight
+            if new_depth <= depth_reduction + HARD_DEPTH_WINDOW + 2 * reduction_error and child_node is None:
+                if i > 0:
                     continue
             
             # Create child node if needed

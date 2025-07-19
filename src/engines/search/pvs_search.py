@@ -221,7 +221,7 @@ class PVSSearch(SearchAlgorithm):
             
             total_move_weight += prob
 
-        if node.is_leaf() and depth <= math.log(unexpanded_count + 1e-6) + depth_reduction:
+        if node.is_leaf() and depth <= math.log(max(0, unexpanded_count) + 1e-6) + depth_reduction:
             return node.value, None
         
         # Safety check against excessive recursion
@@ -301,6 +301,8 @@ class PVSSearch(SearchAlgorithm):
                     if new_depth < best_move_depth:
                         # Re-search with deeper depth
                         new_depth += RE_SEARCH_DEPTH
+                        if new_depth > best_move_depth:
+                            new_depth = best_move_depth + RE_SEARCH_DEPTH
                         child_re_searches += 1
                         continue
                     else:

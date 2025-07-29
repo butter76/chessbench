@@ -5,6 +5,7 @@ from enum import Enum, auto
 
 import chess
 import chess.engine
+import chess.syzygy
 import numpy as np
 from collections import defaultdict
 
@@ -81,6 +82,10 @@ class MyTransformerEngine(engine.Engine):
             self.model = cast(ChessTransformer, torch.compile(self.model))
 
         self.model.load_state_dict(checkpoint['model'], strict=False)
+        self.tablebase = chess.syzygy.Tablebase(max_fds=128)
+        self.tablebase.add_directory("../syzygy_tables/3-4-5/")
+        self.tablebase.add_directory("../syzygy_tables/6-WDL/")
+        self.tablebase.add_directory("../syzygy_tables/6-DTZ/")
 
         # Initialize search algorithms
         self.search_algorithms = {
@@ -135,6 +140,7 @@ class MyTransformerEngine(engine.Engine):
         search_kwargs = {
             'num_nodes': self.num_nodes,
             'num_rollouts': self.num_nodes,
+            'tablebase': self.tablebase,
         }
         
         # Perform the search

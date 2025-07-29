@@ -184,7 +184,6 @@ class PVSSearch(SearchAlgorithm):
             root_piece_count = len(root.board.piece_map())
             root_tb_wdl = self.tablebase.probe_wdl(root.board)
             root_tb_dtz = self.tablebase.probe_dtz(root.board)
-            print("ROOT", root.board.fen(), root_tb_wdl, root_tb_dtz)
             for move in root.board.legal_moves:
                 child_board = root.board.copy()
                 child_board.push(move)
@@ -193,7 +192,6 @@ class PVSSearch(SearchAlgorithm):
 
                 tb_wdl = self.tablebase.probe_wdl(child_board)
                 tb_dtz = self.tablebase.probe_dtz(child_board)
-                print("CHILD", child_board.fen(), tb_wdl, tb_dtz)
                 if root_tb_wdl == tb_wdl * -1:
                     # This move preserves the WDL result
                     if root_tb_dtz >= (tb_dtz * -1) + 1 or child_board.halfmove_clock == 0:

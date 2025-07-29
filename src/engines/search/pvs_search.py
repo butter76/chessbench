@@ -116,6 +116,7 @@ class PVSSearch(SearchAlgorithm):
         Perform PVS search with iterative deepening.
         """
         num_nodes = kwargs.get('num_nodes', 400)
+        self.tablebase = kwargs.get('tablebase', None)
         
         # Store inference function for use in node creation
         self.inference_func = inference_func
@@ -146,6 +147,7 @@ class PVSSearch(SearchAlgorithm):
         self.metrics['depth'] = current_depth
         
         if best_move is None:
+            assert False, "No best move found"
             # Fallback - just pick the first move from policy
             if root.policy:
                 best_move = root.policy[0][0]
@@ -178,6 +180,26 @@ class PVSSearch(SearchAlgorithm):
     
     def _pvs_root(self, root: Node, depth: float, history: Dict[str, int], tt: Dict[str, TTEntry], f=None) -> tuple[float, Optional[chess.Move]]:
         """Root level PVS call."""
+        if (len(root.board.piece_map()) <= 6):
+            root_piece_count = len(root.board.piece_map())
+            root_tb_wdl = self.tablebase.probe_wdl(root.board)
+            root_tb_dtz = self.tablebase.probe_dtz(root.board)
+            print("ROOT", root.board.fen(), root_tb_wdl, root_tb_dtz)
+            for move in root.board.legal_moves:
+                child_board = root.board.copy()
+                child_board.push(move)
+                if child_board.is_checkmate():
+                    return 1.0, move
+
+                tb_wdl = self.tablebase.probe_wdl(child_board)
+                tb_dtz = self.tablebase.probe_dtz(child_board)
+                print("CHILD", child_board.fen(), tb_wdl, tb_dtz)
+                if root_tb_wdl == tb_wdl * -1:
+                    # This move preserves the WDL result
+                    if root_tb_dtz >= (tb_dtz * -1) + 1 or child_board.halfmove_clock == 0:
+                        return 0.0, move
+            assert False, "No best move found"
+        self.root_depth = depth
         return self._pvs(root, depth, -1.0, 1.0, history, tt, NodeType.PV_NODE, 0)
     
     def _pvs(self, node: Node, depth: float, alpha: float, beta: float, 
@@ -428,6 +450,14 @@ class PVSSearch(SearchAlgorithm):
             terminal_value = -1.0
         elif board.is_stalemate() or board.is_insufficient_material() or board.is_fifty_moves():
             terminal_value = 0.0
+        elif len(board.piece_map()) <= 6:
+            tb_output = self.tablebase.probe_wdl(board)
+            if tb_output == 2:
+                terminal_value = 1.0
+            elif tb_output == -2:
+                terminal_value = -1.0
+            else:
+                terminal_value = 0.0
 
         if terminal_value is not None:
             new_node = Node(board=board, parent=parent, value=terminal_value, terminal=True, expval = math.exp(terminal_value/2+1/2), expoppval = math.exp(-terminal_value/2+1/2))

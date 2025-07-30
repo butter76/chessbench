@@ -16,6 +16,7 @@
 """Implements a stockfish engine."""
 
 import os
+import platform
 
 import chess
 
@@ -28,6 +29,7 @@ class StockfishEngine(engine.Engine):
   def __init__(
       self,
       limit: chess.engine.Limit,
+      syzygy_path: str | None = None,
   ) -> None:
     self._limit = limit
     self._skill_level = None
@@ -36,6 +38,31 @@ class StockfishEngine(engine.Engine):
         '../Stockfish/src/stockfish',
     )
     self._raw_engine = chess.engine.SimpleEngine.popen_uci(bin_path)
+    
+    # Configure Syzygy tablebase path if provided
+    if syzygy_path is not None:
+      
+      # Stockfish needs all subdirectories specified explicitly
+      # Check if the path contains subdirectories
+      separator = ';' if platform.system() == 'Windows' else ':'
+      
+      # Common subdirectory names for Syzygy tablebases
+      subdirs = ['3-4-5', '6-DTZ', '6-WDL']
+      paths_to_check = []
+      
+      # Check if subdirectories exist and add them to the path
+      for subdir in subdirs:
+        subdir_path = os.path.join(syzygy_path, subdir)
+        if os.path.exists(subdir_path) and os.path.isdir(subdir_path):
+          paths_to_check.append(subdir_path)
+      
+      # If we found subdirectories, use them; otherwise use the main path
+      if paths_to_check:
+        syzygy_path_config = separator.join(paths_to_check)
+      else:
+        syzygy_path_config = syzygy_path
+      
+      self._raw_engine.configure({'SyzygyPath': syzygy_path_config})
 
   def __del__(self) -> None:
     self._raw_engine.close()

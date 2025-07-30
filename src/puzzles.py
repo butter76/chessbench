@@ -113,6 +113,17 @@ _CHECKPOINT = flags.DEFINE_string(
     help='The checkpoint to use for MyTransformerEngine.',
 )
 
+_USE_STOCKFISH = flags.DEFINE_boolean(
+    name='use_stockfish',
+    default=False,
+    help='Whether to use Stockfish engine instead of other engines.',
+)
+
+_USE_SYZYGY = flags.DEFINE_boolean(
+    name='use_syzygy',
+    default=False,
+    help='Whether to enable Syzygy tablebase support for Stockfish.',
+)
 
 _NUM_PROCESSES = flags.DEFINE_integer(
     name='num_processes',
@@ -129,10 +140,16 @@ _NAME = flags.DEFINE_string(
 # Global variable to store the engine in each worker process
 worker_engine = None
 
-def init_worker(strategy, network, depth, num_nodes, checkpoint_path):
+def init_worker(strategy, network, depth, num_nodes, checkpoint_path, use_stockfish, use_syzygy):
     """Initialize worker process with an engine instance."""
     global worker_engine
-    if network is not None:
+    if use_stockfish:
+        # Use Stockfish engine with num_nodes limit
+        syzygy_path = None
+        if use_syzygy:
+            syzygy_path = os.path.join(os.getcwd(), '../syzygy_tables')
+        worker_engine = StockfishEngine(chess.engine.Limit(nodes=num_nodes), syzygy_path=syzygy_path)
+    elif network is not None:
         if strategy == 'value':
             # DEPTH 1 SEARCH
             worker_engine = AllMovesLc0Engine(chess.engine.Limit(nodes=1), network=network)
@@ -338,9 +355,12 @@ def main(argv: Sequence[str]) -> None:
     num_nodes = _NUM_NODES.value
     num_processes = _NUM_PROCESSES.value or mp.cpu_count()
     name = _NAME.value if _NAME.value is not None else strategy
+    use_stockfish = _USE_STOCKFISH.value
+    use_syzygy = _USE_SYZYGY.value
     
-    MY_ENGINE = (network is None)
+    MY_ENGINE = (network is None and not use_stockfish)
     checkpoint_path = '../checkpoints/p1-standard-take2/checkpoint_300000.pt' if _CHECKPOINT.value is None else _CHECKPOINT.value
+    use_stockfish = _USE_STOCKFISH.value
 
     print(f"Using {num_processes} processes for evaluation")
 
@@ -366,7 +386,7 @@ def main(argv: Sequence[str]) -> None:
             with mp.Pool(
                 processes=num_processes, 
                 initializer=init_worker,
-                initargs=(strategy, network, depth, num_nodes, checkpoint_path)
+                initargs=(strategy, network, depth, num_nodes, checkpoint_path, use_stockfish, use_syzygy)
             ) as pool:
                 # Use imap for streaming results with progress bar
                 pbar = tqdm(
@@ -453,7 +473,7 @@ def main(argv: Sequence[str]) -> None:
         with mp.Pool(
             processes=num_processes,
             initializer=init_worker,
-            initargs=(strategy, network, depth, num_nodes, checkpoint_path)
+            initargs=(strategy, network, depth, num_nodes, checkpoint_path, use_stockfish, use_syzygy)
         ) as pool:
             pbar = tqdm(
                 pool.imap(worker_evaluate_position, positions_to_evaluate),

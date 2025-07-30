@@ -12,7 +12,6 @@ import torch.optim as optim
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 torch.set_default_dtype(torch.float32)
-torch.set_float32_matmul_precision('high')
 torch.set_printoptions(profile="full")
 from tqdm import tqdm
 
@@ -21,7 +20,7 @@ from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTran
 from searchless_chess.src.puzzles import evaluate_puzzle_from_pandas_row
 from searchless_chess.src.dataset import load_datasource
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
-from searchless_chess.src.optimizer.splus import SPlus
+
 
 def train(
     train_config: config_lib.TrainConfig,
@@ -70,10 +69,10 @@ def train(
         model = model.to(device)
 
     # Setup optimizer
-    optimizer = SPlus(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_config.learning_rate,
-        weight_decay=train_config.weight_decay,
+        weight_decay=train_config.weight_decay
     )
 
     if checkpoint is not None and 'optimizer' in checkpoint:
@@ -94,23 +93,12 @@ def train(
     #     eta_min=train_config.learning_rate / 100  # Minimum learning rate
     # )
 
-    scheduler1 = torch.optim.lr_scheduler.LinearLR(
+    scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1.0,
-        end_factor=0.77,
-        total_iters=90,
-    )
-
-    scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=80,
-        eta_min=0.01,
-    )
-
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer,
-        schedulers=[scheduler1, scheduler2],
-        milestones=[90],
+        end_factor=0.25,  # 4e-4 -> 1e-4
+        total_iters=100,  # Number of epochs for the decay
+        last_epoch=-1
     )
 
     if checkpoint is not None and 'scheduler' in checkpoint:
@@ -126,7 +114,6 @@ def train(
     
     # Training loop
     for epoch in range(num_epochs):
-        optimizer.train()
         model.train()
         metrics = {}
         total_loss = 0
@@ -203,7 +190,6 @@ def train(
         pbar.close()
 
         # Evaluate on validation set
-        optimizer.eval()
         model.eval()
 
         val_metrics = {}
@@ -310,16 +296,16 @@ def main():
     
     # Create model config
     model_config = TransformerConfig(
-        embedding_dim=512,
+        embedding_dim=256,
         num_layers=16,
-        num_heads=32,
+        num_heads=16,
         widening_factor=3,
         dropout=0,
     )
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=0.1,
+        learning_rate=4e-4,
         data=config_lib.DataConfig(
             batch_size=2048,
             shuffle=True,
@@ -343,10 +329,10 @@ def main():
         compile=True,
         max_grad_norm=1.0,
         log_frequency=1,
-        num_steps=170 * 1000 * 3,
+        num_steps=100 * 1000 * 3,
         ckpt_frequency=1000 * 3,
         save_frequency=1000 * 3,
-        save_checkpoint_path='../checkpoints/p2/',
+        save_checkpoint_path='../checkpoints/p2-small-with-training-fix-2/',
     )
     
     # Train model

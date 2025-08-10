@@ -1,14 +1,12 @@
 """PyTorch implementation of the training algorithm for action-value prediction."""
 
-from itertools import cycle
 import os
-from typing import Any, cast
+from typing import cast
 
 import chess
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 torch.set_default_dtype(torch.float32)
@@ -19,9 +17,10 @@ from tqdm import tqdm
 from searchless_chess.src import config as config_lib
 from searchless_chess.src.engines.my_engine import MoveSelectionStrategy, MyTransformerEngine
 from searchless_chess.src.puzzles import evaluate_puzzle_from_pandas_row
-from searchless_chess.src.dataset import load_datasource
+from searchless_chess.src.dataset import load_datasource, PrefetchIterator
 from searchless_chess.src.models.transformer import TransformerConfig, ChessTransformer
 from searchless_chess.src.optimizer.splus import SPlus
+
 
 def train(
     train_config: config_lib.TrainConfig,
@@ -117,7 +116,7 @@ def train(
         print("Loading Scheduler from checkpoint...")
         scheduler.load_state_dict(checkpoint['scheduler'])
 
-    train_iter = train_dataloader.__iter__()
+    train_iter = PrefetchIterator(train_dataloader, device=device)
 
 
 
@@ -137,18 +136,6 @@ def train(
             step += 1
 
             x, legal_actions, policy, soft_policy, hard_policy, hardest_policy, hl, dhl, wdl, value_prob, draw_prob, plies_left = next(train_iter)
-                
-            x = x.to(torch.long).to(device)
-            legal_actions = legal_actions.to(torch.float32).to(device)
-            policy = policy.to(torch.float32).to(device)
-            soft_policy = soft_policy.to(torch.float32).to(device)
-            hard_policy = hard_policy.to(torch.float32).to(device)
-            hardest_policy = hardest_policy.to(torch.float32).to(device)
-            hl = hl.to(torch.float32).to(device)
-            dhl = dhl.to(torch.float32).to(device)
-            wdl = wdl.to(torch.long).to(device)
-            value_prob = value_prob.to(torch.float32).to(device)
-            draw_prob = draw_prob.to(torch.float32).to(device)
 
             target = {
                 'self': x,
@@ -209,23 +196,11 @@ def train(
         val_metrics = {}
         val_loss = 0
         val_steps = cast(int, train_config.eval_data.num_records) // train_config.eval_data.batch_size
-        val_iter = iter(val_dataloader)
+        val_iter = PrefetchIterator(val_dataloader, device=device)
         with torch.inference_mode():
             val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
             for step_in_epoch in range(cast(int, val_steps)):
                 x, legal_actions, policy, soft_policy, hard_policy, hardest_policy, hl, dhl, wdl, value_prob, draw_prob, plies_left = next(val_iter)
-                    
-                x = x.to(torch.long).to(device)
-                legal_actions = legal_actions.to(torch.float32).to(device)
-                policy = policy.to(torch.float32).to(device)
-                soft_policy = soft_policy.to(torch.float32).to(device)
-                hard_policy = hard_policy.to(torch.float32).to(device)
-                hardest_policy = hardest_policy.to(torch.float32).to(device)
-                hl = hl.to(torch.float32).to(device)
-                dhl = dhl.to(torch.float32).to(device)
-                wdl = wdl.to(torch.long).to(device)
-                value_prob = value_prob.to(torch.float32).to(device)
-                draw_prob = draw_prob.to(torch.float32).to(device)
 
                 target = {
                     'self': x,

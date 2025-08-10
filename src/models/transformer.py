@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 torch.set_default_dtype(torch.float32)
+torch.set_float32_matmul_precision('high')
 torch.set_printoptions(profile="full")
 import dataclasses
 import math
@@ -32,38 +33,11 @@ class TransformerConfig:
     # repeater for tokens
     repeater: int = 1
 
-    ## TODO: Implement
-    # Whether to apply QK normalization trick in attention layer.
-    apply_qk_layernorm: bool = False
-    # Whether to apply post LN after attention + MLP blocks
-    apply_post_ln: bool = True
-
-# Efficient implementation equivalent to the following:
-def scaled_dot_product_attention(query, key, value, attn_mask=None,
-        is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
-    L, S = query.size(-2), key.size(-2)
-    scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
-    if is_causal:
-        assert attn_mask is None
-        temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
-        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-        attn_bias.to(query.dtype)
-
-    if attn_mask is not None:
-        if attn_mask.dtype == torch.bool:
-            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
-        else:
-            attn_bias = attn_mask + attn_bias
-
-    if enable_gqa:
-        key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
-        value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
-
-    attn_weight = query @ key.transpose(-2, -1) * scale_factor
-    attn_weight += attn_bias
-    attn_weight = torch.softmax(attn_weight, dim=-1)
-    return attn_weight @ value
+    # Position Embedding Type
+    # Whether to use smolgen
+    use_smolgen: bool = False
+    # Whether to use simple attention bias
+    use_attention_bias: bool = False
 
 class MultiHeadAttention(nn.Module):
     """
@@ -78,6 +52,8 @@ class MultiHeadAttention(nn.Module):
         nheads (int): Number of heads
         dropout (float, optional): Dropout probability. Default: 0.0
         bias (bool, optional): Whether to add bias to input projection. Default: True
+        use_smolgen (bool, optional): Whether to use smolgen. Default: False
+        use_attention_bias (bool, optional): Whether to use simple attention bias. Default: False
     """
     def __init__(
         self,
@@ -88,6 +64,8 @@ class MultiHeadAttention(nn.Module):
         nheads: int,
         dropout: float = 0.0,
         bias=True,
+        use_smolgen: bool = False,
+        use_attention_bias: bool = False,
         device=None,
         dtype=None,
     ):
@@ -107,17 +85,23 @@ class MultiHeadAttention(nn.Module):
         assert E_total % nheads == 0, "Embedding dim is not divisible by nheads"
         self.E_head = E_total // nheads
         self.bias = bias
+        self.use_smolgen = use_smolgen
+        self.use_attention_bias = use_attention_bias
 
-        # self.flatten = nn.Linear(E_q, 32)
-        # self.smolgen = nn.Sequential(
-        #     nn.Linear(32 * S, 256),
-        #     nn.LayerNorm(256, eps=1e-5),
-        #     nn.Linear(256, 256 * self.nheads),
-        # )
-        # self.smolgen_shared = nn.Sequential(
-        #     nn.LayerNorm(256, eps=1e-5),
-        #     nn.Linear(256, S * S),
-        # )
+        if use_smolgen:
+            self.flatten = nn.Linear(E_q, 32)
+            self.smolgen = nn.Sequential(
+                nn.Linear(32 * S, 256, **factory_kwargs),
+                nn.LayerNorm(256, eps=1e-5, **factory_kwargs),
+                nn.Linear(256, 256 * self.nheads),
+            )
+            self.smolgen_shared = nn.Sequential(
+                nn.LayerNorm(256, eps=1e-5),
+                nn.Linear(256, S * S),
+            )
+        elif use_attention_bias:
+            self.attn_bias = nn.Parameter(torch.empty(1, nheads, S, S, **factory_kwargs).uniform_(-0.02, 0.02))
+            
 
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None, is_causal=False) -> torch.Tensor:
         """
@@ -137,9 +121,14 @@ class MultiHeadAttention(nn.Module):
         Returns:
             attn_output (torch.Tensor): output of shape (N, L_t, E_q)
         """
-        # flat = self.flatten(query).view(query.size(0), -1)
-        # smol = self.smolgen(flat).view(-1, self.nheads, 256)
-        # smol_bias = self.smolgen_shared(smol).view(-1, self.nheads, S, S)
+        if self.use_smolgen:
+            flat = self.flatten(query).view(query.size(0), -1)
+            smol = self.smolgen(flat).view(-1, self.nheads, 256)
+            attn_bias = self.smolgen_shared(smol).view(-1, self.nheads, S, S)
+        elif self.use_attention_bias:
+            attn_bias = self.attn_bias
+        else:
+            attn_bias = None
 
         # Step 1. Apply input projection
         if self._qkv_same_embed_dim:
@@ -170,11 +159,8 @@ class MultiHeadAttention(nn.Module):
 
         # Step 3. Run SDPA
         # (N, nheads, L_t, E_head)
-        # with torch.nn.attention.sdpa_kernel(
-        #     SDPBackend.CUDNN_ATTENTION
-        # ):
         attn_output = F.scaled_dot_product_attention(
-            query, key, value, is_causal=is_causal)
+            query, key, value, attn_mask=attn_bias, is_causal=is_causal)
         # (N, nheads, L_t, E_head) -> (N, L_t, nheads, E_head) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)
 
@@ -195,6 +181,8 @@ class MyTransformerEncoderLayer(nn.Module):
         layer_norm_eps=1e-5,
         norm_first=False,
         bias=True,
+        use_smolgen=False,
+        use_attention_bias=False,
         device=None,
         dtype=None,
     ):
@@ -209,18 +197,16 @@ class MyTransformerEncoderLayer(nn.Module):
             nhead,
             dropout=dropout,
             bias=bias,
+            use_smolgen=use_smolgen,
+            use_attention_bias=use_attention_bias,
             **factory_kwargs,
         )
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
-        # self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias, **factory_kwargs)
 
         self.norm_first = norm_first
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
-
-        # self.dropout1 = nn.Dropout(dropout)
-        # self.dropout2 = nn.Dropout(dropout)
         self.activation = activation
         
 
@@ -266,7 +252,7 @@ class ChessTransformer(nn.Module):
 
         self.activation = F.gelu
 
-        # VANILLA ATTENTION
+        # Mixed-LN Attention
         self.transformer = nn.ModuleList([
             *[MyTransformerEncoderLayer(
                 d_model=config.embedding_dim,
@@ -275,6 +261,8 @@ class ChessTransformer(nn.Module):
                 dropout=config.dropout,
                 activation=self.activation,
                 norm_first=False,
+                use_smolgen=config.use_smolgen,
+                use_attention_bias=config.use_attention_bias,
             ) for _ in range(config.num_layers // 4)],
             *[MyTransformerEncoderLayer(
                 d_model=config.embedding_dim,
@@ -283,6 +271,8 @@ class ChessTransformer(nn.Module):
                 dropout=config.dropout,
                 activation=self.activation,
                 norm_first=True,
+                use_smolgen=config.use_smolgen,
+                use_attention_bias=config.use_attention_bias,
             ) for _ in range(3 * config.num_layers // 4)]
         ])
 
@@ -392,16 +382,6 @@ class ChessTransformer(nn.Module):
         legal_moves = target['legal'] == 1
         batch_size = target['legal'].shape[0]
 
-        # # Zero out U loss if not in legal moves
-        # output_U = output['U'].clone()
-        # output_U[~legal_moves] = -1e9
-
-        # output_Q = output['Q'].clone()
-        # output_Q[~legal_moves] = -1e9
-
-        # output_D = output['D'].clone()
-        # output_D[~legal_moves] = -1e9
-
         # Policy loss with masking
         batch_size = output['policy'].shape[0]
         # Clone policy logits to avoid modifying the original
@@ -429,6 +409,7 @@ class ChessTransformer(nn.Module):
         soft_policy_loss = -torch.sum(target_soft_policy_flat * F.log_softmax(masked_soft_policy_flat, dim=-1), dim=-1).mean()
         hard_policy_loss = -torch.sum(target_hard_policy_flat * F.log_softmax(masked_hard_policy_flat, dim=-1), dim=-1).mean()
         hardest_policy_loss = -torch.sum(target_hardest_policy_flat * F.log_softmax(masked_hardest_policy_flat, dim=-1), dim=-1).mean()
+        
         return {
             'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
             'value': F.mse_loss(output['value'], target['value']),
@@ -441,7 +422,27 @@ class ChessTransformer(nn.Module):
             'soft_policy': soft_policy_loss * 0.8 * 1.5,
             'hard_policy': hard_policy_loss * 0.075 * 1.5,
             'hardest_policy': hardest_policy_loss * 0.025 * 1.5,
-            # 'U': ((F.binary_cross_entropy_with_logits(output_U, target['U'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
-            # 'Q': ((F.binary_cross_entropy_with_logits(output_Q, target['Q'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
-            # 'D': 0.2 * ((F.binary_cross_entropy_with_logits(output_D, target['D'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
         }
+
+    def post_losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        legal_moves = target['legal'] == 1
+        batch_size = target['legal'].shape[0]
+
+        # Zero out U loss if not in legal moves
+        output_U = output['U'].clone()
+        output_U[~legal_moves] = -1e9
+
+        output_Q = output['Q'].clone()
+        output_Q[~legal_moves] = -1e9
+
+        output_D = output['D'].clone()
+        output_D[~legal_moves] = -1e9
+
+        return {
+            'U': ((F.binary_cross_entropy_with_logits(output_U, target['U'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'Q': ((F.binary_cross_entropy_with_logits(output_Q, target['Q'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'D': 0.2 * ((F.binary_cross_entropy_with_logits(output_D, target['D'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
+        }
+
+
+

@@ -8,6 +8,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
+torch.set_default_dtype(torch.float32)
+torch.set_float32_matmul_precision('high')
+torch.set_printoptions(profile="full")
 from tqdm import tqdm
 
 from searchless_chess.src import config as config_lib
@@ -126,7 +129,7 @@ def post_train(
                 outputs = model(x)
                 
                 # Compute only U loss (since other weights are frozen)
-                losses = model.losses(outputs, target)
+                losses = model.post_losses(outputs, target)
                 u_loss = losses['U']
                 q_loss = losses['Q']
                 d_loss = losses['D']

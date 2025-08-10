@@ -33,7 +33,7 @@ def train(
     val_dataloader = load_datasource(train_config.eval_data)
 
     # In the train function, modify the training loop:
-    num_epochs = train_config.num_steps // train_config.ckpt_frequency
+    num_epochs = train_config.num_steps // train_config.steps_per_epoch
     
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -85,14 +85,6 @@ def train(
         print("Loading Scaler from checkpoint...")
         scaler.load_state_dict(checkpoint['scaler'])
 
-    # # After creating the optimizer, add the scheduler:
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    #     optimizer,
-    #     T_0=train_config.ckpt_frequency * 2,  # First restart cycle length
-    #     T_mult=2,  # Each cycle gets twice as long
-    #     eta_min=train_config.learning_rate / 100  # Minimum learning rate
-    # )
-
     scheduler1 = torch.optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=1.0,
@@ -131,8 +123,8 @@ def train(
         total_loss = 0
         avg_loss = 0
         metrics_loss = {}
-        pbar = tqdm(total=train_config.ckpt_frequency, desc=f'Epoch {epoch+1}/{num_epochs}')
-        for step_in_epoch in range(train_config.ckpt_frequency):
+        pbar = tqdm(total=train_config.steps_per_epoch, desc=f'Epoch {epoch+1}/{num_epochs}')
+        for step_in_epoch in range(train_config.steps_per_epoch):
             step += 1
 
             x, legal_actions, policy, soft_policy, hard_policy, hardest_policy, hl, dhl, wdl, value_prob, draw_prob, plies_left = next(train_iter)
@@ -269,10 +261,19 @@ def train(
             train_config.save_checkpoint_path
         )
         os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Always save/overwrite the latest checkpoint
         torch.save(
             checkpoint,
-            os.path.join(checkpoint_dir, f'checkpoint_{step}.pt')
+            os.path.join(checkpoint_dir, 'checkpoint_last.pt')
         )
+
+        # Save a periodic checkpoint every `save_frequency` epochs
+        if (step // train_config.steps_per_epoch) % train_config.save_frequency == 0:
+            torch.save(
+                checkpoint,
+                os.path.join(checkpoint_dir, f'checkpoint_{step}.pt')
+            )
     
     return model
 
@@ -319,8 +320,8 @@ def main():
         max_grad_norm=1.0,
         log_frequency=1,
         num_steps=170 * 1000 * 3,
-        ckpt_frequency=1000 * 3,
-        save_frequency=1000 * 3,
+        steps_per_epoch=1000 * 3,
+        save_frequency=5,
         save_checkpoint_path='../checkpoints/p2/',
     )
     
@@ -343,7 +344,7 @@ def main():
         MoveSelectionStrategy.HARDEST_POLICY
     ]:
         engine = MyTransformerEngine(
-            f'{train_config.save_checkpoint_path}checkpoint_{train_config.num_steps}.pt',
+            f"{train_config.save_checkpoint_path}checkpoint_last.pt",
             chess.engine.Limit(nodes=1),
             strategy=strategy,
         )

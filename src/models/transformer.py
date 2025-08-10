@@ -253,7 +253,7 @@ class ChessTransformer(nn.Module):
         self.activation = F.gelu
 
         # Mixed-LN Attention
-        post_ln_layers = max(8, config.num_layers // 4)
+        post_ln_layers = min(8, config.num_layers // 4)
         pre_ln_layers = config.num_layers - post_ln_layers
         self.transformer = nn.ModuleList([
             *[MyTransformerEncoderLayer(

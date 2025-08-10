@@ -253,6 +253,8 @@ class ChessTransformer(nn.Module):
         self.activation = F.gelu
 
         # Mixed-LN Attention
+        post_ln_layers = max(8, config.num_layers // 4)
+        pre_ln_layers = config.num_layers - post_ln_layers
         self.transformer = nn.ModuleList([
             *[MyTransformerEncoderLayer(
                 d_model=config.embedding_dim,
@@ -263,7 +265,7 @@ class ChessTransformer(nn.Module):
                 norm_first=False,
                 use_smolgen=config.use_smolgen,
                 use_attention_bias=config.use_attention_bias,
-            ) for _ in range(config.num_layers // 4)],
+            ) for _ in range(post_ln_layers)],
             *[MyTransformerEncoderLayer(
                 d_model=config.embedding_dim,
                 nhead=config.num_heads,
@@ -273,7 +275,7 @@ class ChessTransformer(nn.Module):
                 norm_first=True,
                 use_smolgen=config.use_smolgen,
                 use_attention_bias=config.use_attention_bias,
-            ) for _ in range(3 * config.num_layers // 4)]
+            ) for _ in range(pre_ln_layers)]
         ])
 
         self.self_head = nn.Linear(config.embedding_dim, self.vocab_size)

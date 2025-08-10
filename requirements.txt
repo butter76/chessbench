@@ -17,4 +17,3 @@ scipy
 typing-extensions
 tqdm
 wheel
-maturin>=1.0,<2.0

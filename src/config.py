@@ -64,16 +64,11 @@ class TrainConfig:
   max_grad_norm: float = 1.0
   # The number of gradient steps.
   num_steps: int
-  # The frequency (in gradient steps) at which checkpoints should be saved
-  # (`None` means there is no checkpointing).
-  ckpt_frequency: int = 1000
-  # If provided, the maximum number of checkpoints to keep.
-  ckpt_max_to_keep: int | None = 1
+  # Number of steps per epoch.
+  steps_per_epoch: int = 3000
   # The frequency (in gradient steps) at which checkpoints should be saved
   # permanently (`None` means all checkpoints are temporary).
   save_frequency: int | None = None
-  # The frequency of logging in gradient steps (`None` means no logging).
-  log_frequency: int | None = None
   # Path to save the model.
   save_checkpoint_path: str
   # A checkpoint to resume from (if `None`, training starts from scratch).
@@ -96,7 +91,5 @@ class EvalConfig:
   use_ema_params: bool = False
   # The policy used to play moves with the model.
   policy: PolicyType
-  # The number of return buckets.
-  num_return_buckets: int
   # The batch size for evaluation.
   batch_size: int | None = None

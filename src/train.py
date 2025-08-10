@@ -318,7 +318,6 @@ def main():
         ),
         compile=True,
         max_grad_norm=1.0,
-        log_frequency=1,
         num_steps=170 * 1000 * 3,
         steps_per_epoch=1000 * 3,
         save_frequency=5,

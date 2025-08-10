@@ -15,14 +15,15 @@ from tqdm import tqdm
 
 from searchless_chess.src import config as config_lib
 from searchless_chess.src.dataset import load_datasource
-from searchless_chess.src.models.transformer import ChessTransformer, TransformerConfig
-from searchless_chess.src import data_loader
-from searchless_chess.src.optimizer.soap import SOAP
+from searchless_chess.src.models.transformer import ChessTransformer
+from searchless_chess.src.optimizer.splus import SPlus
 
 
 def post_train(
     checkpoint_path: str,
     train_config: config_lib.TrainConfig,
+    l2_lambda: float = 0.01,
+    unfreeze_step: int = 5000,
     device: str | None = None,
 ) -> nn.Module:
     """Post-trains the model with U prediction and returns it."""
@@ -54,7 +55,13 @@ def post_train(
     model.load_state_dict(model_state, strict=False)
     print("Loaded existing model weights (excluding new U head)")
     
-    # Freeze all existing parameters
+    # Store original parameters for L2 regularization
+    original_params = {}
+    for name, param in model.named_parameters():
+        if 'post_' not in name:  # Only store non-post parameters
+            original_params[name] = param.data.clone()
+    
+    # Initially freeze all existing parameters
     for name, param in model.named_parameters():
         if 'post_' not in name:
             param.requires_grad = False
@@ -70,11 +77,10 @@ def post_train(
     print(f"Frozen parameters: {total_params - trainable_params:,}")
     
     # Setup optimizer (only for unfrozen parameters)
-    optimizer = SOAP(
-        model.parameters(),
+    optimizer = SPlus(
+        filter(lambda p: p.requires_grad, model.parameters()),
         lr=train_config.learning_rate,
-        weight_decay=train_config.weight_decay,
-        precondition_frequency=10,
+        weight_decay=train_config.weight_decay
     )
     
     scaler = GradScaler(device)
@@ -95,18 +101,54 @@ def post_train(
     # Training loop
     num_epochs = train_config.num_steps // train_config.ckpt_frequency
     step = 0
+    weights_unfrozen = False
     
     for epoch in range(num_epochs):
+        optimizer.train()
         model.train()
         total_loss = 0
         total_u_loss = 0
         total_q_loss = 0
         total_d_loss = 0
+        total_l2_loss = 0
         
         pbar = tqdm(total=train_config.ckpt_frequency, desc=f'Post-train Epoch {epoch+1}/{num_epochs}')
         
         for step_in_epoch in range(train_config.ckpt_frequency):
             step += 1
+
+            # Check if we should unfreeze weights
+            if step >= unfreeze_step and not weights_unfrozen:
+                print(f"\nUnfreezing all weights at step {step}")
+                
+                # Unfreeze all parameters
+                for name, param in model.named_parameters():
+                    if 'post_' not in name:
+                        param.requires_grad = True
+                        print(f"Unfrozen: {name}")
+                
+                # Recreate optimizer with all parameters
+                optimizer = SPlus(
+                    model.parameters(),
+                    lr=train_config.learning_rate,  # Use lower LR for pre-trained weights
+                    weight_decay=train_config.weight_decay,
+                )
+                
+                # Recreate scheduler
+                remaining_epochs = num_epochs - epoch
+                scheduler = torch.optim.lr_scheduler.LinearLR(
+                    optimizer,
+                    start_factor=1.0,
+                    end_factor=0.25,
+                    total_iters=remaining_epochs,
+                    last_epoch=-1
+                )
+                
+                weights_unfrozen = True
+                
+                # Print updated trainable parameters
+                trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                print(f"Now training {trainable_params:,} parameters (all parameters)")
             
             # Get batch: state, legal_actions, U_values
             x, legal_actions, u_values, q_values, d_values = next(train_iter)
@@ -134,7 +176,17 @@ def post_train(
                 q_loss = losses['Q']
                 d_loss = losses['D']
 
-                loss = u_loss + q_loss + d_loss
+                task_loss = u_loss + q_loss + d_loss
+
+                # Compute L2 regularization loss if weights are unfrozen
+                l2_loss = torch.tensor(0.0, device=device)
+                if weights_unfrozen:
+                    for name, param in model.named_parameters():
+                        if name in original_params:
+                            l2_loss += torch.sum((param - original_params[name]) ** 2)
+                    l2_loss = l2_lambda * l2_loss
+                
+                loss = task_loss + l2_loss
             
             # Backward pass
             optimizer.zero_grad()
@@ -155,20 +207,25 @@ def post_train(
             total_u_loss += u_loss.item()
             total_q_loss += q_loss.item()
             total_d_loss += d_loss.item()
+            total_l2_loss += l2_loss.item()
             
             # Update progress bar
             avg_loss = total_loss / (step_in_epoch + 1)
             avg_u_loss = total_u_loss / (step_in_epoch + 1)
             avg_q_loss = total_q_loss / (step_in_epoch + 1)
             avg_d_loss = total_d_loss / (step_in_epoch + 1)
+            avg_l2_loss = total_l2_loss / (step_in_epoch + 1)
             
-            pbar.set_postfix({
+            postfix_dict = {
                 'avg_loss': f'{avg_loss:.6f}',
                 'u_loss': f'{avg_u_loss:.6f}',
                 'q_loss': f'{avg_q_loss:.6f}',
                 'd_loss': f'{avg_d_loss:.6f}',
                 'lr': f'{scheduler.get_last_lr()[0]:.6f}'
-            })
+            }
+            if weights_unfrozen:
+                postfix_dict['l2_loss'] = f'{avg_l2_loss:.8f}'
+            pbar.set_postfix(postfix_dict)
             pbar.update(1)
         
         pbar.close()
@@ -179,8 +236,10 @@ def post_train(
             "u_loss": f'{avg_u_loss:.6f}',
             'q_loss': f'{avg_q_loss:.6f}',
             'd_loss': f'{avg_d_loss:.6f}',
+            'l2_loss': f'{avg_l2_loss:.8f}' if weights_unfrozen else 0.0,
             'lr': f'{scheduler.get_last_lr()[0]:.6f}',
             'step': step,
+            'weights_unfrozen': weights_unfrozen,
         })
         
         # Save checkpoint
@@ -193,6 +252,8 @@ def post_train(
             'model_config': model_config,
             'step': step,
             'u_loss': avg_u_loss,
+            'l2_lambda': l2_lambda,
+            'weights_unfrozen': weights_unfrozen,
             'original_checkpoint': checkpoint_path,
         }
         
@@ -241,30 +302,30 @@ def main():
     
     # Configuration for post-training
     train_config = config_lib.TrainConfig(
-        learning_rate=4e-4,  # Lower learning rate for post-training
+        learning_rate=0.05,  # Lower learning rate for post-training
         data=config_lib.DataConfig(
-            batch_size=2048,  # Smaller batch size
+            batch_size=512,  # Smaller batch size
             shuffle=True,
             seed=42,
             worker_count=8,
             num_return_buckets=128,
-            policy='lc0_data_with_U',  # Use the new datasource
+            policy='lc0_data_with_U',
             split='train',
             dataset_path='../data/child_data/child_data.bag',
         ),
         eval_data=config_lib.DataConfig(
-            batch_size=1024,  # Smaller batch size
+            batch_size=1024,
             shuffle=False,
             seed=42,
             worker_count=8,
             num_return_buckets=128,
-            policy='lc0_data_with_U',  # Use the new datasource
+            policy='lc0_data_with_U',
             split='test',
             dataset_path='../data/child_data/child_data.bag',
         ),
         compile=True,
         max_grad_norm=1.0,
-        num_steps=100_000,  # Fewer steps for post-training
+        num_steps=100_000,
         ckpt_frequency=1_500,
         save_checkpoint_path='../checkpoints/p2-dhl-2x-post-train-u/',
     )
@@ -276,6 +337,8 @@ def main():
     model = post_train(
         checkpoint_path=checkpoint_path,
         train_config=train_config,
+        l2_lambda=0.001,
+        unfreeze_step=1500,
     )
     
     print("Post-training completed!")

@@ -1,5 +1,6 @@
 import numpy as np
 import chess
+import sys
 
 from searchless_chess.src.tokenizer import tokenize
 from searchless_chess.src.utils import move_to_indices
@@ -84,9 +85,15 @@ def test_move_to_indices_mirror_color_swap_invariance():
         board = chess.Board(fen)
         board_m = chess.Board(mirror_and_swap_fen(fen))
 
+        board.generate_legal_moves()
+
         indices_original = collect_move_index_pairs(board)
         indices_mirrored = collect_move_index_pairs(board_m)
 
         assert indices_original == indices_mirrored
+        assert len(indices_original) == len(list(board.legal_moves))
+
+
+        
 
 

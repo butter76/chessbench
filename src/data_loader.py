@@ -177,6 +177,10 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     Q = (root_q + 1) / 2
     D = root_d
 
+    board = chess.Board(fen)
+    board.generate_legal_moves()
+    assert len(leela_policy) == len(list(board.legal_moves))
+
     legal_actions = np.zeros((S, S))
     policy = np.zeros((S, S))
     soft_policy = np.zeros((S, S))
@@ -197,24 +201,31 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     # Compute temperature-adjusted policies
     # Flatten for numerical stability
     flat_policy = policy.reshape(-1)
-    
-    # Hard policy (temp=0.25)
-    # Add small epsilon to avoid log(0)
-    eps = 1e-8
-    logits = np.where(flat_policy > 0, np.log(flat_policy + eps), -np.inf) / 0.25
-    exp_logits = np.exp(logits - np.max(logits))
-    hard_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
 
-    # Soft policy (temp=4)
-    logits = np.where(flat_policy > 0, np.log(flat_policy + eps), -np.inf) / 4
-    exp_logits = np.exp(logits - np.max(logits))
-    soft_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
+    if _move != 'CDB':
+    
+      # Hard policy (temp=0.25)
+      # Add small epsilon to avoid log(0)
+      eps = 1e-8
+      logits = np.where(flat_policy > 0, np.log(flat_policy + eps), -np.inf) / 0.25
+      exp_logits = np.exp(logits - np.max(logits))
+      hard_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
+
+      # Soft policy (temp=4)
+      logits = np.where(flat_policy > 0, np.log(flat_policy + eps), -np.inf) / 4
+      exp_logits = np.exp(logits - np.max(logits))
+      soft_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
+    else:
+      policy = np.zeros((S, S))
 
     hardest_policy = hardest_policy / hardest_policy.sum()
 
     wdl = np.array([int(-result + 1)])
     probs = _process_prob(Q)
     draw_probs = _process_prob(D)
+
+    if _move == 'CDB':
+      draw_probs = np.zeros(NUM_BINS)
 
     return state, legal_actions, policy, soft_policy, hard_policy, hardest_policy, probs, draw_probs, wdl, np.array([Q]), np.array([D]), np.array([plies_left])
 

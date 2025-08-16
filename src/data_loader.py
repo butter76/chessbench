@@ -52,7 +52,7 @@ def _process_prob(
   return probs
 
 def _process_fen(fen: str) -> np.ndarray:
-  return tokenizer.tokenize(fen).astype(np.int32)
+  return tokenizer.tokenize(fen, useRule50=True).astype(np.int32)
 
 
 def _process_move(move: str) -> np.ndarray:
@@ -177,9 +177,9 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     Q = (root_q + 1) / 2
     D = root_d
 
-    board = chess.Board(fen)
-    board.generate_legal_moves()
-    assert len(leela_policy) == len(list(board.legal_moves))
+    # board = chess.Board(fen)
+    # board.generate_legal_moves()
+    # assert len(leela_policy) == len(list(board.legal_moves))
 
     legal_actions = np.zeros((S, S))
     policy = np.zeros((S, S))

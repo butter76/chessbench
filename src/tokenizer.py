@@ -54,7 +54,7 @@ _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
 SEQUENCE_LENGTH = 68
 
 
-def tokenize(fen: str):
+def tokenize(fen: str, useRule50: bool = False):
   """Returns an array of tokens from a fen string.
 
   We compute a tokenized representation of the board, from the FEN string.
@@ -102,6 +102,8 @@ def tokenize(fen: str):
     assert board[en_sq] == '.'
     board = board[:en_sq] + 'x' + board[en_sq + 1:]
 
+
+  halfmoves_last = halfmoves_last if (useRule50 and int(halfmoves_last) > 50) else '0'
     
   board += '.'
   indices = list()

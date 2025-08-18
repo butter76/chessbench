@@ -1,4 +1,5 @@
 #include "chess.hpp"
+#include "search_algo.hpp"
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -112,15 +113,50 @@ void set_position(chess::Board &board, const std::string &cmd) {
     }
 }
 
-std::string pick_random_legal_move_uci(chess::Board &board, std::mt19937_64 &rng) {
-    chess::Movelist legal;
-    chess::movegen::legalmoves(legal, board);
-    if (legal.empty()) return "0000"; // no legal move
-    std::uniform_int_distribution<std::size_t> dist(0, legal.size() - 1);
-    const chess::Move mv = legal[dist(rng)];
-    const std::string uci = chess::uci::moveToUci(mv);
-    board.makeMove(mv);
-    return uci;
+engine::Limits parse_go_limits(const std::string &cmd) {
+    engine::Limits limits;
+    const std::vector<std::string> tokens = split(cmd);
+    for (std::size_t i = 1; i < tokens.size(); ++i) {
+        const std::string &t = tokens[i];
+        auto read_ull = [&](unsigned long long &out) {
+            if (i + 1 < tokens.size()) {
+                try { out = std::stoull(tokens[++i]); } catch (...) {}
+            }
+        };
+        auto is_keyword = [&](const std::string &s) {
+            return s == "searchmoves" || s == "ponder" || s == "wtime" || s == "btime" ||
+                   s == "winc" || s == "binc" || s == "movestogo" || s == "depth" ||
+                   s == "nodes" || s == "mate" || s == "movetime" || s == "infinite";
+        };
+
+        if (t == "searchmoves") {
+            // collect UCI moves until next keyword or end
+            while (i + 1 < tokens.size() && !is_keyword(tokens[i + 1])) {
+                limits.searchmoves.push_back(tokens[++i]);
+            }
+        } else if (t == "ponder") {
+            // ignored for now
+        } else if (t == "wtime") {
+            read_ull(limits.wtime_ms);
+        } else if (t == "btime") {
+            read_ull(limits.btime_ms);
+        } else if (t == "winc") {
+            read_ull(limits.winc_ms);
+        } else if (t == "binc") {
+            read_ull(limits.binc_ms);
+        } else if (t == "movestogo") {
+            unsigned long long tmp = 0; read_ull(tmp); limits.movestogo = static_cast<int>(tmp);
+        } else if (t == "nodes") {
+            read_ull(limits.nodes);
+        } else if (t == "movetime") {
+            read_ull(limits.movetime_ms);
+        } else if (t == "infinite") {
+            limits.infinite = true;
+        } else {
+            // depth, mate, etc. ignored in this minimal engine
+        }
+    }
+    return limits;
 }
 
 } // namespace
@@ -129,9 +165,8 @@ int main() {
     chess::Board board; // default startpos
     Options options;
 
-    // RNG for random moves
-    std::mt19937_64 rng(static_cast<std::mt19937_64::result_type>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count()));
+    // Instantiate search
+    engine::RandomSearch search;
 
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
@@ -180,8 +215,8 @@ int main() {
         } else if (line.rfind("position", 0) == 0) {
             set_position(board, line);
         } else if (line.rfind("go", 0) == 0) {
-            // instantly play a random legal move
-            const std::string best = pick_random_legal_move_uci(board, rng);
+            const engine::Limits limits = parse_go_limits(line);
+            const std::string best = search.searchBestMove(board, limits);
             std::cout << "bestmove " << best << '\n' << std::flush;
         } else if (line == "stop") {
             // no background search; nothing to do

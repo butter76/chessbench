@@ -1,4 +1,5 @@
 #include "chess.hpp"
+#include "options.hpp"
 #include "search/search_algo.hpp"
 #include "search/random_search.hpp"
 #include <iostream>
@@ -11,33 +12,6 @@
 #include <cctype>
 
 namespace {
-
-class Options {
-public:
-    void set(const std::string &key, const std::string &value) {
-        storage_[normalizeKey(key)] = value;
-    }
-
-    std::string get(const std::string &key, const std::string &defaultValue) const {
-        const std::string nk = normalizeKey(key);
-        auto it = storage_.find(nk);
-        return it == storage_.end() ? defaultValue : it->second;
-    }
-
-    void clear() { storage_.clear(); }
-
-private:
-    static std::string normalizeKey(const std::string &in) {
-        std::string out;
-        out.reserve(in.size());
-        for (char c : in) {
-            out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-        }
-        return out;
-    }
-
-    std::unordered_map<std::string, std::string> storage_;
-};
 
 struct PositionCache {
     bool has_base = false;
@@ -197,11 +171,33 @@ engine::Limits parse_go_limits(const std::string &cmd) {
 
 } // namespace
 
-int main() {
-    Options options;
+int main(int argc, char **argv) {
+    engine::Options options;
+
+    // Parse command-line options: --option key=value or -o key=value
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        auto set_kv = [&](const std::string &kv) {
+            auto pos = kv.find('=');
+            if (pos == std::string::npos) {
+                options.set(kv, "");
+            } else {
+                options.set(kv.substr(0, pos), kv.substr(pos + 1));
+            }
+        };
+        if (arg == "--option" || arg == "-o") {
+            if (i + 1 < argc) {
+                set_kv(argv[++i]);
+            }
+        } else if (arg.rfind("--option=", 0) == 0) {
+            set_kv(arg.substr(std::string("--option=").size()));
+        } else if (arg.rfind("-o=", 0) == 0) {
+            set_kv(arg.substr(3));
+        }
+    }
 
     // Instantiate search
-    engine::RandomSearch search;
+    engine::RandomSearch search(options);
 
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
@@ -255,9 +251,15 @@ int main() {
             const std::string best = search.searchBestMove(limits);
             std::cout << "bestmove " << best << '\n' << std::flush;
         } else if (line == "stop") {
-            // no background search; nothing to do
+            search.stop();
         } else if (line == "quit") {
+            search.stop();
             break;
+        } else if (line == "options") {
+            // Non-standard debug helper: print all options as key=value (keys are stored lowercase)
+            options.forEach([](const std::string &k, const std::string &v) {
+                std::cout << k << '=' << v << '\n';
+            });
         } else if (line == "print") {
             // helper for debugging
             std::cout << search.getBoard() << '\n' << std::flush;

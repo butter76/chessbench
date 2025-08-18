@@ -8,7 +8,9 @@ namespace engine {
 
 class RandomSearch : public SearchAlgo {
 public:
-    explicit RandomSearch(unsigned long long seed = std::random_device{}()) : rng_(seed), board_() {}
+    explicit RandomSearch(engine::Options &options,
+                          unsigned long long seed = std::random_device{}())
+        : SearchAlgo(options), rng_(seed), board_() {}
 
     void reset() override {
         board_ = chess::Board();
@@ -31,6 +33,8 @@ public:
     }
 
     chess::Board &getBoard() override { return board_; }
+
+    void stop() override { /* no-op for random */ }
 
     std::string searchBestMove(const Limits & /*limits*/) override {
         chess::Movelist legal;

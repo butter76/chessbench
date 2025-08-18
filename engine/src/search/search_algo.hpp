@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chess.hpp"
+#include "../options.hpp"
 
 #include <string>
 #include <vector>
@@ -22,13 +23,19 @@ struct Limits {
 class SearchAlgo {
 public:
     virtual ~SearchAlgo() = default;
+    explicit SearchAlgo(engine::Options &options) : options_(options) {}
+
     // Engine state management
     virtual void reset() = 0;                                   // set to startpos
     virtual void makemove(const std::string &uci) = 0;           // apply UCI move to internal board
     virtual chess::Board &getBoard() = 0;                        // access internal board
+    virtual void stop() = 0;                                     // request to stop search if running
 
     // Search API operating on internal board
     virtual std::string searchBestMove(const Limits &limits) = 0;
+
+protected:
+    engine::Options &options_;
 };
 
 } // namespace engine

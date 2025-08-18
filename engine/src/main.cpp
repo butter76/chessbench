@@ -39,6 +39,15 @@ private:
     std::unordered_map<std::string, std::string> storage_;
 };
 
+struct PositionCache {
+    bool has_base = false;
+    bool base_is_startpos = false;
+    std::string base_fen;
+    std::vector<std::string> moves;
+};
+
+PositionCache g_pos_cache;
+
 void reset(chess::Board &board) {
     board = chess::Board();
 }
@@ -88,30 +97,76 @@ void set_position(chess::Board &board, const std::string &cmd) {
     if (tokens.size() < 2) return;
 
     std::size_t idx = 1; // token after "position"
+
+    // Parse base
+    bool new_is_startpos = false;
+    std::string new_fen;
     if (tokens[idx] == "startpos") {
-        reset(board);
+        new_is_startpos = true;
         ++idx;
     } else if (tokens[idx] == "fen") {
-        // collect next up-to-6 fields as fen (some FENs include a move clock field)
-        std::string fen;
         ++idx;
-        // standard FEN has 6 fields
         int fields_needed = 6;
         while (idx < tokens.size() && tokens[idx] != "moves" && fields_needed > 0) {
-            if (!fen.empty()) fen.push_back(' ');
-            fen += tokens[idx++];
+            if (!new_fen.empty()) new_fen.push_back(' ');
+            new_fen += tokens[idx++];
             --fields_needed;
-        }
-        if (!fen.empty()) {
-            board.setFen(fen);
         }
     }
 
-    // apply moves if provided
+    // Parse move list (if any)
+    std::vector<std::string> new_moves;
     if (idx < tokens.size() && tokens[idx] == "moves") {
         ++idx;
-        apply_moves(board, tokens, idx);
+        for (std::size_t i = idx; i < tokens.size(); ++i) new_moves.push_back(tokens[i]);
     }
+
+    // Determine if we can incrementally apply only the suffix
+    const bool base_matches = g_pos_cache.has_base &&
+        ((new_is_startpos && g_pos_cache.base_is_startpos) ||
+         (!new_is_startpos && !g_pos_cache.base_is_startpos && new_fen == g_pos_cache.base_fen));
+
+    bool applied_incremental = false;
+    if (base_matches && new_moves.size() >= g_pos_cache.moves.size()) {
+        // Check prefix equality
+        bool prefix_ok = true;
+        for (std::size_t i = 0; i < g_pos_cache.moves.size(); ++i) {
+            if (g_pos_cache.moves[i] != new_moves[i]) { prefix_ok = false; break; }
+        }
+        if (prefix_ok) {
+            // Apply only the remaining moves
+            if (new_moves.size() > g_pos_cache.moves.size()) {
+                // Build token list to reuse apply_moves
+                std::vector<std::string> suffix_tokens;
+                suffix_tokens.reserve(new_moves.size() - g_pos_cache.moves.size());
+                for (std::size_t i = g_pos_cache.moves.size(); i < new_moves.size(); ++i) {
+                    suffix_tokens.push_back(new_moves[i]);
+                }
+                // Reuse apply_moves signature: needs tokens with moves only and start_index 0
+                apply_moves(board, suffix_tokens, 0);
+            }
+            applied_incremental = true;
+        }
+    }
+
+    if (!applied_incremental) {
+        // Reinitialize to base and apply all moves
+        if (new_is_startpos) {
+            reset(board);
+        } else if (!new_fen.empty()) {
+            board.setFen(new_fen);
+        }
+        if (!new_moves.empty()) {
+            // Build tokens array containing exactly the moves
+            apply_moves(board, new_moves, 0);
+        }
+    }
+
+    // Update cache
+    g_pos_cache.has_base = true;
+    g_pos_cache.base_is_startpos = new_is_startpos;
+    g_pos_cache.base_fen = new_fen;
+    g_pos_cache.moves = std::move(new_moves);
 }
 
 engine::Limits parse_go_limits(const std::string &cmd) {

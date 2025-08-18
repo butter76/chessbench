@@ -17,7 +17,6 @@ public:
         std::uniform_int_distribution<std::size_t> dist(0, legal.size() - 1);
         const chess::Move mv = legal[dist(rng_)];
         const std::string uci = chess::uci::moveToUci(mv);
-        board.makeMove(mv);
         return uci;
     }
 

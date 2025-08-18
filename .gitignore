@@ -28,6 +28,7 @@ BayesElo/
 Stockfish/
 checkpoints/
 *.txt
+!CMakeLists.txt
 testing/
 target/
 temp_data/

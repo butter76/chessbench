@@ -39,6 +39,8 @@ def train(
     rank = 0
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+        os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
+        os.environ['NCCL_TREE_THRESHOLD'] = '0'
         dist.init_process_group(backend=backend, init_method='env://')
         distributed = True
         world_size = dist.get_world_size()
@@ -111,6 +113,8 @@ def train(
                 base_model,
                 device_ids=[local_rank] if device.startswith('cuda') else None,
                 output_device=local_rank if device.startswith('cuda') else None,
+                static_graph=True,
+                gradient_as_bucket_view=True,
             )
             model.module.load_state_dict(checkpoint['model'])  # type: ignore[attr-defined]
         else:
@@ -131,6 +135,8 @@ def train(
                 base_model,
                 device_ids=[local_rank] if device.startswith('cuda') else None,
                 output_device=local_rank if device.startswith('cuda') else None,
+                static_graph=True,
+                gradient_as_bucket_view=True,
             )
         else:
             model = base_model
@@ -372,9 +378,9 @@ def main():
     
     # Create model config
     model_config = TransformerConfig(
-        embedding_dim=512,
-        num_layers=16,
-        num_heads=32,
+        embedding_dim=768,
+        num_layers=40,
+        num_heads=48,
         widening_factor=3,
         dropout=0,
     )
@@ -383,7 +389,7 @@ def main():
     train_config = config_lib.TrainConfig(
         learning_rate=0.1,
         data=config_lib.DataConfig(
-            batch_size=1024,
+            batch_size=512,
             shuffle=True,
             seed=4213242,
             worker_count=16,  # 0 disables multiprocessing
@@ -393,7 +399,7 @@ def main():
             dataset_path='/ephemeral/processed_data/*_0017.bag',
         ),
         eval_data=config_lib.DataConfig(
-            batch_size=1024,
+            batch_size=512,
             shuffle=False,
             worker_count=16,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,

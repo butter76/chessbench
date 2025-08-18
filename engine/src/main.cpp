@@ -1,5 +1,6 @@
 #include "chess.hpp"
-#include "search_algo.hpp"
+#include "search/search_algo.hpp"
+#include "search/random_search.hpp"
 #include <iostream>
 #include <sstream>
 #include <string>

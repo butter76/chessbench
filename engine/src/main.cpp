@@ -2,6 +2,7 @@
 #include "options.hpp"
 #include "search/search_algo.hpp"
 #include "search/random_search.hpp"
+#include "syzygy_handler.hpp"
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -10,6 +11,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <cctype>
+#include "time/fixed_time.hpp"
 
 namespace {
 
@@ -196,8 +198,15 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Instantiate search
-    engine::RandomSearch search(options);
+    // Initialize Syzygy handler from options (key is stored lowercase)
+    const std::string syzygyPath = options.get("syzygypath", "");
+    [[maybe_unused]] static engine::SyzygyHandler syzygyHandler(syzygyPath);
+
+    // Create a trivial fixed time manager (can be replaced by more advanced later)
+    engine::time::FixedTime fixedTm(0);
+
+    // Instantiate search with Syzygy handler and time handler
+    engine::RandomSearch search(options, &syzygyHandler, &fixedTm);
 
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);

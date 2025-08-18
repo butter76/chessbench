@@ -27,7 +27,11 @@ if(NOT EXISTS "${CHESS_HEADER}")
     file(DOWNLOAD "${CHESS_URL}" "${CHESS_HEADER}" SHOW_PROGRESS TLS_VERIFY ON)
 endif()
 
-add_executable(chess_sample src/main.cpp)
+add_executable(chess_sample
+    src/main.cpp
+    src/syzygy_handler.cpp
+    src/time/fixed_time.cpp
+)
 target_include_directories(chess_sample PRIVATE "${THIRD_PARTY_DIR}")
 
 # Build and link against libc++ when using Clang

@@ -2,11 +2,14 @@
 
 #include "chess.hpp"
 #include "../options.hpp"
+#include "../time/time_handler.hpp"
 
 #include <string>
 #include <vector>
 
 namespace engine {
+
+class SyzygyHandler; // forward declaration
 
 struct Limits {
     bool infinite = false;
@@ -23,7 +26,9 @@ struct Limits {
 class SearchAlgo {
 public:
     virtual ~SearchAlgo() = default;
-    explicit SearchAlgo(engine::Options &options) : options_(options) {}
+    explicit SearchAlgo(engine::Options &options, const SyzygyHandler *tb = nullptr,
+                        const engine::time::TimeHandler *timeHandler = nullptr)
+        : options_(options), tb_(tb), timeHandler_(timeHandler) {}
 
     // Engine state management
     virtual void reset() = 0;                                   // set to startpos
@@ -36,6 +41,8 @@ public:
 
 protected:
     engine::Options &options_;
+    const SyzygyHandler *tb_ = nullptr;
+    const engine::time::TimeHandler *timeHandler_ = nullptr;
 };
 
 } // namespace engine

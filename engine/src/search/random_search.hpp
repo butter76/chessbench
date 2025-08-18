@@ -8,11 +8,33 @@ namespace engine {
 
 class RandomSearch : public SearchAlgo {
 public:
-    explicit RandomSearch(unsigned long long seed = std::random_device{}()) : rng_(seed) {}
+    explicit RandomSearch(unsigned long long seed = std::random_device{}()) : rng_(seed), board_() {}
 
-    std::string searchBestMove(chess::Board &board, const Limits & /*limits*/) override {
+    void reset() override {
+        board_ = chess::Board();
+    }
+
+    void makemove(const std::string &uci) override {
+        const chess::Move move = chess::uci::uciToMove(board_, uci);
+        if (move != chess::Move::NO_MOVE) {
+            board_.makeMove(move);
+        } else {
+            chess::Movelist legal;
+            chess::movegen::legalmoves(legal, board_);
+            for (const auto &m : legal) {
+                if (chess::uci::moveToUci(m) == uci) {
+                    board_.makeMove(m);
+                    break;
+                }
+            }
+        }
+    }
+
+    chess::Board &getBoard() override { return board_; }
+
+    std::string searchBestMove(const Limits & /*limits*/) override {
         chess::Movelist legal;
-        chess::movegen::legalmoves(legal, board);
+        chess::movegen::legalmoves(legal, board_);
         if (legal.empty()) return "0000";
         std::uniform_int_distribution<std::size_t> dist(0, legal.size() - 1);
         const chess::Move mv = legal[dist(rng_)];
@@ -22,6 +44,7 @@ public:
 
 private:
     std::mt19937_64 rng_;
+    chess::Board board_;
 };
 
 } // namespace engine

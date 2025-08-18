@@ -48,10 +48,6 @@ struct PositionCache {
 
 PositionCache g_pos_cache;
 
-void reset(chess::Board &board) {
-    board = chess::Board();
-}
-
 void send_id() {
     std::cout << "id name SearchlessRandom" << '\n';
     std::cout << "id author Searchless" << '\n';
@@ -65,30 +61,14 @@ std::vector<std::string> split(const std::string &line) {
     return tokens;
 }
 
-void apply_moves(chess::Board &board, const std::vector<std::string> &moves_tokens, std::size_t start_index) {
+void apply_moves(engine::SearchAlgo &search, const std::vector<std::string> &moves_tokens, std::size_t start_index) {
     for (std::size_t i = start_index; i < moves_tokens.size(); ++i) {
         const std::string &uci_move = moves_tokens[i];
-        const chess::Move move = chess::uci::uciToMove(board, uci_move);
-        if (move != chess::Move::NO_MOVE) {
-            board.makeMove(move);
-        } else {
-            // Fallback: try to match against generated legal moves
-            chess::Movelist legal;
-            chess::movegen::legalmoves(legal, board);
-            bool applied = false;
-            for (const auto &m : legal) {
-                if (chess::uci::moveToUci(m) == uci_move) {
-                    board.makeMove(m);
-                    applied = true;
-                    break;
-                }
-            }
-            (void)applied; // ignore if not applied; invalid move is skipped
-        }
+        search.makemove(uci_move);
     }
 }
 
-void set_position(chess::Board &board, const std::string &cmd) {
+void set_position(engine::SearchAlgo &search, const std::string &cmd) {
     // cmd starts with "position"
     // Supported:
     // - position startpos [moves <m1> <m2> ...]
@@ -143,7 +123,7 @@ void set_position(chess::Board &board, const std::string &cmd) {
                     suffix_tokens.push_back(new_moves[i]);
                 }
                 // Reuse apply_moves signature: needs tokens with moves only and start_index 0
-                apply_moves(board, suffix_tokens, 0);
+                apply_moves(search, suffix_tokens, 0);
             }
             applied_incremental = true;
         }
@@ -152,13 +132,13 @@ void set_position(chess::Board &board, const std::string &cmd) {
     if (!applied_incremental) {
         // Reinitialize to base and apply all moves
         if (new_is_startpos) {
-            reset(board);
+            search.reset();
         } else if (!new_fen.empty()) {
-            board.setFen(new_fen);
+            search.getBoard().setFen(new_fen);
         }
         if (!new_moves.empty()) {
             // Build tokens array containing exactly the moves
-            apply_moves(board, new_moves, 0);
+            apply_moves(search, new_moves, 0);
         }
     }
 
@@ -218,7 +198,6 @@ engine::Limits parse_go_limits(const std::string &cmd) {
 } // namespace
 
 int main() {
-    chess::Board board; // default startpos
     Options options;
 
     // Instantiate search
@@ -267,12 +246,13 @@ int main() {
                 }
             }
         } else if (line == "ucinewgame") {
-            reset(board);
+            search.reset();
+            g_pos_cache = PositionCache{};
         } else if (line.rfind("position", 0) == 0) {
-            set_position(board, line);
+            set_position(search, line);
         } else if (line.rfind("go", 0) == 0) {
             const engine::Limits limits = parse_go_limits(line);
-            const std::string best = search.searchBestMove(board, limits);
+            const std::string best = search.searchBestMove(limits);
             std::cout << "bestmove " << best << '\n' << std::flush;
         } else if (line == "stop") {
             // no background search; nothing to do
@@ -280,7 +260,7 @@ int main() {
             break;
         } else if (line == "print") {
             // helper for debugging
-            std::cout << board << '\n' << std::flush;
+            std::cout << search.getBoard() << '\n' << std::flush;
         }
     }
 

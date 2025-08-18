@@ -22,7 +22,13 @@ struct Limits {
 class SearchAlgo {
 public:
     virtual ~SearchAlgo() = default;
-    virtual std::string searchBestMove(chess::Board &board, const Limits &limits) = 0;
+    // Engine state management
+    virtual void reset() = 0;                                   // set to startpos
+    virtual void makemove(const std::string &uci) = 0;           // apply UCI move to internal board
+    virtual chess::Board &getBoard() = 0;                        // access internal board
+
+    // Search API operating on internal board
+    virtual std::string searchBestMove(const Limits &limits) = 0;
 };
 
 } // namespace engine

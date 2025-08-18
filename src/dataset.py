@@ -5,7 +5,7 @@ import os
 import grain.python as pygrain
 import bagz
 
-from typing import Any
+from typing import Any, Sequence
 from searchless_chess.src import config as config_lib
 from searchless_chess.src.data_loader import _TRANSFORMATION_BY_POLICY
 from concurrent.futures import ThreadPoolExecutor
@@ -16,17 +16,52 @@ class ConvertToTorch(pygrain.MapTransform):
 
         
 
-def load_datasource(config: config_lib.DataConfig):
+class _InterleavedShardedSequence(Sequence[bytes]):
+    """Shards a base sequence across `world_size` by interleaving indices.
+
+    For base length N, ranks 0..(r-1) get ceil(N/world_size) items, others get floor.
+    Local index k maps to global index k*world_size + rank.
+    """
+
+    def __init__(self, base: Sequence[bytes], world_size: int, rank: int) -> None:
+        self._base = base
+        self._world_size = int(world_size)
+        self._rank = int(rank)
+        total = len(base)
+        q, r = divmod(total, self._world_size)
+        self._length = q + (1 if self._rank < r else 0)
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, index: int) -> bytes:
+        if index < 0:
+            index += self._length
+        if not 0 <= index < self._length:
+            raise IndexError('Index out of range for sharded sequence')
+        global_index = index * self._world_size + self._rank
+        return self._base[global_index]
+
+
+def load_datasource(
+    config: config_lib.DataConfig,
+    *,
+    world_size: int | None = None,
+    rank: int | None = None,
+):
     data_path = os.path.join(
         os.getcwd(),
         config.dataset_path,
     )
     bag_source = bagz.BagDataSource(data_path)
+    # If distributed, shard the data source so each rank sees a disjoint view.
+    if world_size is not None and rank is not None and world_size > 1:
+        bag_source = _InterleavedShardedSequence(bag_source, world_size=world_size, rank=rank)
     sampler = pygrain.IndexSampler(
         num_records=len(bag_source),
         shard_options=pygrain.NoSharding(),
         shuffle=config.shuffle,
-        seed=config.seed,
+        seed=(config.seed if rank is None else (config.seed + int(rank))),
         num_epochs=None,
     )
 

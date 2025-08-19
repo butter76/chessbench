@@ -16,6 +16,9 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Threads
+find_package(Threads REQUIRED)
+
 # Download single-header chess library during configure
 set(CHESS_URL "https://raw.githubusercontent.com/Disservin/chess-library/master/include/chess.hpp")
 set(THIRD_PARTY_DIR "${CMAKE_BINARY_DIR}/third_party/chess-library")
@@ -33,6 +36,7 @@ add_executable(chess_sample
     src/time/fixed_time.cpp
 )
 target_include_directories(chess_sample PRIVATE "${THIRD_PARTY_DIR}")
+target_link_libraries(chess_sample PRIVATE Threads::Threads)
 
 # Build and link against libc++ when using Clang
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -44,5 +48,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_link_options(chess_sample PRIVATE -fuse-ld=lld)
     endif()
 endif()
+
+
+# Proof-of-concept: coroutine work-stealing pool + mock evaluator
+add_executable(coroutines_poc
+    src/poc/demo.cpp
+    src/poc/async_pool.cpp
+    src/poc/nn_evaluator.cpp
+)
+target_link_libraries(coroutines_poc PRIVATE Threads::Threads)
 
 

@@ -2,6 +2,7 @@
 #include "options.hpp"
 #include "search/search_algo.hpp"
 #include "search/random_search.hpp"
+#include "time/fixed_time.hpp"
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -196,8 +197,9 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Instantiate search
-    engine::RandomSearch search(options);
+    // Instantiate search with a simple fixed time handler (e.g., 50ms per move)
+    engine::FixedTime fixed_time_handler(50);
+    engine::RandomSearch search(options, &fixed_time_handler);
 
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);

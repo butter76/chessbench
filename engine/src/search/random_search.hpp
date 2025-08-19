@@ -9,8 +9,9 @@ namespace engine {
 class RandomSearch : public SearchAlgo {
 public:
     explicit RandomSearch(engine::Options &options,
+                          const engine::TimeHandler *time_handler,
                           unsigned long long seed = std::random_device{}())
-        : SearchAlgo(options), rng_(seed), board_() {}
+        : SearchAlgo(options, time_handler), rng_(seed), board_() {}
 
     void reset() override {
         board_ = chess::Board();
@@ -36,10 +37,13 @@ public:
 
     void stop() override { /* no-op for random */ }
 
-    std::string searchBestMove(const Limits & /*limits*/) override {
+    std::string searchBestMove(const Limits & limits) override {
         chess::Movelist legal;
         chess::movegen::legalmoves(legal, board_);
         if (legal.empty()) return "0000";
+        // TimeHandler is optional for node-limited searches; only used if not solely node-limited
+        // For RandomSearch we ignore the time budget, but wiring is in place for future use
+        (void)limits;
         std::uniform_int_distribution<std::size_t> dist(0, legal.size() - 1);
         const chess::Move mv = legal[dist(rng_)];
         const std::string uci = chess::uci::moveToUci(mv);

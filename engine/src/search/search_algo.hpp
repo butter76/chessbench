@@ -2,6 +2,7 @@
 
 #include "chess.hpp"
 #include "../options.hpp"
+#include "../time/time_handler.hpp"
 
 #include <string>
 #include <vector>
@@ -23,7 +24,8 @@ struct Limits {
 class SearchAlgo {
 public:
     virtual ~SearchAlgo() = default;
-    explicit SearchAlgo(engine::Options &options) : options_(options) {}
+    explicit SearchAlgo(engine::Options &options, const engine::TimeHandler *time_handler)
+        : options_(options), time_handler_(time_handler) {}
 
     // Engine state management
     virtual void reset() = 0;                                   // set to startpos
@@ -36,6 +38,8 @@ public:
 
 protected:
     engine::Options &options_;
+    // Not owned; lifetime managed by caller
+    const engine::TimeHandler *time_handler_;
 };
 
 } // namespace engine

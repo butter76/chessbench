@@ -37,3 +37,4 @@ downloaded_data/
 node_modules/
 syzygy_tables/
 *.jsonl
+training_data/

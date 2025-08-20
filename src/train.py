@@ -70,16 +70,17 @@ def train(
     np.random.seed(rank_seed)
     random.seed(rank_seed)
 
-    # Data loaders (train sharded per-rank; eval on main process only)
+    # Data loaders (train sharded per-rank; eval sharded per-rank as well)
     train_dataloader = load_datasource(
         train_config.data,
         world_size=world_size if distributed else None,
         rank=rank if distributed else None,
     )
-    if is_main_process():
-        val_dataloader = load_datasource(train_config.eval_data)
-    else:
-        val_dataloader = None
+    val_dataloader = load_datasource(
+        train_config.eval_data,
+        world_size=world_size if distributed else None,
+        rank=rank if distributed else None,
+    )
 
     # In the train function, modify the training loop:
     num_epochs = train_config.num_steps // train_config.steps_per_epoch
@@ -115,6 +116,7 @@ def train(
                 output_device=local_rank if device.startswith('cuda') else None,
                 static_graph=True,
                 gradient_as_bucket_view=True,
+                bucket_cap_mb=100,
             )
             model.module.load_state_dict(checkpoint['model'])  # type: ignore[attr-defined]
         else:
@@ -137,6 +139,7 @@ def train(
                 output_device=local_rank if device.startswith('cuda') else None,
                 static_graph=True,
                 gradient_as_bucket_view=True,
+                bucket_cap_mb=100,
             )
         else:
             model = base_model
@@ -164,12 +167,12 @@ def train(
         optimizer,
         start_factor=1.0,
         end_factor=0.77,
-        total_iters=90,
+        total_iters=60,
     )
 
     scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=80,
+        T_max=55,
         eta_min=0.01,
     )
 
@@ -260,62 +263,80 @@ def train(
         if is_main_process() and pbar is not None:
             pbar.close()
 
-        # Evaluate on validation set
+        # Evaluate on validation set (on all ranks, aggregate with all-reduce)
         optimizer.eval()
         model.eval()
         if distributed:
             dist.barrier()
 
-        if is_main_process():
-            assert val_dataloader is not None
-            val_metrics = {}
-            val_loss = 0
-            val_steps = cast(int, train_config.eval_data.num_records) // train_config.eval_data.batch_size
-            val_iter = PrefetchIterator(val_dataloader, device=device)
-            with torch.inference_mode():
-                val_pbar = tqdm(total=val_steps, desc=f'Epoch {epoch+1}/{num_epochs}')
-                for step_in_epoch in range(cast(int, val_steps)):
-                    x, legal_actions, policy, soft_policy, hard_policy, hardest_policy, hl, dhl, wdl, value_prob, draw_prob, plies_left = next(val_iter)
+        # Determine per-rank evaluation steps to keep total near the requested num_records
+        target_records = cast(int, train_config.eval_data.num_records)
+        per_rank_denominator = (train_config.eval_data.batch_size * (world_size if distributed else 1))
+        val_steps_per_rank = max(1, target_records // per_rank_denominator)
 
-                    target = {
-                        'self': x,
-                        'legal': legal_actions,
-                        'hl': hl,
-                        'value': value_prob,
-                        'policy': policy,
-                        'soft_policy': soft_policy,
-                        'hard_policy': hard_policy,
-                        'hardest_policy': hardest_policy,
-                        'dhl': dhl,
-                        'wdl': wdl,
-                        'draw': draw_prob,
-                    }
-                    
-                    with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
-                        value = model(x)
+        # Local accumulators
+        local_val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+        local_item_count = torch.zeros((), device=device, dtype=torch.float64)
+        local_metric_sums: dict[str, torch.Tensor] = {}
 
-                    # Compute loss
-                    losses = unwrap_model(model).losses(value, target)
-                    loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'draw']))
-                    # Update totals
-                    val_metrics = {name: loss.item() + val_metrics.get(name, 0) for name, loss in losses.items()}
-                    val_loss += loss.item()
+        val_iter = PrefetchIterator(val_dataloader, device=device)
+        val_pbar = tqdm(total=val_steps_per_rank, desc=f'Epoch {epoch+1}/{num_epochs}') if is_main_process() else None
+        with torch.inference_mode():
+            for step_in_epoch in range(val_steps_per_rank):
+                x, legal_actions, policy, soft_policy, hard_policy, hardest_policy, hl, dhl, wdl, value_prob, draw_prob, plies_left = next(val_iter)
 
-                    # Update progress bar
-                    avg_val_loss = val_loss / (step_in_epoch + 1)
-                    val_metrics_loss = {name: loss / (step_in_epoch + 1) for name, loss in val_metrics.items()}
+                target = {
+                    'self': x,
+                    'legal': legal_actions,
+                    'hl': hl,
+                    'value': value_prob,
+                    'policy': policy,
+                    'soft_policy': soft_policy,
+                    'hard_policy': hard_policy,
+                    'hardest_policy': hardest_policy,
+                    'dhl': dhl,
+                    'wdl': wdl,
+                    'draw': draw_prob,
+                }
+
+                with torch.inference_mode(), autocast(device, dtype=torch.bfloat16):
+                    value = model(x)
+
+                losses = unwrap_model(model).losses(value, target)
+                batch_loss = cast(torch.Tensor, sum(v for k, v in losses.items() if k not in ['value', 'draw']))
+                batch_size_float = torch.tensor(float(x.shape[0]), device=device, dtype=torch.float64)
+
+                # Weighted sums by batch size
+                local_val_loss_sum += batch_loss.detach().to(torch.float64) * batch_size_float
+                local_item_count += batch_size_float
+                for name, v in losses.items():
+                    if name not in local_metric_sums:
+                        local_metric_sums[name] = torch.zeros((), device=device, dtype=torch.float64)
+                    local_metric_sums[name] += v.detach().to(torch.float64) * batch_size_float
+
+                if is_main_process() and val_pbar is not None:
+                    # Show local progress; averages shown will be from rank 0 only during the loop
+                    avg_local = (local_val_loss_sum / torch.clamp(local_item_count, min=1.0)).item()
+                    local_avgs = {name: (t / torch.clamp(local_item_count, min=1.0)).item() for name, t in local_metric_sums.items()}
                     val_pbar.set_postfix({
-                        'avg_val_loss': f'{avg_val_loss:.5f}',
-                        **{f'{k}': f'{v:.5f}' for k,v in val_metrics_loss.items()},
+                        'avg_val_loss': f'{avg_local:.5f}',
+                        **{f'{k}': f'{v:.5f}' for k,v in local_avgs.items()},
                     })
-
                     val_pbar.update(1)
 
+        if is_main_process() and val_pbar is not None:
             val_pbar.close()
 
+        # Aggregate across ranks
+        if distributed:
+            dist.all_reduce(local_val_loss_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(local_item_count, op=dist.ReduceOp.SUM)
+            for name in local_metric_sums:
+                dist.all_reduce(local_metric_sums[name], op=dist.ReduceOp.SUM)
+
         if is_main_process():
-            avg_val_loss = val_loss / val_steps
-            val_metrics_loss = {name: loss / val_steps for name, loss in val_metrics.items()}
+            avg_val_loss = (local_val_loss_sum / torch.clamp(local_item_count, min=1.0)).item()
+            val_metrics_loss = {name: (t / torch.clamp(local_item_count, min=1.0)).item() for name, t in local_metric_sums.items()}
 
         scheduler.step()
         if is_main_process():
@@ -383,6 +404,7 @@ def main():
         num_heads=48,
         widening_factor=3,
         dropout=0,
+        use_smolgen=True,
     )
     
     # Create training config
@@ -392,28 +414,28 @@ def main():
             batch_size=512,
             shuffle=True,
             seed=4213242,
-            worker_count=16,  # 0 disables multiprocessing
+            worker_count=8,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='train',
-            dataset_path='/ephemeral/processed_data/*_0017.bag',
+            dataset_path='./training_data/*_0017.bag',
         ),
         eval_data=config_lib.DataConfig(
             batch_size=512,
             shuffle=False,
-            worker_count=16,  # 0 disables multiprocessing
+            worker_count=8,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='test',
-            dataset_path='/ephemeral/processed_data/processed_lc0_data_202307*.bag',
+            dataset_path='./training_data/processed_lc0_data_202307*.bag',
             num_records=1_000_000
         ),
         compile=True,
         max_grad_norm=1.0,
-        num_steps=170 * 1000 * 3,
-        steps_per_epoch=1000 * 3,
+        num_steps=110 * 1000 * 2,
+        steps_per_epoch=100,
         save_frequency=5,
-        save_checkpoint_path='../checkpoints/p2/',
+        save_checkpoint_path='./checkpoints/r1-base/',
     )
     
     # Train model

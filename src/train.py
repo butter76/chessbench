@@ -93,7 +93,7 @@ def train(
     checkpoint = None
     compiled = False
     if checkpoint_path is not None and os.path.exists(checkpoint_path):
-        map_location = {'cuda': f'cuda:{local_rank}'} if device.startswith('cuda') else 'cpu'
+        map_location = 'cpu'
         checkpoint = torch.load(checkpoint_path, weights_only=False, map_location=map_location)
         model_config =  checkpoint['model_config']
         step = checkpoint['step']
@@ -107,6 +107,10 @@ def train(
             base_model = cast(ChessTransformer, torch.compile(base_model))
             compiled = True
 
+        # Load weights from CPU checkpoint into GPU model to avoid peak GPU duplication
+        base_model.load_state_dict(checkpoint['model'])
+        del checkpoint['model']
+
         # Wrap with DDP if distributed
         model: ChessTransformer | nn.Module
         if distributed:
@@ -118,10 +122,8 @@ def train(
                 gradient_as_bucket_view=True,
                 bucket_cap_mb=100,
             )
-            model.module.load_state_dict(checkpoint['model'])  # type: ignore[attr-defined]
         else:
             model = base_model
-            model.load_state_dict(checkpoint['model'])
         if is_main_process():
             print(f"Loaded model from checkpoint: {checkpoint_path}")
 
@@ -155,6 +157,13 @@ def train(
         if is_main_process():
             print("Loading Optimizer from checkpoint...")
         optimizer.load_state_dict(checkpoint['optimizer'])
+        # Ensure optimizer state tensors are on the correct device
+        if isinstance(device, str) and device.startswith('cuda'):
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if torch.is_tensor(v):
+                        state[k] = v.to(device, non_blocking=True)
+        del checkpoint['optimizer']
 
 
     scaler = GradScaler(device)
@@ -162,11 +171,12 @@ def train(
         if is_main_process():
             print("Loading Scaler from checkpoint...")
         scaler.load_state_dict(checkpoint['scaler'])
+        del checkpoint['scaler']
 
     scheduler1 = torch.optim.lr_scheduler.LinearLR(
         optimizer,
-        start_factor=1.0,
-        end_factor=0.77,
+        start_factor=1.3,
+        end_factor=1.0,
         total_iters=60,
     )
 
@@ -186,6 +196,11 @@ def train(
         if is_main_process():
             print("Loading Scheduler from checkpoint...")
         scheduler.load_state_dict(checkpoint['scheduler'])
+        del checkpoint['scheduler']
+
+    # Free any remaining checkpoint data ASAP
+    if checkpoint is not None:
+        del checkpoint
 
     train_iter = PrefetchIterator(train_dataloader, device=device)
 
@@ -433,9 +448,10 @@ def main():
         compile=True,
         max_grad_norm=1.0,
         num_steps=110 * 1000 * 2,
-        steps_per_epoch=100,
+        steps_per_epoch=1000,
         save_frequency=5,
         save_checkpoint_path='./checkpoints/r1-base/',
+        # checkpoint_path='../checkpoints/r1-base/checkpoint_last.pt',
     )
     
     # Train model

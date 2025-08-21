@@ -111,15 +111,18 @@ public:
 
     struct SearchOutcome { float score; chess::Move bestMove; bool aborted; };
 
-    SearchOutcome pvs_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, bool want_move) {
+    SearchOutcome pvs_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, bool want_move, int rec_depth = 0) {
         if (stop_requested_.load(std::memory_order_acquire)) return {0.0f, chess::Move::NO_MOVE, true};
 
-        if (node.terminal || depth <= 0.0f || node.policy.empty()) {
+        if (node.terminal || node.policy.empty()) {
             return {node.value, chess::Move::NO_MOVE, false};
         }
 
+        // Ensure policy is sorted and normalized before expansion
+        sort_and_normalize(node);
+
         const float NULL_EPS = 1e-4f;
-        const float depth_reduction = -2.0f * std::log(node.U + 1e-6f);
+        const float node_depth_reduction = -2.0f * std::log(node.U + 1e-6f);
 
         auto is_leaf_node = [&](const LKSNode &n) {
             for (const auto &pe : n.policy) if (pe.child) return false;
@@ -141,9 +144,13 @@ public:
                 }
                 total_weight += pe.policy;
             }
-            if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + depth_reduction) {
+            if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + node_depth_reduction) {
                 return {node.value, chess::Move::NO_MOVE, false};
             }
+        }
+
+        if (rec_depth > 50) {
+            return {node.value, chess::Move::NO_MOVE, false};
         }
 
         float best_move_depth = -std::numeric_limits<float>::infinity();
@@ -157,7 +164,12 @@ public:
             float new_depth = depth + std::log(move_weight + 1e-6f) - std::log(weight_divisor + 1e-6f) - 0.1f;
             if (best_move_depth < -1e-6f) best_move_depth = new_depth;
 
-            if (new_depth <= depth_reduction && !pe.child) {
+            float local_depth_reduction = node_depth_reduction;
+            if (!pe.child) {
+                local_depth_reduction = -2.0f * std::log(pe.U + 1e-6f);
+            }
+
+            if (new_depth <= local_depth_reduction && !pe.child) {
                 if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
                     total_weight += move_weight;
                     continue;
@@ -168,6 +180,8 @@ public:
                 chess::Board child_board = node.board;
                 child_board.makeMove(pe.move);
                 pe.child = std::make_unique<LKSNode>(create_node(child_board));
+                // Backpropagate policy update from this new child into the parent
+                backpropagate_policy_updates(node, *pe.child, pe.move);
             }
 
             int child_re_searches = 0;
@@ -182,7 +196,7 @@ public:
                 else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
                 else next_type = NodeType::CUT;
 
-                auto child_out = pvs_search(*pe.child, new_depth, search_alpha, search_beta, next_type, false);
+                auto child_out = pvs_search(*pe.child, new_depth, search_alpha, search_beta, next_type, false, rec_depth + 1);
                 if (child_out.aborted) return {0.0f, bestMove, true};
                 score = -child_out.score;
 
@@ -194,13 +208,28 @@ public:
                         continue;
                     } else {
                         // Full-window re-search
-                        child_out = pvs_search(*pe.child, new_depth, -beta, -alpha, (node_type == NodeType::PV) ? NodeType::PV : next_type, false);
+                        child_out = pvs_search(*pe.child, new_depth, -beta, -alpha, (node_type == NodeType::PV) ? NodeType::PV : next_type, false, rec_depth + 1);
                         if (child_out.aborted) return {0.0f, bestMove, true};
                         score = -child_out.score;
                     }
                 }
-                if (new_depth > best_move_depth) best_move_depth = new_depth;
                 break;
+            }
+
+            // Update policy if re-searches occurred
+            if (child_re_searches > 0) {
+                float new_policy = pe.policy;
+                if (node_type == NodeType::CUT && score > alpha) {
+                    new_policy = pe.policy * std::exp(child_re_searches * RE_SEARCH_DEPTH);
+                } else {
+                    new_policy = pe.policy + 0.1f;
+                    if (!(score > alpha)) {
+                        float clip = std::max(node.policy[0].policy * 0.98f, pe.policy);
+                        new_policy = std::min(new_policy, clip);
+                    }
+                }
+                pe.policy = new_policy;
+                if (new_depth > best_move_depth) best_move_depth = new_depth;
             }
 
             if (score > bestScore) { bestScore = score; if (want_move) bestMove = pe.move; }
@@ -212,12 +241,12 @@ public:
     }
 
     RootResult lks_root(LKSNode& root, float depth, float alpha, float beta) {
-        auto out = pvs_search(root, depth, alpha, beta, NodeType::PV, true);
+        auto out = pvs_search(root, depth, alpha, beta, NodeType::PV, true, 0);
         return {out.score, out.bestMove, out.aborted};
     }
 
     float lks(LKSNode& node, float depth, float alpha, float beta, bool& aborted, NodeType node_type) {
-        auto out = pvs_search(node, depth, alpha, beta, node_type, false);
+        auto out = pvs_search(node, depth, alpha, beta, node_type, false, 0);
         aborted = out.aborted;
         return out.score;
     }
@@ -267,6 +296,32 @@ private:
             return std::nullopt;
         }
         return res.value;
+    }
+
+    void sort_and_normalize(LKSNode &node) {
+        std::sort(node.policy.begin(), node.policy.end(), [](const LKSPolicyEntry &a, const LKSPolicyEntry &b){ return a.policy > b.policy; });
+        float sum = 0.0f;
+        for (const auto &e : node.policy) sum += e.policy;
+        if (sum > 0.0f) {
+            for (auto &e : node.policy) e.policy = e.policy / sum;
+        }
+    }
+
+    void backpropagate_policy_updates(LKSNode &parent, const LKSNode &child, const chess::Move &move) {
+        // Find entry for move in parent
+        for (auto &entry : parent.policy) {
+            if (entry.move == move) {
+                const float parent_to_node_policy = entry.policy;
+                const float parent_Q_for_child = entry.Q;
+                // Child value is from child's perspective; flip to parent's
+                const float child_from_parent_perspective = -child.value;
+                const float backup = (child_from_parent_perspective - parent_Q_for_child) / (parent.value + 1.01f);
+                const float new_policy_prob = parent_to_node_policy * std::exp(backup);
+                entry.policy = new_policy_prob;
+                // TODO: sanity check this backprop
+                return;
+            }
+        }
     }
 
     static inline int fileCharToIndex(char f) { return static_cast<int>(f - 'a'); }

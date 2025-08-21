@@ -2,6 +2,7 @@
 
 #include "search_algo.hpp"
 #include "../parallel/nn_evaluator.hpp"
+#include "../parallel/thread_pool.hpp"
 #include "../tokenizer.hpp"
 
 #include <atomic>
@@ -10,6 +11,7 @@
 #include <limits>
 #include <optional>
 #include <utility>
+#include <thread>
 #include <iostream>
 
 namespace engine {
@@ -100,18 +102,49 @@ public:
         chess::Movelist moves;
         chess::movegen::legalmoves(moves, root);
         if (moves.empty()) return {0.0f, chess::Move::NO_MOVE, false};
-        float best = -std::numeric_limits<float>::infinity();
-        chess::Move bestMove = chess::Move::NO_MOVE;
+
+        if (!pool_) {
+            unsigned int threads = std::max(2u, std::thread::hardware_concurrency());
+            pool_ = std::make_unique<engine_parallel::ThreadPool>(threads - 1);
+        }
+
+        struct SharedState {
+            std::atomic<bool> aborted{false};
+            std::mutex mtx;
+            float best{-std::numeric_limits<float>::infinity()};
+            chess::Move bestMove{chess::Move::NO_MOVE};
+            std::atomic<int> remaining{0};
+            std::promise<void> done;
+        } shared;
+
+        shared.remaining.store(static_cast<int>(moves.size()));
+
         for (const auto& mv : moves) {
-            if (stop_requested_.load(std::memory_order_acquire)) return {0.0f, bestMove, true};
             chess::Board child = root;
             child.makeMove(mv);
-            bool aborted = false;
-            float score = -negamax(child, depth - 1, aborted);
-            if (aborted) return {0.0f, bestMove, true};
-            if (score > best) { best = score; bestMove = mv; }
+            pool_->submit([this, child, depth, &shared, mv]() mutable {
+                if (shared.aborted.load(std::memory_order_acquire)) {
+                    if (shared.remaining.fetch_sub(1) == 1) shared.done.set_value();
+                    return;
+                }
+                bool aborted_local = false;
+                float score = -negamax(child, depth - 1, aborted_local);
+                if (aborted_local || stop_requested_.load(std::memory_order_acquire)) {
+                    shared.aborted.store(true, std::memory_order_release);
+                    if (shared.remaining.fetch_sub(1) == 1) shared.done.set_value();
+                    return;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(shared.mtx);
+                    if (score > shared.best) { shared.best = score; shared.bestMove = mv; }
+                }
+                if (shared.remaining.fetch_sub(1) == 1) shared.done.set_value();
+            });
         }
-        return {best, bestMove, false};
+
+        shared.done.get_future().wait();
+        if (shared.aborted.load(std::memory_order_acquire)) return {0.0f, shared.bestMove, true};
+        return {shared.best, shared.bestMove, false};
     }
 
     float negamax(const chess::Board& node, int depth, bool& aborted) {
@@ -139,10 +172,11 @@ private:
     chess::Board board_;
     std::atomic<bool> stop_requested_{false};
     engine_parallel::NNEvaluator evaluator_;
+    std::unique_ptr<engine_parallel::ThreadPool> pool_;
 
     // coroutine to await eval then set promise
     TaskVoid evalTask(const std::array<std::uint8_t, 68> tokens, std::promise<engine_parallel::EvalResult> *p) {
-        engine_parallel::EvalAwaitable awaitable{&evaluator_, nullptr, tokens};
+        engine_parallel::EvalAwaitable awaitable{&evaluator_, pool_.get(), tokens};
         engine_parallel::EvalResult res = co_await awaitable;
         p->set_value(res);
         co_return;
@@ -156,13 +190,11 @@ private:
         TaskVoid t = evalTask(tokens, &prom);
         auto h = t.coro;
         t.coro = {};
-        h.resume(); // will suspend into evaluator and resume when ready; evaluator destroys handle when done
+        h.resume(); // will suspend into evaluator and resume on pool when ready
         engine_parallel::EvalResult res = fut.get();
         if (res.canceled || stop_requested_.load(std::memory_order_acquire)) {
-            std::cout << "[eval] canceled fen=" << b.getFen(false) << '\n';
             return std::nullopt;
         }
-        std::cout << "[eval] value=" << res.value << " fen=" << b.getFen(false) << '\n';
         return res.value;
     }
 };

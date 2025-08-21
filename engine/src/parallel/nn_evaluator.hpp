@@ -43,6 +43,7 @@ struct EvalAwaitable {
         std::array<std::uint8_t, 68> tokens;
         PromiseLatch* latch;
         std::coroutine_handle<> handle;
+        ThreadPool* pool{nullptr};
     };
 
     class NNEvaluator* evaluator;
@@ -75,8 +76,12 @@ public:
     void enqueue(EvalAwaitable::Request r) {
         if (stop.load(std::memory_order_acquire)) {
             r.latch->set(EvalResult{0.0f, true});
-            r.handle.resume();
-            if (r.handle.done()) r.handle.destroy();
+            if (r.pool) {
+                r.pool->resume(r.handle);
+            } else {
+                r.handle.resume();
+                if (r.handle.done()) r.handle.destroy();
+            }
             return;
         }
         {
@@ -110,8 +115,12 @@ private:
             if (stop.load(std::memory_order_acquire)) {
                 for (auto& r : batch) {
                     r.latch->set(EvalResult{0.0f, true});
-                    r.handle.resume();
-                    if (r.handle.done()) r.handle.destroy();
+                    if (r.pool) {
+                        r.pool->resume(r.handle);
+                    } else {
+                        r.handle.resume();
+                        if (r.handle.done()) r.handle.destroy();
+                    }
                 }
                 continue;
             }
@@ -124,15 +133,19 @@ private:
                 r.latch->set(EvalResult{score, false});
             }
             for (auto& r : batch) {
-                r.handle.resume();
-                if (r.handle.done()) r.handle.destroy();
+                if (r.pool) {
+                    r.pool->resume(r.handle);
+                } else {
+                    r.handle.resume();
+                    if (r.handle.done()) r.handle.destroy();
+                }
             }
         }
     }
 };
 
 inline void EvalAwaitable::await_suspend(std::coroutine_handle<> h) {
-    evaluator->enqueue(Request{tokens, &latch, h});
+    evaluator->enqueue(Request{tokens, &latch, h, pool});
 }
 
 } // namespace engine_parallel

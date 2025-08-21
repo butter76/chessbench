@@ -68,48 +68,21 @@ public:
     void stop() override { stop_requested_.store(true, std::memory_order_release); }
 
     std::string searchBestMove(const Limits &limits) override {
-        (void)limits; // fixed-depth search ignores time for this PoC
         stop_requested_.store(false, std::memory_order_release);
+        const int maxDepth = limits.depth > 0 ? limits.depth : 2;
 
         chess::Movelist rootMoves;
         chess::movegen::legalmoves(rootMoves, board_);
         if (rootMoves.empty()) return "0000";
 
-        const chess::Color rootColor = board_.sideToMove();
-        float bestScore = -std::numeric_limits<float>::infinity();
         chess::Move bestMove = chess::Move::NO_MOVE;
-        bool aborted = false;
-
-        for (const auto &mv : rootMoves) {
+        float bestScore = -std::numeric_limits<float>::infinity();
+        for (int depth = 1; depth <= maxDepth; ++depth) {
             if (stop_requested_.load(std::memory_order_acquire)) break;
-            chess::Board child = board_;
-            child.makeMove(mv);
-
-            float worstReply = std::numeric_limits<float>::infinity();
-            chess::Movelist replies;
-            chess::movegen::legalmoves(replies, child);
-            if (replies.empty()) {
-                // No reply: terminal position; evaluate child directly
-                auto val = evaluateBlocking(child);
-                if (!val.has_value()) { aborted = true; break; }
-                worstReply = -(*val); // opponent stuck -> good for us
-            } else {
-                for (const auto &rv : replies) {
-                    if (stop_requested_.load(std::memory_order_acquire)) break;
-                    chess::Board leaf = child;
-                    leaf.makeMove(rv);
-                    auto val = evaluateBlocking(leaf);
-                    if (!val.has_value()) { aborted = true; break; }
-                    float eval = *val;
-                    // Opponent chooses the move minimizing our outcome
-                    if (eval < worstReply) worstReply = eval;
-                }
-            }
-
-            // We want to maximize our outcome from root's perspective.
-            float ourScore = (rootColor == chess::Color::WHITE) ? -worstReply : -worstReply;
-            if (ourScore > bestScore) { bestScore = ourScore; bestMove = mv; }
+            auto [score, move, aborted] = negamax_root(board_, depth);
             if (aborted) break;
+            bestScore = score;
+            if (move != chess::Move::NO_MOVE) bestMove = move;
         }
 
         if (bestMove == chess::Move::NO_MOVE) {
@@ -120,6 +93,46 @@ public:
             return "0000";
         }
         return chess::uci::moveToUci(bestMove);
+    }
+    struct RootResult { float score; chess::Move pvMove; bool aborted; };
+
+    RootResult negamax_root(const chess::Board& root, int depth) {
+        chess::Movelist moves;
+        chess::movegen::legalmoves(moves, root);
+        if (moves.empty()) return {0.0f, chess::Move::NO_MOVE, false};
+        float best = -std::numeric_limits<float>::infinity();
+        chess::Move bestMove = chess::Move::NO_MOVE;
+        for (const auto& mv : moves) {
+            if (stop_requested_.load(std::memory_order_acquire)) return {0.0f, bestMove, true};
+            chess::Board child = root;
+            child.makeMove(mv);
+            bool aborted = false;
+            float score = -negamax(child, depth - 1, aborted);
+            if (aborted) return {0.0f, bestMove, true};
+            if (score > best) { best = score; bestMove = mv; }
+        }
+        return {best, bestMove, false};
+    }
+
+    float negamax(const chess::Board& node, int depth, bool& aborted) {
+        if (stop_requested_.load(std::memory_order_acquire)) { aborted = true; return 0.0f; }
+        chess::Movelist moves;
+        chess::movegen::legalmoves(moves, node);
+        if (depth == 0 || moves.empty()) {
+            auto val = evaluateBlocking(node);
+            if (!val.has_value()) { aborted = true; return 0.0f; }
+            return *val;
+        }
+        float best = -std::numeric_limits<float>::infinity();
+        for (const auto& mv : moves) {
+            if (stop_requested_.load(std::memory_order_acquire)) { aborted = true; return 0.0f; }
+            chess::Board child = node;
+            child.makeMove(mv);
+            float score = -negamax(child, depth - 1, aborted);
+            if (aborted) return 0.0f;
+            if (score > best) best = score;
+        }
+        return best;
     }
 
 private:

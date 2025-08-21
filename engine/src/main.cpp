@@ -165,6 +165,8 @@ engine::Limits parse_go_limits(const std::string &cmd) {
             read_ull(limits.movetime_ms);
         } else if (t == "infinite") {
             limits.infinite = true;
+        } else if (t == "depth") {
+            unsigned long long tmp = 0; read_ull(tmp); limits.depth = static_cast<int>(tmp);
         } else {
             // depth, mate, etc. ignored in this minimal engine
         }

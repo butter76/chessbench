@@ -18,6 +18,7 @@ struct Limits {
     unsigned long long winc_ms = 0;
     unsigned long long binc_ms = 0;
     int movestogo = 0;
+    int depth = 0; // 0 => not specified
     std::vector<std::string> searchmoves;
 };
 

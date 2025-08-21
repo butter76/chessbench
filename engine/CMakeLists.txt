@@ -28,7 +28,12 @@ if(NOT EXISTS "${CHESS_HEADER}")
 endif()
 
 add_executable(chess_sample src/main.cpp)
-target_include_directories(chess_sample PRIVATE "${THIRD_PARTY_DIR}")
+target_include_directories(chess_sample PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_definitions(chess_sample PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
+
+# Link pthreads for threading support (required for std::jthread and friends)
+find_package(Threads REQUIRED)
+target_link_libraries(chess_sample PRIVATE Threads::Threads)
 
 # Build and link against libc++ when using Clang
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -38,6 +43,25 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     find_program(LLD_BIN NAMES ld.lld-18 ld.lld lld)
     if(LLD_BIN)
         target_link_options(chess_sample PRIVATE -fuse-ld=lld)
+    endif()
+endif()
+
+
+# -----------------------------
+# PoC: parallelism/coroutines demo
+# -----------------------------
+add_executable(poc_parallel
+    src/poc/main_poc.cpp
+)
+target_include_directories(poc_parallel PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_definitions(poc_parallel PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
+target_link_libraries(poc_parallel PRIVATE Threads::Threads)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(poc_parallel PRIVATE -stdlib=libc++)
+    target_link_options(poc_parallel PRIVATE -stdlib=libc++ -lc++abi)
+    find_program(LLD_BIN NAMES ld.lld-18 ld.lld lld)
+    if(LLD_BIN)
+        target_link_options(poc_parallel PRIVATE -fuse-ld=lld)
     endif()
 endif()
 

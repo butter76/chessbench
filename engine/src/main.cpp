@@ -2,6 +2,7 @@
 #include "options.hpp"
 #include "search/search_algo.hpp"
 #include "search/random_search.hpp"
+#include "search/fixed_depth_search.hpp"
 #include "time/fixed_time.hpp"
 #include <iostream>
 #include <sstream>
@@ -11,6 +12,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <cctype>
+#include <thread>
 
 namespace {
 
@@ -199,7 +201,8 @@ int main(int argc, char **argv) {
 
     // Instantiate search with a simple fixed time handler (e.g., 50ms per move)
     engine::FixedTime fixed_time_handler(50);
-    engine::RandomSearch search(options, &fixed_time_handler);
+    engine::FixedDepthSearch search(options, &fixed_time_handler);
+    std::jthread search_thread; // background search thread
 
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
@@ -244,18 +247,26 @@ int main(int argc, char **argv) {
                 }
             }
         } else if (line == "ucinewgame") {
+            if (search_thread.joinable()) search_thread.join();
             search.reset();
             g_pos_cache = PositionCache{};
         } else if (line.rfind("position", 0) == 0) {
+            if (search_thread.joinable()) search_thread.join();
             set_position(search, line);
         } else if (line.rfind("go", 0) == 0) {
             const engine::Limits limits = parse_go_limits(line);
-            const std::string best = search.searchBestMove(limits);
-            std::cout << "bestmove " << best << '\n' << std::flush;
+            if (search_thread.joinable()) search_thread.join();
+            // Run search on a separate thread so main loop remains responsive
+            search_thread = std::jthread([&search, limits](std::stop_token){
+                const std::string best = search.searchBestMove(limits);
+                std::cout << "bestmove " << best << '\n' << std::flush;
+            });
         } else if (line == "stop") {
             search.stop();
+            if (search_thread.joinable()) search_thread.join();
         } else if (line == "quit") {
             search.stop();
+            if (search_thread.joinable()) search_thread.join();
             break;
         } else if (line == "options") {
             // Non-standard debug helper: print all options as key=value (keys are stored lowercase)

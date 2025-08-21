@@ -4,7 +4,7 @@
 #include <cctype>
 #include <cstdint>
 
-#include "third_party/chess-library/chess.hpp"
+#include "chess.hpp"
 
 namespace engine_tokenizer {
 

@@ -102,50 +102,122 @@ public:
 
     struct RootResult { float score; chess::Move pvMove; bool aborted; };
 
-    RootResult lks_root(const chess::Board& root, float depth, float alpha, float beta) {
+    enum class NodeType { PV, CUT, ALL };
+
+    struct SearchOutcome { float score; chess::Move bestMove; bool aborted; };
+
+    SearchOutcome pvs_search(const chess::Board& board, float depth, float alpha, float beta, NodeType node_type, bool want_move) {
         if (stop_requested_.load(std::memory_order_acquire)) return {0.0f, chess::Move::NO_MOVE, true};
 
-        // Create node and get ordered policy
-        LKSNode node = create_node(root);
+        LKSNode node = create_node(board);
         if (node.terminal || depth <= 0.0f || node.policy.empty()) {
             return {node.value, chess::Move::NO_MOVE, false};
         }
 
+        const float NULL_EPS = 1e-4f;
+        const float depth_reduction = -2.0f * std::log(node.U + 1e-6f);
+
+        auto is_leaf_node = [&](const LKSNode &n) {
+            for (const auto &pe : n.policy) if (pe.child != nullptr) return false;
+            return true;
+        };
+
+        float weight_divisor = 1.0f;
+        int unexpanded_count = 0;
+        float total_weight = 0.0f;
+        if (is_leaf_node(node)) {
+            for (std::size_t i = 0; i < node.policy.size(); ++i) {
+                const auto &pe = node.policy[i];
+                if (pe.child == nullptr) {
+                    if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
+                        weight_divisor -= pe.policy;
+                    } else {
+                        unexpanded_count += 1;
+                    }
+                }
+                total_weight += pe.policy;
+            }
+            if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + depth_reduction) {
+                return {node.value, chess::Move::NO_MOVE, false};
+            }
+        }
+
+        float best_move_depth = -std::numeric_limits<float>::infinity();
         float bestScore = -std::numeric_limits<float>::infinity();
         chess::Move bestMove = chess::Move::NO_MOVE;
+        total_weight = 0.0f;
 
-        for (const auto &entry : node.policy) {
-            chess::Board child = root;
-            child.makeMove(entry.move);
-            bool aborted = false;
-            float score = -lks(child, depth - 1.0f, -beta, -alpha, aborted);
-            if (aborted) return {0.0f, bestMove, true};
-            if (score > bestScore) { bestScore = score; bestMove = entry.move; }
+        for (std::size_t i = 0; i < node.policy.size(); ++i) {
+            auto &pe = node.policy[i];
+            const float move_weight = pe.policy;
+            float new_depth = depth + std::log(move_weight + 1e-6f) - std::log(weight_divisor + 1e-6f) - 0.1f;
+            if (best_move_depth < -1e-6f) best_move_depth = new_depth;
+
+            if (new_depth <= depth_reduction && pe.child == nullptr) {
+                if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
+                    total_weight += move_weight;
+                    continue;
+                }
+            }
+
+            if (pe.child == nullptr) {
+                chess::Board child_board = board;
+                child_board.makeMove(pe.move);
+                LKSNode child = create_node(child_board);
+                arena_.push_back(std::make_unique<LKSNode>(std::move(child)));
+                pe.child = arena_.back().get();
+            }
+
+            int child_re_searches = 0;
+            const float RE_SEARCH_DEPTH = 0.2f;
+            float score = -std::numeric_limits<float>::infinity();
+
+            for (;;) {
+                float search_alpha = (i == 0) ? -beta : -alpha - NULL_EPS;
+                float search_beta = -alpha;
+                NodeType next_type;
+                if (i == 0 && node_type == NodeType::PV) next_type = NodeType::PV;
+                else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
+                else next_type = NodeType::CUT;
+
+                auto child_out = pvs_search(pe.child->board, new_depth, search_alpha, search_beta, next_type, false);
+                if (child_out.aborted) return {0.0f, bestMove, true};
+                score = -child_out.score;
+
+                if (i > 0 && score > alpha) {
+                    if (new_depth < best_move_depth) {
+                        new_depth += RE_SEARCH_DEPTH;
+                        if (new_depth > best_move_depth) new_depth = best_move_depth + RE_SEARCH_DEPTH;
+                        child_re_searches += 1;
+                        continue;
+                    } else {
+                        // Full-window re-search
+                        child_out = pvs_search(pe.child->board, new_depth, -beta, -alpha, (node_type == NodeType::PV) ? NodeType::PV : next_type, false);
+                        if (child_out.aborted) return {0.0f, bestMove, true};
+                        score = -child_out.score;
+                    }
+                }
+                if (new_depth > best_move_depth) best_move_depth = new_depth;
+                break;
+            }
+
+            if (score > bestScore) { bestScore = score; if (want_move) bestMove = pe.move; }
             if (score > alpha) alpha = score;
-            if (alpha >= beta) break; // cutoff
+            if (alpha >= beta) break;
+            total_weight += move_weight;
         }
         return {bestScore, bestMove, false};
     }
 
-    float lks(const chess::Board& board, float depth, float alpha, float beta, bool& aborted) {
-        if (stop_requested_.load(std::memory_order_acquire)) { aborted = true; return 0.0f; }
-        LKSNode node = create_node(board);
-        if (node.terminal || depth <= 0.0f || node.policy.empty()) {
-            return node.value;
-        }
+    RootResult lks_root(const chess::Board& root, float depth, float alpha, float beta) {
+        auto out = pvs_search(root, depth, alpha, beta, NodeType::PV, true);
+        return {out.score, out.bestMove, out.aborted};
+    }
 
-        float best = -std::numeric_limits<float>::infinity();
-        for (const auto &entry : node.policy) {
-            if (stop_requested_.load(std::memory_order_acquire)) { aborted = true; return 0.0f; }
-            chess::Board child = board;
-            child.makeMove(entry.move);
-            float score = -lks(child, depth - 1.0f, -beta, -alpha, aborted);
-            if (aborted) return 0.0f;
-            if (score > best) best = score;
-            if (score > alpha) alpha = score;
-            if (alpha >= beta) break;
-        }
-        return best;
+    float lks(const chess::Board& board, float depth, float alpha, float beta, bool& aborted, NodeType node_type) {
+        auto out = pvs_search(board, depth, alpha, beta, node_type, false);
+        aborted = out.aborted;
+        return out.score;
     }
 
 private:
@@ -153,6 +225,7 @@ private:
     std::atomic<bool> stop_requested_{false};
     engine_parallel::NNEvaluator evaluator_;
     std::unique_ptr<engine_parallel::ThreadPool> pool_;
+    std::vector<std::unique_ptr<LKSNode>> arena_;
 
     // coroutine to await eval then set promise
     LksTaskVoid evalTask(const std::array<std::uint8_t, 68> tokens, std::promise<engine_parallel::EvalResult> *p) {

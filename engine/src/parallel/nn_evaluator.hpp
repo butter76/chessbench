@@ -262,9 +262,6 @@ private:
 
             if (!batch.empty()) {
                 std::cout << "BATCHED " << batch.size() << " EVALS" << std::endl;
-                for (const auto& r : batch) {
-                    std::cout << tokensToString(r.tokens) << std::endl;
-                }
             }
 
             if (stop.load(std::memory_order_acquire)) {

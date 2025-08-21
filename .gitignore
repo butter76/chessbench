@@ -38,3 +38,4 @@ downloaded_data/
 node_modules/
 syzygy_tables/
 *.jsonl
+*.plan

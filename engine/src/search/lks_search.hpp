@@ -84,7 +84,8 @@ public:
         float bestScore = -std::numeric_limits<float>::infinity();
         while (currentDepth <= maxDepth + 1e-6f) {
             if (stop_requested_.load(std::memory_order_acquire)) break;
-            auto [score, move, aborted] = lks_root(board_, currentDepth, -1.0f, 1.0f);
+            LKSNode root_node = create_node(board_);
+            auto [score, move, aborted] = lks_root(root_node, currentDepth, -1.0f, 1.0f);
             if (aborted) break;
             bestScore = score;
             if (move != chess::Move::NO_MOVE) bestMove = move;
@@ -106,10 +107,9 @@ public:
 
     struct SearchOutcome { float score; chess::Move bestMove; bool aborted; };
 
-    SearchOutcome pvs_search(const chess::Board& board, float depth, float alpha, float beta, NodeType node_type, bool want_move) {
+    SearchOutcome pvs_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, bool want_move) {
         if (stop_requested_.load(std::memory_order_acquire)) return {0.0f, chess::Move::NO_MOVE, true};
 
-        LKSNode node = create_node(board);
         if (node.terminal || depth <= 0.0f || node.policy.empty()) {
             return {node.value, chess::Move::NO_MOVE, false};
         }
@@ -118,7 +118,7 @@ public:
         const float depth_reduction = -2.0f * std::log(node.U + 1e-6f);
 
         auto is_leaf_node = [&](const LKSNode &n) {
-            for (const auto &pe : n.policy) if (pe.child != nullptr) return false;
+            for (const auto &pe : n.policy) if (pe.child) return false;
             return true;
         };
 
@@ -153,19 +153,17 @@ public:
             float new_depth = depth + std::log(move_weight + 1e-6f) - std::log(weight_divisor + 1e-6f) - 0.1f;
             if (best_move_depth < -1e-6f) best_move_depth = new_depth;
 
-            if (new_depth <= depth_reduction && pe.child == nullptr) {
+            if (new_depth <= depth_reduction && !pe.child) {
                 if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
                     total_weight += move_weight;
                     continue;
                 }
             }
 
-            if (pe.child == nullptr) {
-                chess::Board child_board = board;
+            if (!pe.child) {
+                chess::Board child_board = node.board;
                 child_board.makeMove(pe.move);
-                LKSNode child = create_node(child_board);
-                arena_.push_back(std::make_unique<LKSNode>(std::move(child)));
-                pe.child = arena_.back().get();
+                pe.child = std::make_unique<LKSNode>(create_node(child_board));
             }
 
             int child_re_searches = 0;
@@ -180,7 +178,7 @@ public:
                 else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
                 else next_type = NodeType::CUT;
 
-                auto child_out = pvs_search(pe.child->board, new_depth, search_alpha, search_beta, next_type, false);
+                auto child_out = pvs_search(*pe.child, new_depth, search_alpha, search_beta, next_type, false);
                 if (child_out.aborted) return {0.0f, bestMove, true};
                 score = -child_out.score;
 
@@ -192,7 +190,7 @@ public:
                         continue;
                     } else {
                         // Full-window re-search
-                        child_out = pvs_search(pe.child->board, new_depth, -beta, -alpha, (node_type == NodeType::PV) ? NodeType::PV : next_type, false);
+                        child_out = pvs_search(*pe.child, new_depth, -beta, -alpha, (node_type == NodeType::PV) ? NodeType::PV : next_type, false);
                         if (child_out.aborted) return {0.0f, bestMove, true};
                         score = -child_out.score;
                     }
@@ -209,13 +207,13 @@ public:
         return {bestScore, bestMove, false};
     }
 
-    RootResult lks_root(const chess::Board& root, float depth, float alpha, float beta) {
+    RootResult lks_root(LKSNode& root, float depth, float alpha, float beta) {
         auto out = pvs_search(root, depth, alpha, beta, NodeType::PV, true);
         return {out.score, out.bestMove, out.aborted};
     }
 
-    float lks(const chess::Board& board, float depth, float alpha, float beta, bool& aborted, NodeType node_type) {
-        auto out = pvs_search(board, depth, alpha, beta, node_type, false);
+    float lks(LKSNode& node, float depth, float alpha, float beta, bool& aborted, NodeType node_type) {
+        auto out = pvs_search(node, depth, alpha, beta, node_type, false);
         aborted = out.aborted;
         return out.score;
     }
@@ -379,7 +377,7 @@ public:
             e.U = U_val;
             e.Q = Q_val;
             e.child = nullptr;
-            entries.push_back(e);
+            entries.push_back(std::move(e));
         }
         std::sort(entries.begin(), entries.end(), [](const LKSPolicyEntry &a, const LKSPolicyEntry &b){ return a.policy > b.policy; });
 

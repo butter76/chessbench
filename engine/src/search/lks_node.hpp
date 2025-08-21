@@ -3,10 +3,11 @@
 #include "chess.hpp"
 
 #include <vector>
+#include <memory>
 
 namespace engine {
 
-struct LKSNode; // forward declaration for pointer in policy entry
+struct LKSNode; // forward declaration for child pointer
 
 // Represents one policy entry: (move, policy, U, Q)
 struct LKSPolicyEntry {
@@ -14,7 +15,7 @@ struct LKSPolicyEntry {
     float policy{0.0f};
     float U{0.0f};
     float Q{0.0f};
-    LKSNode* child{nullptr}; // optional pointer to expanded child node
+    std::unique_ptr<LKSNode> child; // optional expanded child node
 };
 
 // Light-weight search node for LKS

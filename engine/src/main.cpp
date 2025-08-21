@@ -168,7 +168,7 @@ engine::Limits parse_go_limits(const std::string &cmd) {
         } else if (t == "depth") {
             unsigned long long tmp = 0; read_ull(tmp); limits.depth = static_cast<int>(tmp);
         } else {
-            // depth, mate, etc. ignored in this minimal engine
+            // mate, etc. ignored in this minimal engine
         }
     }
     return limits;

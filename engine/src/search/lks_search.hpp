@@ -15,6 +15,7 @@
 #include <thread>
 #include <iostream>
 #include <cmath>
+#include <memory>
 
 namespace engine {
 
@@ -52,7 +53,7 @@ public:
         evaluator_.stop_and_join();
     }
 
-    void reset() override { board_ = chess::Board(); }
+    void reset() override { board_ = chess::Board(); root_.reset(); }
 
     void makemove(const std::string &uci) override {
         const chess::Move move = chess::uci::uciToMove(board_, uci);
@@ -65,6 +66,7 @@ public:
                 if (chess::uci::moveToUci(m) == uci) { board_.makeMove(m); break; }
             }
         }
+        root_.reset();
     }
 
     chess::Board &getBoard() override { return board_; }
@@ -82,10 +84,12 @@ public:
 
         chess::Move bestMove = chess::Move::NO_MOVE;
         float bestScore = -std::numeric_limits<float>::infinity();
+        if (!root_) {
+            root_ = std::make_unique<LKSNode>(create_node(board_));
+        }
         while (currentDepth <= maxDepth + 1e-6f) {
             if (stop_requested_.load(std::memory_order_acquire)) break;
-            LKSNode root_node = create_node(board_);
-            auto [score, move, aborted] = lks_root(root_node, currentDepth, -1.0f, 1.0f);
+            auto [score, move, aborted] = lks_root(*root_, currentDepth, -1.0f, 1.0f);
             if (aborted) break;
             bestScore = score;
             if (move != chess::Move::NO_MOVE) bestMove = move;
@@ -223,7 +227,7 @@ private:
     std::atomic<bool> stop_requested_{false};
     engine_parallel::NNEvaluator evaluator_;
     std::unique_ptr<engine_parallel::ThreadPool> pool_;
-    std::vector<std::unique_ptr<LKSNode>> arena_;
+    std::unique_ptr<LKSNode> root_;
 
     // coroutine to await eval then set promise
     LksTaskVoid evalTask(const std::array<std::uint8_t, 68> tokens, std::promise<engine_parallel::EvalResult> *p) {

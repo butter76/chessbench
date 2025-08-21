@@ -109,9 +109,8 @@ void set_position(engine::SearchAlgo &search, const std::string &cmd) {
 
     if (!applied_incremental) {
         // Reinitialize to base and apply all moves
-        if (new_is_startpos) {
-            search.reset();
-        } else if (!new_fen.empty()) {
+        search.reset();
+        if (!new_fen.empty()) {
             search.getBoard().setFen(new_fen);
         }
         if (!new_moves.empty()) {

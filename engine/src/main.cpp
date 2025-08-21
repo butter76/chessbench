@@ -3,6 +3,7 @@
 #include "search/search_algo.hpp"
 #include "search/random_search.hpp"
 #include "search/fixed_depth_search.hpp"
+#include "search/lks_search.hpp"
 #include "time/fixed_time.hpp"
 #include <iostream>
 #include <sstream>
@@ -203,7 +204,7 @@ int main(int argc, char **argv) {
 
     // Instantiate search with a simple fixed time handler (e.g., 50ms per move)
     engine::FixedTime fixed_time_handler(50);
-    engine::FixedDepthSearch search(options, &fixed_time_handler);
+    engine::LksSearch search(options, &fixed_time_handler);
     std::jthread search_thread; // background search thread
 
     std::ios::sync_with_stdio(false);

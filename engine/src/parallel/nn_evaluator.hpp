@@ -7,6 +7,7 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <queue>
 #include <thread>
 #include <string>
@@ -25,6 +26,12 @@ namespace engine_parallel {
 
 struct EvalResult {
     float value = 0.0f;
+    // Optional tensors returned by the network for one sample
+    // Flat vectors in row-major order per sample
+    std::vector<float> hl;       // e.g., logits over buckets
+    std::vector<float> policy;   // e.g., move policy logits or probs
+    std::vector<float> U;        // uncertainty head
+    std::vector<float> Q;        // value head per-move or auxiliary
     bool canceled = false;
 };
 
@@ -35,15 +42,16 @@ struct EvalAwaitable {
     class PromiseLatch {
     public:
         void set(EvalResult r) {
-            result.store(r.value, std::memory_order_release);
-            canceled.store(r.canceled, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(mtx);
+            result = std::move(r);
         }
         EvalResult get() const {
-            return EvalResult{result.load(std::memory_order_acquire), canceled.load(std::memory_order_acquire)};
+            std::lock_guard<std::mutex> lock(mtx);
+            return result; // return by value
         }
     private:
-        std::atomic<float> result{0.0f};
-        std::atomic<bool> canceled{false};
+        mutable std::mutex mtx;
+        EvalResult result{};
     };
 
     struct Request {
@@ -65,7 +73,7 @@ struct EvalAwaitable {
 
 class NNEvaluator {
 public:
-    static constexpr std::size_t kBatchSize = 16;
+    static constexpr std::size_t kBatchSize = 64;
 
     NNEvaluator() = default;
 
@@ -84,7 +92,7 @@ public:
 
     void enqueue(EvalAwaitable::Request r) {
         if (stop.load(std::memory_order_acquire)) {
-            r.latch->set(EvalResult{0.0f, true});
+            EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
             if (r.pool) {
                 r.pool->resume(r.handle);
             } else {
@@ -266,7 +274,7 @@ private:
 
             if (stop.load(std::memory_order_acquire)) {
                 for (auto& r : batch) {
-                    r.latch->set(EvalResult{0.0f, true});
+                    EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
                     if (r.pool) {
                         r.pool->resume(r.handle);
                     } else {
@@ -341,7 +349,7 @@ private:
                     std::cerr << "[NNEvaluator] enqueueV2 failed" << std::endl;
                 }
 
-                // Copy back 'value' and distribute results
+                // Copy back outputs and distribute results
                 std::vector<float> host_values(n_value);
                 if (dt_value == nvinfer1::DataType::kHALF) {
                     std::vector<__half> tmp(n_value);
@@ -353,10 +361,45 @@ private:
                 }
                 cudaStreamSynchronize(trt_stream);
 
+                auto copy_out_float = [&](void* d_ptr, size_t n_elem, nvinfer1::DataType dt) -> std::vector<float> {
+                    std::vector<float> host;
+                    if (!d_ptr || n_elem == 0) return host;
+                    host.resize(n_elem);
+                    if (dt == nvinfer1::DataType::kHALF) {
+                        std::vector<__half> tmp(n_elem);
+                        cudaMemcpyAsync(tmp.data(), d_ptr, n_elem * sizeof(__half), cudaMemcpyDeviceToHost, trt_stream);
+                        cudaStreamSynchronize(trt_stream);
+                        for (size_t i = 0; i < n_elem; ++i) host[i] = __half2float(tmp[i]);
+                    } else {
+                        cudaMemcpyAsync(host.data(), d_ptr, n_elem * sizeof(float), cudaMemcpyDeviceToHost, trt_stream);
+                        cudaStreamSynchronize(trt_stream);
+                    }
+                    return host;
+                };
+
+                std::vector<float> host_hl = copy_out_float(d_hl, n_hl, dt_hl);
+                std::vector<float> host_hard = copy_out_float(d_hard, n_hard, dt_hard);
+                std::vector<float> host_U = copy_out_float(d_U, n_U, dt_U);
+                std::vector<float> host_Q = copy_out_float(d_Q, n_Q, dt_Q);
+
+                // Determine per-sample sizes (assume leading batch dim)
+                auto per_or_zero = [&](size_t total) -> size_t { return (B > 0 && total % static_cast<size_t>(B) == 0) ? (total / static_cast<size_t>(B)) : 0; };
+                const size_t per_hl = per_or_zero(n_hl);
+                const size_t per_hard = per_or_zero(n_hard);
+                const size_t per_U = per_or_zero(n_U);
+                const size_t per_Q = per_or_zero(n_Q);
+
                 for (int i = 0; i < B; ++i) {
                     float score = (n_value >= static_cast<size_t>((i + 1))) ? host_values[i] : 0.0f;
                     std::cout << tokensToString(batch[i].tokens) << " => " << score << std::endl;
-                    batch[i].latch->set(EvalResult{score, false});
+                    EvalResult er;
+                    er.value = score;
+                    er.canceled = false;
+                    if (per_hl > 0) er.hl = std::vector<float>(host_hl.begin() + static_cast<std::ptrdiff_t>(i * per_hl), host_hl.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hl));
+                    if (per_hard > 0) er.policy = std::vector<float>(host_hard.begin() + static_cast<std::ptrdiff_t>(i * per_hard), host_hard.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hard));
+                    if (per_U > 0) er.U = std::vector<float>(host_U.begin() + static_cast<std::ptrdiff_t>(i * per_U), host_U.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_U));
+                    if (per_Q > 0) er.Q = std::vector<float>(host_Q.begin() + static_cast<std::ptrdiff_t>(i * per_Q), host_Q.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_Q));
+                    batch[i].latch->set(std::move(er));
                 }
 
                 // Cleanup device buffers
@@ -367,13 +410,17 @@ private:
                 if (d_U) cudaFree(d_U);
                 if (d_Q) cudaFree(d_Q);
             } else {
-                // Fallback dummy behavior
+                // No TensorRT available: cancel all requests and throw
                 for (auto& r : batch) {
-                    float score = 0.0f;
-                    for (std::uint8_t t : r.tokens) score += static_cast<float>(t) * 0.001f;
-                    std::cout << tokensToString(r.tokens) << " => " << score << std::endl;
-                    r.latch->set(EvalResult{score, false});
+                    EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
+                    if (r.pool) {
+                        r.pool->resume(r.handle);
+                    } else {
+                        r.handle.resume();
+                        if (r.handle.done()) r.handle.destroy();
+                    }
                 }
+                throw std::runtime_error("[NNEvaluator] TensorRT not initialized; fallback behavior disabled");
             }
             for (auto& r : batch) {
                 if (r.pool) {

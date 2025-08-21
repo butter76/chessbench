@@ -73,7 +73,8 @@ public:
 
     std::string searchBestMove(const Limits &limits) override {
         stop_requested_.store(false, std::memory_order_release);
-        const int maxDepth = limits.depth > 0 ? limits.depth : 2;
+        float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 2.0f;
+        float currentDepth = std::min(2.0f, maxDepth);
 
         chess::Movelist rootMoves;
         chess::movegen::legalmoves(rootMoves, board_);
@@ -81,12 +82,13 @@ public:
 
         chess::Move bestMove = chess::Move::NO_MOVE;
         float bestScore = -std::numeric_limits<float>::infinity();
-        for (int depth = 1; depth <= maxDepth; ++depth) {
+        while (currentDepth <= maxDepth + 1e-6f) {
             if (stop_requested_.load(std::memory_order_acquire)) break;
-            auto [score, move, aborted] = lks_root(board_, depth);
+            auto [score, move, aborted] = lks_root(board_, currentDepth, -1.0f, 1.0f);
             if (aborted) break;
             bestScore = score;
             if (move != chess::Move::NO_MOVE) bestMove = move;
+            currentDepth += 0.2f;
         }
 
         if (bestMove == chess::Move::NO_MOVE) {
@@ -100,72 +102,48 @@ public:
 
     struct RootResult { float score; chess::Move pvMove; bool aborted; };
 
-    RootResult lks_root(const chess::Board& root, int depth) {
-        chess::Movelist moves;
-        chess::movegen::legalmoves(moves, root);
-        if (moves.empty()) return {0.0f, chess::Move::NO_MOVE, false};
+    RootResult lks_root(const chess::Board& root, float depth, float alpha, float beta) {
+        if (stop_requested_.load(std::memory_order_acquire)) return {0.0f, chess::Move::NO_MOVE, true};
 
-        if (!pool_) {
-            unsigned int threads = std::max(2u, std::thread::hardware_concurrency());
-            pool_ = std::make_unique<engine_parallel::ThreadPool>(threads - 1);
+        // Create node and get ordered policy
+        LKSNode node = create_node(root);
+        if (node.terminal || depth <= 0.0f || node.policy.empty()) {
+            return {node.value, chess::Move::NO_MOVE, false};
         }
 
-        struct SharedState {
-            std::atomic<bool> aborted{false};
-            std::mutex mtx;
-            float best{-std::numeric_limits<float>::infinity()};
-            chess::Move bestMove{chess::Move::NO_MOVE};
-            std::atomic<int> remaining{0};
-            std::promise<void> done;
-        } shared;
+        float bestScore = -std::numeric_limits<float>::infinity();
+        chess::Move bestMove = chess::Move::NO_MOVE;
 
-        shared.remaining.store(static_cast<int>(moves.size()));
-
-        for (const auto& mv : moves) {
+        for (const auto &entry : node.policy) {
             chess::Board child = root;
-            child.makeMove(mv);
-            pool_->submit([this, child, depth, &shared, mv]() mutable {
-                if (shared.aborted.load(std::memory_order_acquire)) {
-                    if (shared.remaining.fetch_sub(1) == 1) shared.done.set_value();
-                    return;
-                }
-                bool aborted_local = false;
-                float score = -lks(child, depth - 1, aborted_local);
-                if (aborted_local || stop_requested_.load(std::memory_order_acquire)) {
-                    shared.aborted.store(true, std::memory_order_release);
-                    if (shared.remaining.fetch_sub(1) == 1) shared.done.set_value();
-                    return;
-                }
-                {
-                    std::lock_guard<std::mutex> lock(shared.mtx);
-                    if (score > shared.best) { shared.best = score; shared.bestMove = mv; }
-                }
-                if (shared.remaining.fetch_sub(1) == 1) shared.done.set_value();
-            });
+            child.makeMove(entry.move);
+            bool aborted = false;
+            float score = -lks(child, depth - 1.0f, -beta, -alpha, aborted);
+            if (aborted) return {0.0f, bestMove, true};
+            if (score > bestScore) { bestScore = score; bestMove = entry.move; }
+            if (score > alpha) alpha = score;
+            if (alpha >= beta) break; // cutoff
         }
-
-        shared.done.get_future().wait();
-        if (shared.aborted.load(std::memory_order_acquire)) return {0.0f, shared.bestMove, true};
-        return {shared.best, shared.bestMove, false};
+        return {bestScore, bestMove, false};
     }
 
-    float lks(const chess::Board& node, int depth, bool& aborted) {
+    float lks(const chess::Board& board, float depth, float alpha, float beta, bool& aborted) {
         if (stop_requested_.load(std::memory_order_acquire)) { aborted = true; return 0.0f; }
-        chess::Movelist moves;
-        chess::movegen::legalmoves(moves, node);
-        if (depth == 0 || moves.empty()) {
-            auto val = evaluateBlocking(node);
-            if (!val.has_value()) { aborted = true; return 0.0f; }
-            return *val;
+        LKSNode node = create_node(board);
+        if (node.terminal || depth <= 0.0f || node.policy.empty()) {
+            return node.value;
         }
+
         float best = -std::numeric_limits<float>::infinity();
-        for (const auto& mv : moves) {
+        for (const auto &entry : node.policy) {
             if (stop_requested_.load(std::memory_order_acquire)) { aborted = true; return 0.0f; }
-            chess::Board child = node;
-            child.makeMove(mv);
-            float score = -lks(child, depth - 1, aborted);
+            chess::Board child = board;
+            child.makeMove(entry.move);
+            float score = -lks(child, depth - 1.0f, -beta, -alpha, aborted);
             if (aborted) return 0.0f;
             if (score > best) best = score;
+            if (score > alpha) alpha = score;
+            if (alpha >= beta) break;
         }
         return best;
     }
@@ -322,7 +300,13 @@ public:
             float U_val = sigmoid(g.U);
             float Q_val = sigmoid(g.Q);
             Q_val = (Q_val * 2.0f - 1.0f) * -1.0f;
-            entries.push_back(LKSPolicyEntry{g.mv, prob, U_val, Q_val});
+            LKSPolicyEntry e;
+            e.move = g.mv;
+            e.policy = prob;
+            e.U = U_val;
+            e.Q = Q_val;
+            e.child = nullptr;
+            entries.push_back(e);
         }
         std::sort(entries.begin(), entries.end(), [](const LKSPolicyEntry &a, const LKSPolicyEntry &b){ return a.policy > b.policy; });
 

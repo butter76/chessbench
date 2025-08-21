@@ -6,12 +6,15 @@
 
 namespace engine {
 
+struct LKSNode; // forward declaration for pointer in policy entry
+
 // Represents one policy entry: (move, policy, U, Q)
 struct LKSPolicyEntry {
     chess::Move move{chess::Move::NO_MOVE};
     float policy{0.0f};
     float U{0.0f};
     float Q{0.0f};
+    LKSNode* child{nullptr}; // optional pointer to expanded child node
 };
 
 // Light-weight search node for LKS

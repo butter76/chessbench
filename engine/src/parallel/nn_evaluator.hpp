@@ -21,6 +21,7 @@
 
 #include "tokenizer.hpp"
 #include "parallel/thread_pool.hpp"
+#include "options.hpp"
 
 namespace engine_parallel {
 
@@ -77,6 +78,8 @@ public:
 
     NNEvaluator() = default;
 
+    explicit NNEvaluator(const engine::Options& options) : options_(&options) {}
+
     void start() {
         stop.store(false, std::memory_order_release);
         initialize_trt("./p2.plan");
@@ -114,6 +117,7 @@ private:
     std::queue<EvalAwaitable::Request> queue;
     std::atomic<bool> stop{false};
     std::jthread worker;
+    const engine::Options* options_{nullptr};
 
     // TensorRT objects
     nvinfer1::IRuntime* trt_runtime{nullptr};
@@ -269,7 +273,9 @@ private:
             }
 
             if (!batch.empty()) {
-                std::cout << "BATCHED " << batch.size() << " EVALS" << std::endl;
+                if (is_batch_verbose()) {
+                    std::cout << "BATCHED " << batch.size() << " EVALS" << std::endl;
+                }
             }
 
             if (stop.load(std::memory_order_acquire)) {
@@ -391,7 +397,9 @@ private:
 
                 for (int i = 0; i < B; ++i) {
                     float score = (n_value >= static_cast<size_t>((i + 1))) ? host_values[i] : 0.0f;
-                    std::cout << tokensToString(batch[i].tokens) << " => " << score << std::endl;
+                    if (is_batch_verbose()) {
+                        std::cout << tokensToString(batch[i].tokens) << " => " << score << std::endl;
+                    }
                     EvalResult er;
                     er.value = score;
                     er.canceled = false;
@@ -431,6 +439,12 @@ private:
                 }
             }
         }
+    }
+
+    bool is_batch_verbose() const {
+        if (!options_) return false;
+        const std::string v = options_->get("batchverbose", "");
+        return !v.empty() && v != "0" && v != "false" && v != "False";
     }
 };
 

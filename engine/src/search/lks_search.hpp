@@ -16,6 +16,10 @@
 #include <iostream>
 #include <cmath>
 #include <memory>
+#include <cstdint>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
 
 namespace engine {
 
@@ -45,7 +49,7 @@ struct LksTaskVoid {
 class LksSearch : public SearchAlgo {
 public:
     explicit LksSearch(engine::Options &options, const engine::TimeHandler *time_handler)
-        : SearchAlgo(options, time_handler), board_() {
+        : SearchAlgo(options, time_handler), board_(), evaluator_(options) {
         evaluator_.start();
     }
 
@@ -75,7 +79,19 @@ public:
 
     std::string searchBestMove(const Limits &limits) override {
         stop_requested_.store(false, std::memory_order_release);
-        float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 2.0f;
+        // Reset per-search statistics
+        stat_gpu_evaluations_.store(0, std::memory_order_relaxed);
+        stat_nodes_created_.store(0, std::memory_order_relaxed);
+        stat_tbhits_.store(0, std::memory_order_relaxed);
+        stat_tthits_.store(0, std::memory_order_relaxed);
+        stat_seldepth_.store(0, std::memory_order_relaxed);
+        // Mark search start time
+        {
+            using namespace std::chrono;
+            const std::int64_t now_ns = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+            stat_search_start_ns_.store(now_ns, std::memory_order_relaxed);
+        }
+        float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 30.0f;
         float currentDepth = std::min(2.0f, maxDepth);
 
         chess::Movelist rootMoves;
@@ -93,6 +109,8 @@ public:
             if (aborted) break;
             bestScore = score;
             if (move != chess::Move::NO_MOVE) bestMove = move;
+            // Emit UCI info line for this iteration
+            print_info_line(currentDepth, bestScore);
             currentDepth += 0.2f;
         }
 
@@ -103,6 +121,37 @@ public:
             return "0000";
         }
         return chess::uci::moveToUci(bestMove);
+    }
+
+    // Statistics API (thread-safe)
+    std::uint64_t getGpuEvaluationsCount() const {
+        return stat_gpu_evaluations_.load(std::memory_order_relaxed);
+    }
+
+    std::uint64_t getNodesCreatedCount() const {
+        return stat_nodes_created_.load(std::memory_order_relaxed);
+    }
+
+    int getSelDepth() const {
+        return stat_seldepth_.load(std::memory_order_relaxed);
+    }
+
+    std::uint64_t getTBHitsCount() const {
+        return stat_tbhits_.load(std::memory_order_relaxed);
+    }
+
+    std::uint64_t getTTHitsCount() const {
+        return stat_tthits_.load(std::memory_order_relaxed);
+    }
+
+    std::uint64_t getElapsedTimeMs() const {
+        using namespace std::chrono;
+        const std::int64_t start_ns = stat_search_start_ns_.load(std::memory_order_relaxed);
+        if (start_ns <= 0) return 0;
+        const std::int64_t now_ns = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+        const std::int64_t delta_ns = now_ns - start_ns;
+        if (delta_ns <= 0) return 0;
+        return static_cast<std::uint64_t>(delta_ns / 1000000);
     }
 
     struct RootResult { float score; chess::Move pvMove; bool aborted; };
@@ -146,6 +195,16 @@ public:
         if (is_leaf_node(node)) {
             if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + node_depth_reduction) {
                 return {node.value, chess::Move::NO_MOVE, false};
+            }
+
+            // This is the first time we are expanding this node, so do some bookkeeping here:
+
+            // Update maximum selective depth with minimal overhead
+            int observed = stat_seldepth_.load(std::memory_order_relaxed);
+            if (rec_depth > observed) {
+                while (!stat_seldepth_.compare_exchange_weak(observed, rec_depth, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                    if (rec_depth <= observed) break;
+                }
             }
         }
 
@@ -257,6 +316,57 @@ private:
     engine_parallel::NNEvaluator evaluator_;
     std::unique_ptr<engine_parallel::ThreadPool> pool_;
     std::unique_ptr<LKSNode> root_;
+    std::atomic<std::uint64_t> stat_gpu_evaluations_{0};
+    std::atomic<std::uint64_t> stat_nodes_created_{0};
+    std::atomic<int> stat_seldepth_{0};
+    std::atomic<std::uint64_t> stat_tbhits_{0};
+    std::atomic<std::uint64_t> stat_tthits_{0};
+    std::atomic<std::int64_t> stat_search_start_ns_{0};
+
+    // --- Helpers for UCI info output ---
+    void print_info_line(float depth, float bestScore) {
+        std::ostringstream oss;
+        // depth with fractional display
+        oss << "info depth " << std::fixed << std::setprecision(1) << depth;
+        // seldepth
+        oss << " seldepth " << getSelDepth();
+        // multipv always 1
+        oss << " multipv 1";
+        // score in centipawns using expected reward -> cp mapping
+        int score_cp = static_cast<int>(std::lround(std::tan(static_cast<double>(bestScore) * 1.563754) * 90.0));
+        oss << " score cp " << score_cp;
+        // nodes and nps
+        std::uint64_t nodes = getNodesCreatedCount();
+        oss << " nodes " << nodes;
+        std::uint64_t ms = getElapsedTimeMs();
+        std::uint64_t nps = (ms == 0) ? nodes : (nodes * 1000ULL) / ms;
+        oss << " nps " << nps;
+        // tbhits and time
+        oss << " tbhits " << getTBHitsCount();
+        oss << " time " << ms;
+        // pv line
+        std::string pv_line = build_pv_line();
+        if (!pv_line.empty()) {
+            oss << " pv " << pv_line;
+        }
+        std::cout << oss.str() << '\n';
+    }
+
+    std::string build_pv_line() const {
+        if (!root_) return {};
+        const LKSNode *node = root_.get();
+        std::ostringstream pv;
+        bool first = true;
+        while (node && !node->policy.empty()) {
+            const auto &pe = node->policy[0];
+            if (pe.move == chess::Move::NO_MOVE) break;
+            if (!first) pv << ' ';
+            pv << chess::uci::moveToUci(pe.move);
+            first = false;
+            if (pe.child) node = pe.child.get(); else break;
+        }
+        return pv.str();
+    }
 
     // coroutine to await eval then set promise
     LksTaskVoid evalTask(const std::array<std::uint8_t, 68> tokens, std::promise<engine_parallel::EvalResult> *p) {
@@ -279,6 +389,7 @@ private:
         if (res.canceled || stop_requested_.load(std::memory_order_acquire)) {
             return std::nullopt;
         }
+        stat_gpu_evaluations_.fetch_add(1, std::memory_order_relaxed);
         return res;
     }
 
@@ -295,6 +406,7 @@ private:
         if (res.canceled || stop_requested_.load(std::memory_order_acquire)) {
             return std::nullopt;
         }
+        stat_gpu_evaluations_.fetch_add(1, std::memory_order_relaxed);
         return res.value;
     }
 
@@ -367,6 +479,8 @@ private:
 public:
     // Create an LKS node from a board by evaluating model outputs
     LKSNode create_node(const chess::Board &board) {
+        // Track node creation
+        stat_nodes_created_.fetch_add(1, std::memory_order_relaxed);
         // Terminal detection (ignore syzygy and TT)
         const auto game_over = board.isGameOver();
         if (game_over.first != chess::GameResultReason::NONE) {

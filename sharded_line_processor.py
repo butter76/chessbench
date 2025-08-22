@@ -30,7 +30,8 @@ def process_line(line_text: str, row_index: int, shard_index: int) -> None:
     if not board.is_legal(chess.Move.from_uci(move)):
         return None
 
-    policy = [(m.uci(), 1.0 if m == move else 0.0) for m in board.legal_moves]
+    policy = [(m.uci(), 1.0 if m.uci() == move else 0.0) for m in board.legal_moves]
+    assert sum(p for _, p in policy) == 1.0, f'{policy} is not a valid policy'
 
     fen = board.fen()
 
@@ -61,7 +62,7 @@ def process_line(line_text: str, row_index: int, shard_index: int) -> None:
 def worker_consume(shard_index: int, input_queue: mp.Queue) -> None:
     """Continuously consume (row_index, line_text) tuples from the queue and process them."""
     try:
-        output_bag = f"data/chessdb_{shard_index:02d}17.bag"
+        output_bag = f"data/chessdb3_{shard_index:02d}17.bag"
         with BagWriter(output_bag) as writer:
             processed_count = 0
             while True:
@@ -69,10 +70,9 @@ def worker_consume(shard_index: int, input_queue: mp.Queue) -> None:
                 if item is None:
                     break
                 row_index, line_text = item
-                if processed_count % 4 == 0:
-                    output = process_line(line_text=line_text, row_index=row_index, shard_index=shard_index)
-                    if output is not None:
-                        writer.write(output)
+                output = process_line(line_text=line_text, row_index=row_index, shard_index=shard_index)
+                if output is not None:
+                    writer.write(output)
                 processed_count += 1
     except KeyboardInterrupt:
         # Allow graceful shutdown on Ctrl+C
@@ -104,8 +104,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--file",
         dest="file_path",
-        default="/home/ubuntu/searchless_chess/data/output.txt",
-        help="Path to the input file (default: /home/ubuntu/searchless_chess/data/output.txt)",
+        default="/home/ubuntu/searchless_chess/data/output2.txt",
+        help="Path to the input file (default: /home/ubuntu/searchless_chess/data/output2.txt)",
     )
     parser.add_argument(
         "--num-shards",

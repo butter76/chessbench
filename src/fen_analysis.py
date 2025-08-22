@@ -94,6 +94,10 @@ def analyze_underpromotions(fen: str, checkpoint_path: str, device: str = None):
     U = output['U'].float().cpu().numpy()
     Q = output['Q'].float().cpu().numpy() 
     D = output['D'].float().cpu().numpy()
+
+    print("Value: ", output['value'].item() * 2 - 1)
+    print("MI1: ", output['hl'])
+    print("Draw: ", output['draw'].item())
     
     # Get policy with metadata including U, Q, D
     policy_results, policy_map, perplexity = get_policy(board, policies[0], U[0], Q[0], D[0])
@@ -146,7 +150,7 @@ def analyze_underpromotions(fen: str, checkpoint_path: str, device: str = None):
 def main():
     parser = argparse.ArgumentParser(description="Analyze policy probabilities")
     parser.add_argument("fen", help="FEN string of the position to analyze")
-    parser.add_argument("--checkpoint", default="../checkpoints/p2-other/post_train_checkpoint_6000.pt",
+    parser.add_argument("--checkpoint", default="../checkpoints/p2-newer/checkpoint_300000.pt",
                        help="Path to model checkpoint")
     parser.add_argument("--device", default=None, 
                        help="Device to use (cuda/cpu, default: auto)")

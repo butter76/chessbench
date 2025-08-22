@@ -15,3 +15,9 @@ LLVM_INCLUDE_DIRS=$LLVM_BUILD_DIR/include   LLVM_LIBRARY_DIR=$LLVM_BUILD_DIR/lib
 
 python3 -m pip install https://github.com/acollins3/triton/releases/download/triton-2.1.0-arm64/triton-2.1.0-cp310-cp310-linux_aarch64.whl
 ```
+
+## Building the engine
+```
+cmake -S . -B ./build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/usr/bin/clang++-18
+cmake --build ./build --target chess_sample -j
+```

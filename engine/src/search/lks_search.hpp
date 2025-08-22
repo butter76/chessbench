@@ -97,9 +97,9 @@ public:
         }
 
         if (bestMove == chess::Move::NO_MOVE) {
-            chess::Movelist legal;
-            chess::movegen::legalmoves(legal, board_);
-            if (!legal.empty()) return chess::uci::moveToUci(legal[0]);
+            if (root_ && !root_->policy.empty()) {
+                return chess::uci::moveToUci(root_->policy[0].move);
+            }
             return "0000";
         }
         return chess::uci::moveToUci(bestMove);
@@ -132,18 +132,18 @@ public:
         float weight_divisor = 1.0f;
         int unexpanded_count = 0;
         float total_weight = 0.0f;
-        if (is_leaf_node(node)) {
-            for (std::size_t i = 0; i < node.policy.size(); ++i) {
-                const auto &pe = node.policy[i];
-                if (pe.child == nullptr) {
-                    if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
-                        weight_divisor -= pe.policy;
-                    } else {
-                        unexpanded_count += 1;
-                    }
+        for (std::size_t i = 0; i < node.policy.size(); ++i) {
+            const auto &pe = node.policy[i];
+            if (pe.child == nullptr) {
+                if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
+                    weight_divisor -= pe.policy;
+                } else {
+                    unexpanded_count += 1;
                 }
-                total_weight += pe.policy;
             }
+            total_weight += pe.policy;
+        }
+        if (is_leaf_node(node)) {
             if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + node_depth_reduction) {
                 return {node.value, chess::Move::NO_MOVE, false};
             }

@@ -10,4 +10,5 @@
     "python.analysis.aiCodeActions": {
         
     },
+    "cmake.sourceDirectory": "/home/ubuntu/searchless_chess/engine",
 }

@@ -34,6 +34,7 @@ from tqdm import tqdm
 
 from searchless_chess.src.engines import engine as engine_lib
 from searchless_chess.src.engines.lc0_engine import AllMovesLc0Engine, Lc0Engine
+from searchless_chess.src.engines.uci_engine import UCIEngine, AllMovesUCIEngine
 from searchless_chess.src.engines.stockfish_engine import StockfishEngine
 from searchless_chess.src.engines.strategy import MoveSelectionStrategy
 from searchless_chess.src.engines.my_engine import MyTransformerEngine
@@ -113,6 +114,12 @@ _CHECKPOINT = flags.DEFINE_string(
     help='The checkpoint to use for MyTransformerEngine.',
 )
 
+_UCI_ENGINE_BIN = flags.DEFINE_string(
+    name='uci_engine_bin',
+    default=None,
+    help='Path to a UCI engine binary to evaluate (e.g., C++ search engine).',
+)
+
 
 _NUM_PROCESSES = flags.DEFINE_integer(
     name='num_processes',
@@ -129,7 +136,7 @@ _NAME = flags.DEFINE_string(
 # Global variable to store the engine in each worker process
 worker_engine = None
 
-def init_worker(strategy, network, depth, num_nodes, checkpoint_path):
+def init_worker(strategy, network, depth, num_nodes, checkpoint_path, uci_engine_bin):
     """Initialize worker process with an engine instance."""
     global worker_engine
     if network is not None:
@@ -140,13 +147,27 @@ def init_worker(strategy, network, depth, num_nodes, checkpoint_path):
             # NODE MCTS
             worker_engine = Lc0Engine(chess.engine.Limit(nodes=num_nodes), network=network)
     else:
-        worker_engine = MyTransformerEngine(
-            checkpoint_path,
-            chess.engine.Limit(nodes=1),
-            strategy=strategy,
-            search_depth=depth,
-            num_nodes=num_nodes,
-        )
+        # Prefer external UCI engine if provided
+        if uci_engine_bin is not None:
+            if strategy == 'value':
+                # Evaluate all moves at minimal cost
+                worker_engine = AllMovesUCIEngine(
+                    engine_path=uci_engine_bin,
+                    limit=chess.engine.Limit(nodes=1),
+                )
+            else:
+                worker_engine = UCIEngine(
+                    engine_path=uci_engine_bin,
+                    limit=chess.engine.Limit(nodes=num_nodes),
+                )
+        else:
+            worker_engine = MyTransformerEngine(
+                checkpoint_path,
+                chess.engine.Limit(nodes=1),
+                strategy=strategy,
+                search_depth=depth,
+                num_nodes=num_nodes,
+            )
 def evaluate_puzzle_from_pandas_row(
     puzzle: pd.Series,
     engine: engine_lib.Engine,
@@ -366,7 +387,7 @@ def main(argv: Sequence[str]) -> None:
             with mp.Pool(
                 processes=num_processes, 
                 initializer=init_worker,
-                initargs=(strategy, network, depth, num_nodes, checkpoint_path)
+                initargs=(strategy, network, depth, num_nodes, checkpoint_path, _UCI_ENGINE_BIN.value)
             ) as pool:
                 # Use imap for streaming results with progress bar
                 pbar = tqdm(
@@ -453,7 +474,7 @@ def main(argv: Sequence[str]) -> None:
         with mp.Pool(
             processes=num_processes,
             initializer=init_worker,
-            initargs=(strategy, network, depth, num_nodes, checkpoint_path)
+            initargs=(strategy, network, depth, num_nodes, checkpoint_path, _UCI_ENGINE_BIN.value)
         ) as pool:
             pbar = tqdm(
                 pool.imap(worker_evaluate_position, positions_to_evaluate),

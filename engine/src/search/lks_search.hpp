@@ -105,6 +105,7 @@ public:
         }
         while (currentDepth <= maxDepth + 1e-6f) {
             if (stop_requested_.load(std::memory_order_acquire)) break;
+            if (!node_limit_check(limits)) break;
             auto [score, move, aborted] = lks_root(*root_, currentDepth, -1.0f, 1.0f);
             if (aborted) break;
             bestScore = score;
@@ -366,6 +367,14 @@ private:
             if (pe.child) node = pe.child.get(); else break;
         }
         return pv.str();
+    }
+
+    // Check node/evaluation limits for early termination
+    bool node_limit_check(const Limits &limits) const {
+        if (limits.nodes == 0ULL) return true; // no explicit node limit set
+        const std::uint64_t evals = stat_gpu_evaluations_.load(std::memory_order_relaxed);
+        // Continue while GPU evals remain under 95% of the node limit
+        return evals * 100ULL < limits.nodes * 95ULL;
     }
 
     // coroutine to await eval then set promise

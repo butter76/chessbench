@@ -253,7 +253,7 @@ class ChessTransformer(nn.Module):
         self.activation = F.gelu
 
         # Mixed-LN Attention
-        post_ln_layers = min(8, config.num_layers // 4)
+        post_ln_layers = min(5, config.num_layers // 4)
         pre_ln_layers = config.num_layers - post_ln_layers
         self.transformer = nn.ModuleList([
             *[MyTransformerEncoderLayer(
@@ -296,7 +296,7 @@ class ChessTransformer(nn.Module):
 
         # Complex Projection for action matrix
         self.final_ln = nn.LayerNorm(config.embedding_dim)
-        self.final_num_heads = config.num_heads
+        self.final_num_heads = 16
         self.final_head_dim = config.embedding_dim // self.final_num_heads
         self.final_scaling = self.final_head_dim ** -0.5
 

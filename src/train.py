@@ -173,11 +173,10 @@ def train(
         scaler.load_state_dict(checkpoint['scaler'])
         del checkpoint['scaler']
 
-    scheduler1 = torch.optim.lr_scheduler.LinearLR(
+    warmup_epochs = 60
+    scheduler1 = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        start_factor=1.3,
-        end_factor=1.0,
-        total_iters=60,
+        lr_lambda=lambda epoch: 1.3 - (0.3 * min(epoch, warmup_epochs) / max(1, warmup_epochs)),
     )
 
     scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -189,7 +188,7 @@ def train(
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer,
         schedulers=[scheduler1, scheduler2],
-        milestones=[90],
+        milestones=[warmup_epochs],
     )
 
     if checkpoint is not None and 'scheduler' in checkpoint:
@@ -415,7 +414,7 @@ def main():
     # Create model config
     model_config = TransformerConfig(
         embedding_dim=768,
-        num_layers=40,
+        num_layers=24,
         num_heads=48,
         widening_factor=3,
         dropout=0,
@@ -448,9 +447,9 @@ def main():
         compile=True,
         max_grad_norm=1.0,
         num_steps=110 * 1000 * 2,
-        steps_per_epoch=1000,
+        steps_per_epoch=1000 * 2,
         save_frequency=5,
-        save_checkpoint_path='./checkpoints/r1-base/',
+        save_checkpoint_path='./checkpoints/r1-lr-01/',
         # checkpoint_path='../checkpoints/r1-base/checkpoint_last.pt',
     )
     

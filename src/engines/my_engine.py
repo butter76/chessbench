@@ -83,9 +83,9 @@ class MyTransformerEngine(engine.Engine):
 
         self.model.load_state_dict(checkpoint['model'], strict=False)
         self.tablebase = chess.syzygy.Tablebase(max_fds=128)
-        self.tablebase.add_directory("../syzygy_tables/3-4-5/")
-        self.tablebase.add_directory("../syzygy_tables/6-WDL/")
-        self.tablebase.add_directory("../syzygy_tables/6-DTZ/")
+        # self.tablebase.add_directory("../syzygy_tables/3-4-5/")
+        # self.tablebase.add_directory("../syzygy_tables/6-WDL/")
+        # self.tablebase.add_directory("../syzygy_tables/6-DTZ/")
 
         # Initialize search algorithms
         self.search_algorithms = {

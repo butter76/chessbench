@@ -318,21 +318,19 @@ public:
                 score = -child_out.score;
             }
 
-            // Update policy if re-searches occurred
-            if (re_search_count > 0) {
-                float new_policy = pe.policy;
-                if (node_type == NodeType::CUT && score > alpha) {
-                    new_policy = pe.policy * std::exp(re_search_count * RE_SEARCH_DEPTH);
-                } else {
-                    new_policy = pe.policy + 0.1f;
-                    if (!(score > alpha)) {
-                        float clip = std::max(node.policy[0].policy * 0.98f, pe.policy);
-                        new_policy = std::min(new_policy, clip);
-                    }
+            // Update policy
+            float new_policy = pe.policy;
+            if (node_type == NodeType::CUT && score > alpha) {
+                new_policy = pe.policy * std::exp(re_search_count * RE_SEARCH_DEPTH);
+            } else {
+                new_policy = pe.policy + 0.1f;
+                if (!(score > alpha)) {
+                    float clip = std::max(node.policy[0].policy * 0.98f, pe.policy);
+                    new_policy = std::min(new_policy, clip);
                 }
-                pe.policy = new_policy;
-                if (new_depth > best_move_depth) best_move_depth = new_depth; // TODO: This line is suspicious
             }
+            pe.policy = new_policy;
+            if (new_depth > best_move_depth) best_move_depth = new_depth; // TODO: This line is suspicious
 
             // After finishing this child's re-searches, update global alpha
             if (score > alpha) alpha = score;

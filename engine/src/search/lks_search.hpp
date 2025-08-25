@@ -168,6 +168,10 @@ public:
             return {node.value, chess::Move::NO_MOVE, false};
         }
 
+        if (rec_depth > 50) {
+            return {node.value, chess::Move::NO_MOVE, false};
+        }
+
         // Ensure policy is sorted and normalized before expansion
         sort_and_normalize(node);
 
@@ -181,106 +185,144 @@ public:
 
         float weight_divisor = 1.0f;
         int unexpanded_count = 0;
-        float total_weight = 0.0f;
+        float total_weight_scan = 0.0f;
         for (std::size_t i = 0; i < node.policy.size(); ++i) {
             const auto &pe = node.policy[i];
             if (pe.child == nullptr) {
-                if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
+                if ((total_weight_scan > 0.80f && i >= 2) || (total_weight_scan > 0.95f && i >= 1)) {
                     weight_divisor -= pe.policy;
                 } else {
                     unexpanded_count += 1;
                 }
             }
-            total_weight += pe.policy;
+            total_weight_scan += pe.policy;
         }
         if (is_leaf_node(node)) {
             if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + node_depth_reduction) {
                 return {node.value, chess::Move::NO_MOVE, false};
             }
 
-            // This is the first time we are expanding this node, so do some bookkeeping here:
-
-            // Update maximum selective depth with minimal overhead
+            // First expansion bookkeeping: update maximum selective depth
+            const int new_seldepth = rec_depth + 1;
             int observed = stat_seldepth_.load(std::memory_order_relaxed);
-            if (rec_depth > observed) {
-                while (!stat_seldepth_.compare_exchange_weak(observed, rec_depth, std::memory_order_relaxed, std::memory_order_relaxed)) {
-                    if (rec_depth <= observed) break;
+            if (new_seldepth > observed) {
+                while (!stat_seldepth_.compare_exchange_weak(observed, new_seldepth, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                    if (new_seldepth <= observed) break;
                 }
             }
         }
 
-        if (rec_depth > 50) {
-            return {node.value, chess::Move::NO_MOVE, false};
-        }
+        // Phase 1: Identify the set of children that are part of the search tree according to the depth
+        const std::size_t policy_size = node.policy.size();
+        std::vector<std::size_t> filtered_indices;
+        filtered_indices.reserve(policy_size);
+        std::vector<float> new_depths(policy_size, 0.0f);
 
         float best_move_depth = -std::numeric_limits<float>::infinity();
         float bestScore = -std::numeric_limits<float>::infinity();
         chess::Move bestMove = chess::Move::NO_MOVE;
-        total_weight = 0.0f;
 
-        for (std::size_t i = 0; i < node.policy.size(); ++i) {
+        float total_weight = 0.0f; // running total for filtering logic
+        for (std::size_t i = 0; i < policy_size; ++i) {
             auto &pe = node.policy[i];
             const float move_weight = pe.policy;
             float new_depth = depth + std::log(move_weight + 1e-6f) - std::log(weight_divisor + 1e-6f) - 0.1f;
-            if (best_move_depth < -1e-6f) best_move_depth = new_depth;
+            if (i == 0) best_move_depth = new_depth;
 
-            float local_depth_reduction = node_depth_reduction;
+            new_depths[i] = new_depth;
+
+            bool should_filter = false;
             if (!pe.child) {
-                local_depth_reduction = -2.0f * std::log(pe.U + 1e-6f);
-            }
-
-            if (new_depth <= local_depth_reduction && !pe.child) {
-                if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
-                    total_weight += move_weight;
-                    continue;
+                const float local_reduction = -2.0f * std::log(pe.U + 1e-6f);
+                if (new_depth <= local_reduction) {
+                    if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
+                        should_filter = true;
+                    }
                 }
             }
+            if (!should_filter) filtered_indices.push_back(i);
+            total_weight += move_weight;
+        }
 
+        // Phase 2: for each filtered child, ensure child exists, run initial search, collect improvers (i>0)
+        const float RE_SEARCH_DEPTH = 0.2f;
+        std::vector<std::size_t> improver_indices;
+        improver_indices.reserve(filtered_indices.size());
+
+        for (std::size_t idx_pos = 0; idx_pos < filtered_indices.size(); ++idx_pos) {
+            std::size_t i = filtered_indices[idx_pos];
+            auto &pe = node.policy[i];
+
+            // Create child and backprop if needed
             if (!pe.child) {
                 chess::Board child_board = node.board;
                 child_board.makeMove(pe.move);
                 pe.child = std::make_unique<LKSNode>(create_node(child_board));
-                // Backpropagate policy update from this new child into the parent
                 backpropagate_policy_updates(node, *pe.child, pe.move);
             }
 
-            int child_re_searches = 0;
-            const float RE_SEARCH_DEPTH = 0.2f;
-            float score = -std::numeric_limits<float>::infinity();
+            float new_depth = new_depths[i];
+            float search_alpha = (i == 0) ? -beta : -alpha - NULL_EPS;
+            float search_beta = -alpha;
+            NodeType next_type;
+            if (i == 0 && node_type == NodeType::PV) next_type = NodeType::PV;
+            else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
+            else next_type = NodeType::CUT;
 
-            for (;;) {
-                float search_alpha = (i == 0) ? -beta : -alpha - NULL_EPS;
-                float search_beta = -alpha;
-                NodeType next_type;
-                if (i == 0 && node_type == NodeType::PV) next_type = NodeType::PV;
-                else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
-                else next_type = NodeType::CUT;
+            auto child_out = pvs_search(*pe.child, new_depth, search_alpha, search_beta, next_type, false, rec_depth + 1);
+            if (child_out.aborted) return {0.0f, bestMove, true};
+            float score = -child_out.score;
 
-                auto child_out = pvs_search(*pe.child, new_depth, search_alpha, search_beta, next_type, false, rec_depth + 1);
+            // Use the first move to seed initial values
+            if (i == 0) {
+                if (score > alpha) alpha = score;
+                bestScore = score;
+                bestMove = pe.move;
+                if (score >= beta) {
+                    return {bestScore, bestMove, false};
+                }
+            } else {
+                if (score > alpha) {
+                    improver_indices.push_back(i);
+                }
+            }
+        }
+
+        // Phase 3: re-search improvers (non-first moves)
+        for (std::size_t k = 0; k < improver_indices.size(); ++k) {
+            std::size_t i = improver_indices[k];
+            auto &pe = node.policy[i];
+            float new_depth = new_depths[i];
+            float score = std::numeric_limits<float>::infinity();
+            int re_search_count = 0;
+
+            // Continue incremental null-window searches until reaching best_move_depth
+            while (score > alpha && new_depth < best_move_depth) {
+                // Increment depth
+                new_depth += RE_SEARCH_DEPTH;
+                if (new_depth >= best_move_depth) new_depth = best_move_depth + RE_SEARCH_DEPTH;
+                re_search_count += 1;
+
+                NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
+                auto child_out = pvs_search(*pe.child, new_depth, -alpha - NULL_EPS, -alpha, next_type, false, rec_depth + 1);
                 if (child_out.aborted) return {0.0f, bestMove, true};
                 score = -child_out.score;
+            }
 
-                if (i > 0 && score > alpha) {
-                    if (new_depth < best_move_depth) {
-                        new_depth += RE_SEARCH_DEPTH;
-                        if (new_depth > best_move_depth) new_depth = best_move_depth + RE_SEARCH_DEPTH;
-                        child_re_searches += 1;
-                        continue;
-                    } else {
-                        // Full-window re-search
-                        child_out = pvs_search(*pe.child, new_depth, -beta, -alpha, (node_type == NodeType::PV) ? NodeType::PV : next_type, false, rec_depth + 1);
-                        if (child_out.aborted) return {0.0f, bestMove, true};
-                        score = -child_out.score;
-                    }
-                }
-                break;
+            // If still improving alpha, do full-window re-search
+            if (score > alpha) {
+                NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
+                NodeType fw_type = (node_type == NodeType::PV) ? NodeType::PV : next_type;
+                auto child_out = pvs_search(*pe.child, new_depth, -beta, -alpha, fw_type, false, rec_depth + 1);
+                if (child_out.aborted) return {0.0f, bestMove, true};
+                score = -child_out.score;
             }
 
             // Update policy if re-searches occurred
-            if (child_re_searches > 0) {
+            if (re_search_count > 0) {
                 float new_policy = pe.policy;
                 if (node_type == NodeType::CUT && score > alpha) {
-                    new_policy = pe.policy * std::exp(child_re_searches * RE_SEARCH_DEPTH);
+                    new_policy = pe.policy * std::exp(re_search_count * RE_SEARCH_DEPTH);
                 } else {
                     new_policy = pe.policy + 0.1f;
                     if (!(score > alpha)) {
@@ -289,14 +331,20 @@ public:
                     }
                 }
                 pe.policy = new_policy;
-                if (new_depth > best_move_depth) best_move_depth = new_depth;
+                if (new_depth > best_move_depth) best_move_depth = new_depth; // TODO: This line is suspicious
             }
 
-            if (score > bestScore) { bestScore = score; if (want_move) bestMove = pe.move; }
+            // After finishing this child's re-searches, update global alpha
             if (score > alpha) alpha = score;
-            if (alpha >= beta) break;
-            total_weight += move_weight;
+            if (score > bestScore) {
+                bestScore = score;
+                bestMove = pe.move;
+            }
+            if (score >= beta) {
+                return {bestScore, bestMove, false};
+            }
         }
+
         return {bestScore, bestMove, false};
     }
 

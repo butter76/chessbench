@@ -28,6 +28,7 @@ add_library(cppcoro_objects STATIC
     third_party/cppcoro/lib/lightweight_manual_reset_event.cpp
     third_party/cppcoro/lib/static_thread_pool.cpp
     third_party/cppcoro/lib/auto_reset_event.cpp
+    third_party/cppcoro/lib/async_manual_reset_event.cpp
     third_party/cppcoro/lib/spin_wait.cpp
     third_party/cppcoro/lib/spin_mutex.cpp
 )
@@ -55,6 +56,8 @@ endif()
 add_executable(chess_sample src/main.cpp)
 target_include_directories(chess_sample PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(chess_sample PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
+target_include_directories(chess_sample PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include")
+target_include_directories(chess_sample PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat")
 
 # Link pthreads for threading support (required for std::jthread and friends)
 find_package(Threads REQUIRED)
@@ -80,6 +83,8 @@ add_executable(poc_parallel
 )
 target_include_directories(poc_parallel PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(poc_parallel PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
+target_include_directories(poc_parallel PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include")
+target_include_directories(poc_parallel PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat")
 target_link_libraries(poc_parallel PRIVATE Threads::Threads cppcoro cppcoro_objects)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(poc_parallel PRIVATE -stdlib=libc++)
@@ -134,6 +139,8 @@ if (CUDAToolkit_FOUND AND TENSORRT_NVINFER AND TENSORRT_INCLUDE)
     add_executable(print_lks_node src/tools/print_lks_node.cpp)
     target_include_directories(print_lks_node PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(print_lks_node PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL USE_TENSORRT)
+    target_include_directories(print_lks_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include")
+    target_include_directories(print_lks_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat")
     target_link_libraries(print_lks_node PRIVATE Threads::Threads cppcoro cppcoro_objects ${TENSORRT_NVINFER})
     if (CUDAToolkit_FOUND)
         target_link_libraries(print_lks_node PRIVATE CUDA::cudart)

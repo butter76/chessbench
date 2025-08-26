@@ -140,8 +140,16 @@ private:
     std::optional<float> evaluateBlocking(const chess::Board &b) {
         if (stop_requested_.load(std::memory_order_acquire)) return std::nullopt;
         auto tokens = engine_tokenizer::tokenizeBoard(b);
-        engine_parallel::EvalAwaitable awaitable{&evaluator_, tokens};
-        engine_parallel::EvalResult res = cppcoro::sync_wait([&]() -> cppcoro::task<engine_parallel::EvalResult> { co_return co_await awaitable; }());
+        engine_parallel::EvalResult res;
+        {
+            // Simple synchronous bridge using a condition_variable on top of callback API
+            std::mutex m; std::condition_variable cv; bool ready = false;
+            evaluator_.enqueue(tokens, [&](engine_parallel::EvalResult r){
+                std::lock_guard<std::mutex> lk(m); res = std::move(r); ready = true; cv.notify_one();
+            });
+            std::unique_lock<std::mutex> lk(m);
+            cv.wait(lk, [&]{ return ready; });
+        }
         if (res.canceled || stop_requested_.load(std::memory_order_acquire)) {
             return std::nullopt;
         }

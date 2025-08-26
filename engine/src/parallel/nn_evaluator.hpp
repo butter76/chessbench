@@ -13,6 +13,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <functional>
 
 #include <cstdio>
 #include <cuda_runtime_api.h>
@@ -36,39 +37,7 @@ struct EvalResult {
     bool canceled = false;
 };
 
-// Awaitable used by coroutines to request an evaluation
-struct EvalAwaitable {
-    struct Request;
-
-    class PromiseLatch {
-    public:
-        void set(EvalResult r) {
-            std::lock_guard<std::mutex> lock(mtx);
-            result = std::move(r);
-        }
-        EvalResult get() const {
-            std::lock_guard<std::mutex> lock(mtx);
-            return result; // return by value
-        }
-    private:
-        mutable std::mutex mtx;
-        EvalResult result{};
-    };
-
-    struct Request {
-        std::array<std::uint8_t, 68> tokens;
-        PromiseLatch* latch;
-        std::coroutine_handle<> handle;
-    };
-
-    class NNEvaluator* evaluator;
-    std::array<std::uint8_t, 68> tokens;
-    PromiseLatch latch;
-
-    bool await_ready() const noexcept { return false; }
-    void await_suspend(std::coroutine_handle<> h);
-    EvalResult await_resume() const noexcept { return latch.get(); }
-};
+// Simplified callback-based request interface; no coroutine handles involved
 
 class NNEvaluator {
 public:
@@ -91,15 +60,15 @@ public:
         release_trt();
     }
 
-    void enqueue(EvalAwaitable::Request r) {
+    void enqueue(const std::array<std::uint8_t, 68>& tokens,
+                 std::function<void(EvalResult)> on_ready) {
         if (stop.load(std::memory_order_acquire)) {
-            EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
-            r.handle.resume();
+            EvalResult er; er.value = 0.0f; er.canceled = true; on_ready(std::move(er));
             return;
         }
         {
             std::lock_guard<std::mutex> lock(mutex);
-            queue.push(std::move(r));
+            queue.push(Request{tokens, std::move(on_ready)});
         }
         cv.notify_one();
     }
@@ -107,7 +76,11 @@ public:
 private:
     std::mutex mutex;
     std::condition_variable cv;
-    std::queue<EvalAwaitable::Request> queue;
+    struct Request {
+        std::array<std::uint8_t, 68> tokens;
+        std::function<void(EvalResult)> on_ready;
+    };
+    std::queue<Request> queue;
     std::atomic<bool> stop{false};
     std::jthread worker;
     const engine::Options* options_{nullptr};
@@ -253,7 +226,7 @@ private:
 
     void run(std::stop_token) {
         for (;;) {
-            std::vector<EvalAwaitable::Request> batch;
+            std::vector<Request> batch;
             batch.reserve(kBatchSize);
             {
                 std::unique_lock<std::mutex> lock(mutex);
@@ -273,8 +246,7 @@ private:
 
             if (stop.load(std::memory_order_acquire)) {
                 for (auto& r : batch) {
-                    EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
-                    r.handle.resume();
+                    EvalResult er; er.value = 0.0f; er.canceled = true; r.on_ready(std::move(er));
                 }
                 continue;
             }
@@ -343,12 +315,9 @@ private:
                     std::cerr << "[NNEvaluator] enqueueV3 failed" << std::endl;
                     // Fail the batch safely
                     for (auto& r : batch) {
-                        EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
+                        EvalResult er; er.value = 0.0f; er.canceled = true; r.on_ready(std::move(er));
                     }
-                    // Skip device copies and resume continuations
-                    for (auto& r : batch) {
-                        r.handle.resume();
-                    }
+                    // Skip device copies and continue loop
                     continue;
                 }
 
@@ -404,7 +373,7 @@ private:
                     if (per_hard > 0) er.policy = std::vector<float>(host_hard.begin() + static_cast<std::ptrdiff_t>(i * per_hard), host_hard.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hard));
                     if (per_U > 0) er.U = std::vector<float>(host_U.begin() + static_cast<std::ptrdiff_t>(i * per_U), host_U.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_U));
                     if (per_Q > 0) er.Q = std::vector<float>(host_Q.begin() + static_cast<std::ptrdiff_t>(i * per_Q), host_Q.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_Q));
-                    batch[i].latch->set(std::move(er));
+                    batch[i].on_ready(std::move(er));
                 }
 
                 // Cleanup device buffers
@@ -417,14 +386,11 @@ private:
             } else {
                 // No TensorRT available: cancel all requests and continue without throwing
                 for (auto& r : batch) {
-                    EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
-                    r.handle.resume();
+                    EvalResult er; er.value = 0.0f; er.canceled = true; r.on_ready(std::move(er));
                 }
                 continue;
             }
-            for (auto& r : batch) {
-                r.handle.resume();
-            }
+            // No explicit resumption here; callbacks have already notified waiters
         }
     }
 
@@ -434,10 +400,6 @@ private:
         return !v.empty() && v != "0" && v != "false" && v != "False";
     }
 };
-
-inline void EvalAwaitable::await_suspend(std::coroutine_handle<> h) {
-    evaluator->enqueue(Request{tokens, &latch, h});
-}
 
 } // namespace engine_parallel
 

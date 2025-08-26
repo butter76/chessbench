@@ -23,6 +23,7 @@
 #include <cppcoro/task.hpp>
 #include <cppcoro/sync_wait.hpp>
 #include <cppcoro/static_thread_pool.hpp>
+#include <cppcoro/async_manual_reset_event.hpp>
 
 namespace engine {
 
@@ -406,22 +407,19 @@ private:
         return evals * 100ULL < limits.nodes * 95ULL;
     }
 
-    cppcoro::task<engine_parallel::EvalResult> evaluateAsync(const chess::Board &b) {
-        auto tokens = engine_tokenizer::tokenizeBoard(b);
-        engine_parallel::EvalAwaitable awaitable{&evaluator_, tokens};
-        engine_parallel::EvalResult res = co_await awaitable;
-        co_return res;
-    }
-
     // Wrapper that ensures continuation resumes on our thread pool and tracks stats
     cppcoro::task<engine_parallel::EvalResult> evaluate_on_pool(const chess::Board &b) {
         // Count this evaluation request
         stat_gpu_evaluations_.fetch_add(1, std::memory_order_relaxed);
-        // Await GPU evaluation (may resume on evaluator worker thread)
-        engine_parallel::EvalResult res = co_await evaluateAsync(b);
+        // Await GPU evaluation via callback + event
+        auto tokens = engine_tokenizer::tokenizeBoard(b);
+        struct Shared { cppcoro::async_manual_reset_event done; engine_parallel::EvalResult res; };
+        auto shared = std::shared_ptr<Shared>(new Shared());
+        evaluator_.enqueue(tokens, [shared](engine_parallel::EvalResult r){ shared->res = std::move(r); shared->done.set(); });
+        co_await shared->done;
         // Bounce back to the search thread pool to continue the coroutine on the desired executor
         co_await pool_.schedule();
-        co_return res;
+        co_return std::move(shared->res);
     }
 
     void sort_and_normalize(LKSNode &node) {

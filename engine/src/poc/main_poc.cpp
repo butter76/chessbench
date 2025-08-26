@@ -51,7 +51,7 @@ struct Task {
 // removed local ThreadPool; using engine_parallel::ThreadPool
 
 using engine_parallel::NNEvaluator;
-using engine_parallel::EvalAwaitable;
+// EvalAwaitable removed; use callback enqueue if needed
 // ThreadPool removed
 
 // PoC SearchAlgo that spawns multiple coroutines exploring a fake tree
@@ -90,7 +90,21 @@ private:
                 chess::Board board;
                 (void)feature; // in real code, mutate board per feature
                 auto tokens = engine_tokenizer::tokenizeBoard(board);
-                EvalAwaitable awaiter{&evaluator, tokens};
+                struct Awaiter {
+                    NNEvaluator* eval;
+                    std::array<std::uint8_t,68> tokens;
+                    engine_parallel::EvalResult result;
+                    std::atomic<bool> ready{false};
+                    bool await_ready() const noexcept { return ready.load(std::memory_order_acquire); }
+                    void await_suspend(std::coroutine_handle<> h) {
+                        eval->enqueue(tokens, [this, h](engine_parallel::EvalResult r) mutable {
+                            result = std::move(r);
+                            ready.store(true, std::memory_order_release);
+                            h.resume();
+                        });
+                    }
+                    engine_parallel::EvalResult await_resume() noexcept { return std::move(result); }
+                } awaiter{&evaluator, tokens};
                 auto res = co_await awaiter;
                 if (res.canceled || stopped.load()) { std::cout << "task " << taskId << " canceled at depth " << depth << '\n'; break; }
                 std::cout << "task " << taskId

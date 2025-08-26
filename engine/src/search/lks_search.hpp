@@ -241,26 +241,58 @@ public:
             total_weight += move_weight;
         }
 
-        // Phase 2: for each filtered child, ensure child exists, run initial search, collect improvers (i>0)
+        // Phase 2: for each filtered child, ensure child exists, run initial search
+        // Jamboree-style: i==0 sequential, others in parallel without beta cutoffs
         const float RE_SEARCH_DEPTH = 0.2f;
         std::vector<std::size_t> improver_indices;
         improver_indices.reserve(filtered_indices.size());
 
-        for (std::size_t idx_pos = 0; idx_pos < filtered_indices.size(); ++idx_pos) {
-            std::size_t i = filtered_indices[idx_pos];
-            float new_depth = new_depths[i];
-            auto result = co_await process_phase2_child(node, i, new_depth, alpha, beta, node_type, rec_depth);
-            if (result.aborted) co_return SearchOutcome{0.0f, bestMove, true};
-            if (i == 0) {
-                alpha = result.alpha_out;
-                bestScore = result.score;
-                bestMove = result.move;
-                if (result.cutoff) {
-                    co_return SearchOutcome{bestScore, bestMove, false};
+        if (!filtered_indices.empty()) {
+            std::size_t i0 = filtered_indices[0];
+            float depth0 = new_depths[i0];
+            auto r0 = co_await process_phase2_child(node, i0, depth0, alpha, beta, node_type, rec_depth);
+            if (r0.aborted) co_return SearchOutcome{0.0f, bestMove, true};
+            alpha = r0.alpha_out;
+            bestScore = r0.score;
+            bestMove = r0.move;
+            if (r0.cutoff) {
+                co_return SearchOutcome{bestScore, bestMove, false};
+            }
+
+            // Pre-create children for remaining indices to avoid races during parallel work
+            for (std::size_t idx_pos = 1; idx_pos < filtered_indices.size(); ++idx_pos) {
+                std::size_t i = filtered_indices[idx_pos];
+                auto &pe = node.policy[i];
+                if (!pe.child) {
+                    chess::Board child_board = node.board;
+                    child_board.makeMove(pe.move);
+                    LKSNode created = co_await create_node(child_board);
+                    pe.child = std::make_unique<LKSNode>(std::move(created));
+                    backpropagate_policy_updates(node, *pe.child, pe.move);
                 }
-            } else {
-                if (result.is_improver) {
-                    improver_indices.push_back(i);
+            }
+
+            // Launch parallel searches for remaining children
+            struct PendingTask { std::size_t idx; std::future<Phase2ChildResult> fut; };
+            std::vector<PendingTask> pending;
+            pending.reserve(filtered_indices.size() > 0 ? filtered_indices.size() - 1 : 0);
+
+            const float alpha_after_first = alpha;
+            for (std::size_t idx_pos = 1; idx_pos < filtered_indices.size(); ++idx_pos) {
+                std::size_t i = filtered_indices[idx_pos];
+                float nd = new_depths[i];
+                auto fut = std::async(std::launch::async, [this, &node, i, nd, alpha_after_first, beta, node_type, rec_depth]() {
+                    return cppcoro::sync_wait(process_phase2_child(node, i, nd, alpha_after_first, beta, node_type, rec_depth));
+                });
+                pending.push_back(PendingTask{i, std::move(fut)});
+            }
+
+            // Collect results, ignoring beta-cutoffs for non-first children
+            for (auto &p : pending) {
+                Phase2ChildResult r = p.fut.get();
+                if (r.aborted) co_return SearchOutcome{0.0f, bestMove, true};
+                if (r.is_improver) {
+                    improver_indices.push_back(p.idx);
                 }
             }
         }

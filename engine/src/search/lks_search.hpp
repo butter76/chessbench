@@ -85,7 +85,7 @@ public:
             LKSNode rootNode = cppcoro::sync_wait(create_node(board_));
             root_ = std::make_unique<LKSNode>(std::move(rootNode));
         }
-        while (currentDepth <= maxDepth + 1e-6f) {
+        while (currentDepth <= maxDepth + 1e-2f) {
             if (stop_requested_.load(std::memory_order_acquire)) break;
             if (!node_limit_check(limits)) break;
             auto [score, move, aborted] = cppcoro::sync_wait(lks_root(*root_, currentDepth, -1.0f, 1.0f));
@@ -143,7 +143,7 @@ public:
 
     struct SearchOutcome { float score; chess::Move bestMove; bool aborted; };
 
-    cppcoro::task<SearchOutcome> pvs_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, bool want_move, int rec_depth = 0) {
+    cppcoro::task<SearchOutcome> lks_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, int rec_depth = 0) {
         if (stop_requested_.load(std::memory_order_acquire)) co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, true};
 
         if (node.terminal || node.policy.empty()) {
@@ -252,7 +252,7 @@ public:
             else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
             else next_type = NodeType::CUT;
 
-            auto child_out = co_await pvs_search(*pe.child, new_depth, search_alpha, search_beta, next_type, false, rec_depth + 1);
+            auto child_out = co_await lks_search(*pe.child, new_depth, search_alpha, search_beta, next_type, rec_depth + 1);
             if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
             float score = -child_out.score;
 
@@ -287,7 +287,7 @@ public:
                 re_search_count += 1;
 
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
-                auto child_out = co_await pvs_search(*pe.child, new_depth, -alpha - NULL_EPS, -alpha, next_type, false, rec_depth + 1);
+                auto child_out = co_await lks_search(*pe.child, new_depth, -alpha - NULL_EPS, -alpha, next_type, rec_depth + 1);
                 if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
             }
@@ -296,7 +296,7 @@ public:
             if (score > alpha) {
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
                 NodeType fw_type = (node_type == NodeType::PV) ? NodeType::PV : next_type;
-                auto child_out = co_await pvs_search(*pe.child, new_depth, -beta, -alpha, fw_type, false, rec_depth + 1);
+                auto child_out = co_await lks_search(*pe.child, new_depth, -beta, -alpha, fw_type, rec_depth + 1);
                 if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
             }
@@ -330,14 +330,8 @@ public:
     }
 
     cppcoro::task<RootResult> lks_root(LKSNode& root, float depth, float alpha, float beta) {
-        auto out = co_await pvs_search(root, depth, alpha, beta, NodeType::PV, true, 0);
+        auto out = co_await lks_search(root, depth, alpha, beta, NodeType::PV, 0);
         co_return RootResult{out.score, out.bestMove, out.aborted};
-    }
-
-    float lks(LKSNode& node, float depth, float alpha, float beta, bool& aborted, NodeType node_type) {
-        auto out = cppcoro::sync_wait(pvs_search(node, depth, alpha, beta, node_type, false, 0));
-        aborted = out.aborted;
-        return out.score;
     }
 
 private:

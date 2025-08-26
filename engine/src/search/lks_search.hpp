@@ -27,6 +27,9 @@
 #include <cppcoro/when_all_ready.hpp>
 
 namespace engine {
+constexpr float IT_DEPTH_STEP = 0.4f;
+constexpr float RE_SEARCH_DEPTH = IT_DEPTH_STEP;
+constexpr float IMPROVER_POLICY_INCREASE = RE_SEARCH_DEPTH / 2;
 
 // Using cppcoro::task for async operations
 
@@ -89,6 +92,7 @@ public:
             LKSNode rootNode = cppcoro::sync_wait(create_node(board_));
             root_ = std::make_unique<LKSNode>(std::move(rootNode));
         }
+        
         while (currentDepth <= maxDepth + 1e-2f) {
             if (stop_requested_.load(std::memory_order_acquire)) break;
             if (!node_limit_check(limits)) break;
@@ -101,7 +105,7 @@ public:
             if (move != chess::Move::NO_MOVE) bestMove = move;
             // Emit UCI info line for this iteration
             print_info_line(currentDepth, bestScore);
-            currentDepth += 0.2f;
+            currentDepth += IT_DEPTH_STEP;
         }
 
         if (bestMove == chess::Move::NO_MOVE) {
@@ -244,7 +248,6 @@ public:
 
         // Phase 2: for each filtered child, ensure child exists, run initial search
         // Jamboree-style: i==0 sequential, others in parallel without beta cutoffs
-        const float RE_SEARCH_DEPTH = 0.2f;
         std::vector<std::size_t> improver_indices;
         improver_indices.reserve(filtered_indices.size());
 
@@ -310,7 +313,6 @@ public:
 
             // If still improving alpha, do full-window re-search
             if (score > alpha) {
-                new_depth = best_move_depth + RE_SEARCH_DEPTH;
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
                 NodeType fw_type = (node_type == NodeType::PV) ? NodeType::PV : next_type;
                 auto child_out = co_await lks_search(*pe.child, new_depth, -beta, -alpha, fw_type, rec_depth + 1);
@@ -323,7 +325,7 @@ public:
             if (node_type == NodeType::CUT && score > alpha) {
                 new_policy = pe.policy * std::exp(re_search_count * RE_SEARCH_DEPTH);
             } else {
-                new_policy = pe.policy + 0.1f;
+                new_policy = pe.policy + IMPROVER_POLICY_INCREASE;
                 if (!(score > alpha)) {
                     float clip = std::max(node.policy[0].policy * 0.98f, pe.policy);
                     new_policy = std::min(new_policy, clip);

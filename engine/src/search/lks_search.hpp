@@ -34,7 +34,7 @@ class LksSearch : public SearchAlgo {
 public:
     explicit LksSearch(engine::Options &options, const engine::TimeHandler *time_handler)
         : SearchAlgo(options, time_handler), board_(), evaluator_(options),
-          pool_(static_cast<std::size_t>(32u) {
+          pool_(static_cast<std::size_t>(32u)) {
         evaluator_.start();
     }
 

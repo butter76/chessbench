@@ -329,7 +329,8 @@ public:
                 }
             }
             pe.policy = new_policy;
-            if (new_depth > best_move_depth) best_move_depth = new_depth; // TODO: This line is suspicious
+            // Deviating from the python implementation, by removing this line:
+            // if (new_depth > best_move_depth) best_move_depth = new_depth;
 
             // After finishing this child's re-searches, update global alpha
             if (score > alpha) alpha = score;

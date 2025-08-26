@@ -48,11 +48,8 @@ struct Task {
     }
 };
 
-// removed local ThreadPool; using engine_parallel::ThreadPool
 
 using engine_parallel::NNEvaluator;
-// EvalAwaitable removed; use callback enqueue if needed
-// ThreadPool removed
 
 // PoC SearchAlgo that spawns multiple coroutines exploring a fake tree
 class SearchAlgoPoC {

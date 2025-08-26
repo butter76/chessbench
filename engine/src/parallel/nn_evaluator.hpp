@@ -20,7 +20,7 @@
 #include <NvInfer.h>
 
 #include "tokenizer.hpp"
-#include "parallel/thread_pool.hpp"
+#include <cppcoro/task.hpp>
 #include "options.hpp"
 
 namespace engine_parallel {
@@ -59,11 +59,9 @@ struct EvalAwaitable {
         std::array<std::uint8_t, 68> tokens;
         PromiseLatch* latch;
         std::coroutine_handle<> handle;
-        ThreadPool* pool{nullptr};
     };
 
     class NNEvaluator* evaluator;
-    ThreadPool* pool;
     std::array<std::uint8_t, 68> tokens;
     PromiseLatch latch;
 
@@ -96,12 +94,8 @@ public:
     void enqueue(EvalAwaitable::Request r) {
         if (stop.load(std::memory_order_acquire)) {
             EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
-            if (r.pool) {
-                r.pool->resume(r.handle);
-            } else {
-                r.handle.resume();
-                if (r.handle.done()) r.handle.destroy();
-            }
+            r.handle.resume();
+            if (r.handle.done()) r.handle.destroy();
             return;
         }
         {
@@ -281,12 +275,8 @@ private:
             if (stop.load(std::memory_order_acquire)) {
                 for (auto& r : batch) {
                     EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
-                    if (r.pool) {
-                        r.pool->resume(r.handle);
-                    } else {
-                        r.handle.resume();
-                        if (r.handle.done()) r.handle.destroy();
-                    }
+                    r.handle.resume();
+                    if (r.handle.done()) r.handle.destroy();
                 }
                 continue;
             }
@@ -421,22 +411,14 @@ private:
                 // No TensorRT available: cancel all requests and throw
                 for (auto& r : batch) {
                     EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
-                    if (r.pool) {
-                        r.pool->resume(r.handle);
-                    } else {
-                        r.handle.resume();
-                        if (r.handle.done()) r.handle.destroy();
-                    }
+                    r.handle.resume();
+                    if (r.handle.done()) r.handle.destroy();
                 }
                 throw std::runtime_error("[NNEvaluator] TensorRT not initialized; fallback behavior disabled");
             }
             for (auto& r : batch) {
-                if (r.pool) {
-                    r.pool->resume(r.handle);
-                } else {
-                    r.handle.resume();
-                    if (r.handle.done()) r.handle.destroy();
-                }
+                r.handle.resume();
+                if (r.handle.done()) r.handle.destroy();
             }
         }
     }
@@ -449,7 +431,7 @@ private:
 };
 
 inline void EvalAwaitable::await_suspend(std::coroutine_handle<> h) {
-    evaluator->enqueue(Request{tokens, &latch, h, pool});
+    evaluator->enqueue(Request{tokens, &latch, h});
 }
 
 } // namespace engine_parallel

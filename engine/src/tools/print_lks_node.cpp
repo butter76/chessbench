@@ -30,8 +30,8 @@ int main(int argc, char** argv) {
         // Set board to FEN
         search.getBoard().setFen(fen);
 
-        // Create node
-        engine::LKSNode node = search.create_node(search.getBoard());
+        // Create node (await)
+        engine::LKSNode node = cppcoro::sync_wait(search.create_node(search.getBoard()));
 
         // Print
         std::cout << "FEN: " << fen << '\n';

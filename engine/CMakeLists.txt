@@ -16,6 +16,23 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# cppcoro header-only library vendored under third_party
+add_library(cppcoro INTERFACE)
+# Put compat shim first so it overrides system include lookup for experimental/coroutine
+target_include_directories(cppcoro INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include"
+)
+target_compile_definitions(cppcoro INTERFACE _LIBCPP_ENABLE_EXPERIMENTAL)
+add_library(cppcoro_objects STATIC
+    third_party/cppcoro/lib/lightweight_manual_reset_event.cpp
+)
+target_include_directories(cppcoro_objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(cppcoro_objects PRIVATE -stdlib=libc++)
+    target_link_options(cppcoro_objects PRIVATE -stdlib=libc++ -lc++abi)
+endif()
+
 # Download single-header chess library during configure
 set(CHESS_URL "https://raw.githubusercontent.com/Disservin/chess-library/master/include/chess.hpp")
 set(THIRD_PARTY_DIR "${CMAKE_BINARY_DIR}/third_party/chess-library")
@@ -33,7 +50,7 @@ target_compile_definitions(chess_sample PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
 
 # Link pthreads for threading support (required for std::jthread and friends)
 find_package(Threads REQUIRED)
-target_link_libraries(chess_sample PRIVATE Threads::Threads)
+target_link_libraries(chess_sample PRIVATE Threads::Threads cppcoro cppcoro_objects)
 
 # Build and link against libc++ when using Clang
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -55,7 +72,7 @@ add_executable(poc_parallel
 )
 target_include_directories(poc_parallel PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(poc_parallel PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
-target_link_libraries(poc_parallel PRIVATE Threads::Threads)
+target_link_libraries(poc_parallel PRIVATE Threads::Threads cppcoro cppcoro_objects)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(poc_parallel PRIVATE -stdlib=libc++)
     target_link_options(poc_parallel PRIVATE -stdlib=libc++ -lc++abi)
@@ -109,7 +126,7 @@ if (CUDAToolkit_FOUND AND TENSORRT_NVINFER AND TENSORRT_INCLUDE)
     add_executable(print_lks_node src/tools/print_lks_node.cpp)
     target_include_directories(print_lks_node PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(print_lks_node PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL USE_TENSORRT)
-    target_link_libraries(print_lks_node PRIVATE Threads::Threads ${TENSORRT_NVINFER})
+    target_link_libraries(print_lks_node PRIVATE Threads::Threads cppcoro cppcoro_objects ${TENSORRT_NVINFER})
     if (CUDAToolkit_FOUND)
         target_link_libraries(print_lks_node PRIVATE CUDA::cudart)
     endif()

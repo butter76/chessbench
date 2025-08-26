@@ -2,7 +2,6 @@
 
 #include "search_algo.hpp"
 #include "../parallel/nn_evaluator.hpp"
-#include "../parallel/thread_pool.hpp"
 #include "../tokenizer.hpp"
 #include "lks_node.hpp"
 
@@ -21,30 +20,12 @@
 #include <sstream>
 #include <iomanip>
 
+#include <cppcoro/task.hpp>
+#include <cppcoro/sync_wait.hpp>
+
 namespace engine {
 
-// Minimal coroutine Task used to bridge awaitable to blocking waiting
-struct LksTaskVoid {
-    struct promise_type {
-        LksTaskVoid get_return_object() noexcept { return LksTaskVoid{std::coroutine_handle<promise_type>::from_promise(*this)}; }
-        std::suspend_always initial_suspend() const noexcept { return {}; }
-        std::suspend_always final_suspend() const noexcept { return {}; }
-        void unhandled_exception() { std::terminate(); }
-        void return_void() noexcept {}
-    };
-    std::coroutine_handle<promise_type> coro;
-    explicit LksTaskVoid(std::coroutine_handle<promise_type> h) : coro(h) {}
-    LksTaskVoid(LksTaskVoid&& other) noexcept : coro(std::exchange(other.coro, {})) {}
-    LksTaskVoid(const LksTaskVoid&) = delete;
-    LksTaskVoid& operator=(LksTaskVoid&& other) noexcept {
-        if (this != &other) {
-            if (coro) coro.destroy();
-            coro = std::exchange(other.coro, {});
-        }
-        return *this;
-    }
-    ~LksTaskVoid() { if (coro) coro.destroy(); }
-};
+// Using cppcoro::task for async operations
 
 class LksSearch : public SearchAlgo {
 public:
@@ -101,12 +82,13 @@ public:
         chess::Move bestMove = chess::Move::NO_MOVE;
         float bestScore = -std::numeric_limits<float>::infinity();
         if (!root_) {
-            root_ = std::make_unique<LKSNode>(create_node(board_));
+            LKSNode rootNode = cppcoro::sync_wait(create_node(board_));
+            root_ = std::make_unique<LKSNode>(std::move(rootNode));
         }
         while (currentDepth <= maxDepth + 1e-6f) {
             if (stop_requested_.load(std::memory_order_acquire)) break;
             if (!node_limit_check(limits)) break;
-            auto [score, move, aborted] = lks_root(*root_, currentDepth, -1.0f, 1.0f);
+            auto [score, move, aborted] = cppcoro::sync_wait(lks_root(*root_, currentDepth, -1.0f, 1.0f));
             if (aborted) break;
             bestScore = score;
             if (move != chess::Move::NO_MOVE) bestMove = move;
@@ -161,15 +143,15 @@ public:
 
     struct SearchOutcome { float score; chess::Move bestMove; bool aborted; };
 
-    SearchOutcome pvs_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, bool want_move, int rec_depth = 0) {
-        if (stop_requested_.load(std::memory_order_acquire)) return {0.0f, chess::Move::NO_MOVE, true};
+    cppcoro::task<SearchOutcome> pvs_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, bool want_move, int rec_depth = 0) {
+        if (stop_requested_.load(std::memory_order_acquire)) co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, true};
 
         if (node.terminal || node.policy.empty()) {
-            return {node.value, chess::Move::NO_MOVE, false};
+            co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
         }
 
         if (rec_depth > 50) {
-            return {node.value, chess::Move::NO_MOVE, false};
+            co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
         }
 
         // Ensure policy is sorted and normalized before expansion
@@ -199,7 +181,7 @@ public:
         }
         if (is_leaf_node(node)) {
             if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + node_depth_reduction) {
-                return {node.value, chess::Move::NO_MOVE, false};
+                co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
             }
 
             // First expansion bookkeeping: update maximum selective depth
@@ -257,7 +239,8 @@ public:
             if (!pe.child) {
                 chess::Board child_board = node.board;
                 child_board.makeMove(pe.move);
-                pe.child = std::make_unique<LKSNode>(create_node(child_board));
+                LKSNode created = co_await create_node(child_board);
+                pe.child = std::make_unique<LKSNode>(std::move(created));
                 backpropagate_policy_updates(node, *pe.child, pe.move);
             }
 
@@ -269,8 +252,8 @@ public:
             else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
             else next_type = NodeType::CUT;
 
-            auto child_out = pvs_search(*pe.child, new_depth, search_alpha, search_beta, next_type, false, rec_depth + 1);
-            if (child_out.aborted) return {0.0f, bestMove, true};
+            auto child_out = co_await pvs_search(*pe.child, new_depth, search_alpha, search_beta, next_type, false, rec_depth + 1);
+            if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
             float score = -child_out.score;
 
             // Use the first move to seed initial values
@@ -279,7 +262,7 @@ public:
                 bestScore = score;
                 bestMove = pe.move;
                 if (score >= beta) {
-                    return {bestScore, bestMove, false};
+                    co_return SearchOutcome{bestScore, bestMove, false};
                 }
             } else {
                 if (score > alpha) {
@@ -304,8 +287,8 @@ public:
                 re_search_count += 1;
 
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
-                auto child_out = pvs_search(*pe.child, new_depth, -alpha - NULL_EPS, -alpha, next_type, false, rec_depth + 1);
-                if (child_out.aborted) return {0.0f, bestMove, true};
+                auto child_out = co_await pvs_search(*pe.child, new_depth, -alpha - NULL_EPS, -alpha, next_type, false, rec_depth + 1);
+                if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
             }
 
@@ -313,8 +296,8 @@ public:
             if (score > alpha) {
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
                 NodeType fw_type = (node_type == NodeType::PV) ? NodeType::PV : next_type;
-                auto child_out = pvs_search(*pe.child, new_depth, -beta, -alpha, fw_type, false, rec_depth + 1);
-                if (child_out.aborted) return {0.0f, bestMove, true};
+                auto child_out = co_await pvs_search(*pe.child, new_depth, -beta, -alpha, fw_type, false, rec_depth + 1);
+                if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
             }
 
@@ -339,20 +322,20 @@ public:
                 bestMove = pe.move;
             }
             if (score >= beta) {
-                return {bestScore, bestMove, false};
+                co_return SearchOutcome{bestScore, bestMove, false};
             }
         }
 
-        return {bestScore, bestMove, false};
+        co_return SearchOutcome{bestScore, bestMove, false};
     }
 
-    RootResult lks_root(LKSNode& root, float depth, float alpha, float beta) {
-        auto out = pvs_search(root, depth, alpha, beta, NodeType::PV, true, 0);
-        return {out.score, out.bestMove, out.aborted};
+    cppcoro::task<RootResult> lks_root(LKSNode& root, float depth, float alpha, float beta) {
+        auto out = co_await pvs_search(root, depth, alpha, beta, NodeType::PV, true, 0);
+        co_return RootResult{out.score, out.bestMove, out.aborted};
     }
 
     float lks(LKSNode& node, float depth, float alpha, float beta, bool& aborted, NodeType node_type) {
-        auto out = pvs_search(node, depth, alpha, beta, node_type, false, 0);
+        auto out = cppcoro::sync_wait(pvs_search(node, depth, alpha, beta, node_type, false, 0));
         aborted = out.aborted;
         return out.score;
     }
@@ -361,7 +344,7 @@ private:
     chess::Board board_;
     std::atomic<bool> stop_requested_{false};
     engine_parallel::NNEvaluator evaluator_;
-    std::unique_ptr<engine_parallel::ThreadPool> pool_;
+    
     std::unique_ptr<LKSNode> root_;
     std::atomic<std::uint64_t> stat_gpu_evaluations_{0};
     std::atomic<std::uint64_t> stat_nodes_created_{0};
@@ -423,46 +406,11 @@ private:
         return evals * 100ULL < limits.nodes * 95ULL;
     }
 
-    // coroutine to await eval then set promise
-    LksTaskVoid evalTask(const std::array<std::uint8_t, 68> tokens, std::promise<engine_parallel::EvalResult> *p) {
-        engine_parallel::EvalAwaitable awaitable{&evaluator_, pool_.get(), tokens};
+    cppcoro::task<engine_parallel::EvalResult> evaluateAsync(const chess::Board &b) {
+        auto tokens = engine_tokenizer::tokenizeBoard(b);
+        engine_parallel::EvalAwaitable awaitable{&evaluator_, tokens};
         engine_parallel::EvalResult res = co_await awaitable;
-        p->set_value(res);
-        co_return;
-    }
-
-    std::optional<engine_parallel::EvalResult> evaluateFullBlocking(const chess::Board &b) {
-        if (stop_requested_.load(std::memory_order_acquire)) return std::nullopt;
-        auto tokens = engine_tokenizer::tokenizeBoard(b);
-        std::promise<engine_parallel::EvalResult> prom;
-        std::future<engine_parallel::EvalResult> fut = prom.get_future();
-        LksTaskVoid t = evalTask(tokens, &prom);
-        auto h = t.coro;
-        t.coro = {};
-        h.resume();
-        engine_parallel::EvalResult res = fut.get();
-        if (res.canceled || stop_requested_.load(std::memory_order_acquire)) {
-            return std::nullopt;
-        }
-        stat_gpu_evaluations_.fetch_add(1, std::memory_order_relaxed);
-        return res;
-    }
-
-    std::optional<float> evaluateBlocking(const chess::Board &b) {
-        if (stop_requested_.load(std::memory_order_acquire)) return std::nullopt;
-        auto tokens = engine_tokenizer::tokenizeBoard(b);
-        std::promise<engine_parallel::EvalResult> prom;
-        std::future<engine_parallel::EvalResult> fut = prom.get_future();
-        LksTaskVoid t = evalTask(tokens, &prom);
-        auto h = t.coro;
-        t.coro = {};
-        h.resume();
-        engine_parallel::EvalResult res = fut.get();
-        if (res.canceled || stop_requested_.load(std::memory_order_acquire)) {
-            return std::nullopt;
-        }
-        stat_gpu_evaluations_.fetch_add(1, std::memory_order_relaxed);
-        return res.value;
+        co_return res;
     }
 
     void sort_and_normalize(LKSNode &node) {
@@ -533,7 +481,7 @@ private:
 
 public:
     // Create an LKS node from a board by evaluating model outputs
-    LKSNode create_node(const chess::Board &board) {
+    cppcoro::task<LKSNode> create_node(const chess::Board &board) {
         // Track node creation
         stat_nodes_created_.fetch_add(1, std::memory_order_relaxed);
         // Terminal detection (ignore syzygy and TT)
@@ -546,15 +494,14 @@ public:
             } else {
                 terminal_value = 0.0f; // stalemate, repetition, fifty-move, insufficient material
             }
-            return LKSNode(board, terminal_value, {}, 0.0f, true);
+            co_return LKSNode(board, terminal_value, {}, 0.0f, true);
         }
 
-        // Evaluate network fully
-        auto eval_opt = evaluateFullBlocking(board);
-        if (!eval_opt.has_value()) {
-            return LKSNode(board, 0.0f, {}, 0.0f, false);
+        // Evaluate network fully (suspend until ready)
+        engine_parallel::EvalResult eval = co_await evaluateAsync(board);
+        if (eval.canceled || stop_requested_.load(std::memory_order_acquire)) {
+            co_return LKSNode(board, 0.0f, {}, 0.0f, false);
         }
-        engine_parallel::EvalResult eval = *eval_opt;
 
         // Convert scalar value to [-1, 1]
         float value = 2.0f * eval.value - 1.0f;
@@ -634,7 +581,7 @@ public:
             node_U = static_cast<float>(std::sqrt(variance * 4.0));
         }
 
-        return LKSNode(board, value, std::move(entries), node_U, false);
+        co_return LKSNode(board, value, std::move(entries), node_U, false);
     }
 };
 

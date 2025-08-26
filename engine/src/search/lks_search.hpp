@@ -259,19 +259,6 @@ public:
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
 
-            // Pre-create children for remaining indices to avoid races during parallel work
-            for (std::size_t idx_pos = 1; idx_pos < filtered_indices.size(); ++idx_pos) {
-                std::size_t i = filtered_indices[idx_pos];
-                auto &pe = node.policy[i];
-                if (!pe.child) {
-                    chess::Board child_board = node.board;
-                    child_board.makeMove(pe.move);
-                    LKSNode created = co_await create_node(child_board);
-                    pe.child = std::make_unique<LKSNode>(std::move(created));
-                    backpropagate_policy_updates(node, *pe.child, pe.move);
-                }
-            }
-
             // Launch parallel searches for remaining children
             struct PendingTask { std::size_t idx; std::future<Phase2ChildResult> fut; };
             std::vector<PendingTask> pending;

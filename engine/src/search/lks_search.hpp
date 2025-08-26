@@ -293,23 +293,24 @@ public:
             auto &pe = node.policy[i];
             float new_depth = new_depths[i];
             float score = std::numeric_limits<float>::infinity();
-            int re_search_count = 0;
+            int re_search_count = 1;
+            new_depth += RE_SEARCH_DEPTH;
 
             // Continue incremental null-window searches until reaching best_move_depth
             while (score > alpha && new_depth < best_move_depth) {
                 // Increment depth
-                new_depth += RE_SEARCH_DEPTH;
-                if (new_depth >= best_move_depth) new_depth = best_move_depth + RE_SEARCH_DEPTH;
-                re_search_count += 1;
 
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
                 auto child_out = co_await lks_search(*pe.child, new_depth, -alpha - NULL_EPS, -alpha, next_type, rec_depth + 1);
                 if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
+                new_depth += RE_SEARCH_DEPTH;
+                re_search_count += 1;
             }
 
             // If still improving alpha, do full-window re-search
             if (score > alpha) {
+                new_depth = best_move_depth + RE_SEARCH_DEPTH;
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
                 NodeType fw_type = (node_type == NodeType::PV) ? NodeType::PV : next_type;
                 auto child_out = co_await lks_search(*pe.child, new_depth, -beta, -alpha, fw_type, rec_depth + 1);

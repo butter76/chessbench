@@ -24,6 +24,7 @@
 #include <cppcoro/sync_wait.hpp>
 #include <cppcoro/static_thread_pool.hpp>
 #include <cppcoro/async_manual_reset_event.hpp>
+#include <cppcoro/when_all_ready.hpp>
 
 namespace engine {
 
@@ -33,7 +34,7 @@ class LksSearch : public SearchAlgo {
 public:
     explicit LksSearch(engine::Options &options, const engine::TimeHandler *time_handler)
         : SearchAlgo(options, time_handler), board_(), evaluator_(options),
-          pool_(static_cast<std::size_t>(std::max(1u, std::thread::hardware_concurrency()))) {
+          pool_(static_cast<std::size_t>(32u) {
         evaluator_.start();
     }
 
@@ -259,27 +260,29 @@ public:
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
 
-            // Launch parallel searches for remaining children
-            struct PendingTask { std::size_t idx; std::future<Phase2ChildResult> fut; };
-            std::vector<PendingTask> pending;
-            pending.reserve(filtered_indices.size() > 0 ? filtered_indices.size() - 1 : 0);
+            // Launch parallel searches for remaining children as coroutine tasks
+            std::vector<std::size_t> non_first_indices;
+            non_first_indices.reserve(filtered_indices.size() > 0 ? filtered_indices.size() - 1 : 0);
+            std::vector<cppcoro::task<Phase2ChildResult>> tasks;
+            tasks.reserve(filtered_indices.size() > 0 ? filtered_indices.size() - 1 : 0);
 
             const float alpha_after_first = alpha;
             for (std::size_t idx_pos = 1; idx_pos < filtered_indices.size(); ++idx_pos) {
                 std::size_t i = filtered_indices[idx_pos];
                 float nd = new_depths[i];
-                auto fut = std::async(std::launch::async, [this, &node, i, nd, alpha_after_first, beta, node_type, rec_depth]() {
-                    return cppcoro::sync_wait(process_phase2_child(node, i, nd, alpha_after_first, beta, node_type, rec_depth));
-                });
-                pending.push_back(PendingTask{i, std::move(fut)});
+                non_first_indices.push_back(i);
+                tasks.push_back(process_phase2_child(node, i, nd, alpha_after_first, beta, node_type, rec_depth));
             }
 
-            // Collect results, ignoring beta-cutoffs for non-first children
-            for (auto &p : pending) {
-                Phase2ChildResult r = p.fut.get();
-                if (r.aborted) co_return SearchOutcome{0.0f, bestMove, true};
-                if (r.is_improver) {
-                    improver_indices.push_back(p.idx);
+            // Await completion of all non-first children without blocking pool threads
+            if (!tasks.empty()) {
+                auto ready = co_await cppcoro::when_all_ready(std::move(tasks));
+                for (std::size_t t = 0; t < ready.size(); ++t) {
+                    Phase2ChildResult r = std::move(ready[t]).result();
+                    if (r.aborted) co_return SearchOutcome{0.0f, bestMove, true};
+                    if (r.is_improver) {
+                        improver_indices.push_back(non_first_indices[t]);
+                    }
                 }
             }
         }

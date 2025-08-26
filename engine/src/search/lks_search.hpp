@@ -149,6 +149,15 @@ public:
 
     struct SearchOutcome { float score; chess::Move bestMove; bool aborted; };
 
+    struct Phase2ChildResult {
+        bool aborted;
+        bool cutoff;
+        float alpha_out;
+        float score;
+        chess::Move move;
+        bool is_improver;
+    };
+
     cppcoro::task<SearchOutcome> lks_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, int rec_depth = 0) {
         if (stop_requested_.load(std::memory_order_acquire)) co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, true};
 
@@ -239,39 +248,18 @@ public:
 
         for (std::size_t idx_pos = 0; idx_pos < filtered_indices.size(); ++idx_pos) {
             std::size_t i = filtered_indices[idx_pos];
-            auto &pe = node.policy[i];
-
-            // Create child and backprop if needed
-            if (!pe.child) {
-                chess::Board child_board = node.board;
-                child_board.makeMove(pe.move);
-                LKSNode created = co_await create_node(child_board);
-                pe.child = std::make_unique<LKSNode>(std::move(created));
-                backpropagate_policy_updates(node, *pe.child, pe.move);
-            }
-
             float new_depth = new_depths[i];
-            float search_alpha = (i == 0) ? -beta : -alpha - NULL_EPS;
-            float search_beta = -alpha;
-            NodeType next_type;
-            if (i == 0 && node_type == NodeType::PV) next_type = NodeType::PV;
-            else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
-            else next_type = NodeType::CUT;
-
-            auto child_out = co_await lks_search(*pe.child, new_depth, search_alpha, search_beta, next_type, rec_depth + 1);
-            if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
-            float score = -child_out.score;
-
-            // Use the first move to seed initial values
+            auto result = co_await process_phase2_child(node, i, new_depth, alpha, beta, node_type, rec_depth);
+            if (result.aborted) co_return SearchOutcome{0.0f, bestMove, true};
             if (i == 0) {
-                if (score > alpha) alpha = score;
-                bestScore = score;
-                bestMove = pe.move;
-                if (score >= beta) {
+                alpha = result.alpha_out;
+                bestScore = result.score;
+                bestMove = result.move;
+                if (result.cutoff) {
                     co_return SearchOutcome{bestScore, bestMove, false};
                 }
             } else {
-                if (score > alpha) {
+                if (result.is_improver) {
                     improver_indices.push_back(i);
                 }
             }
@@ -341,6 +329,51 @@ public:
     }
 
 private:
+    cppcoro::task<Phase2ChildResult> process_phase2_child(
+        LKSNode &node,
+        std::size_t i,
+        float new_depth,
+        float alpha,
+        float beta,
+        NodeType node_type,
+        int rec_depth
+    ) {
+        const float NULL_EPS = 1e-4f;
+        auto &pe = node.policy[i];
+
+        // Ensure child exists and backpropagate policy updates
+        if (!pe.child) {
+            chess::Board child_board = node.board;
+            child_board.makeMove(pe.move);
+            LKSNode created = co_await create_node(child_board);
+            pe.child = std::make_unique<LKSNode>(std::move(created));
+            backpropagate_policy_updates(node, *pe.child, pe.move);
+        }
+
+        float search_alpha = (i == 0) ? -beta : -alpha - NULL_EPS;
+        float search_beta = -alpha;
+        NodeType next_type;
+        if (i == 0 && node_type == NodeType::PV) next_type = NodeType::PV;
+        else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
+        else next_type = NodeType::CUT;
+
+        auto child_out = co_await lks_search(*pe.child, new_depth, search_alpha, search_beta, next_type, rec_depth + 1);
+        if (child_out.aborted) {
+            co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
+        }
+        float score = -child_out.score;
+
+        if (i == 0) {
+            float alpha_out = alpha;
+            if (score > alpha_out) alpha_out = score;
+            bool cutoff = score >= beta;
+            co_return Phase2ChildResult{false, cutoff, alpha_out, score, pe.move, false};
+        } else {
+            bool is_improver = score > alpha;
+            co_return Phase2ChildResult{false, false, alpha, score, pe.move, is_improver};
+        }
+    }
+
     chess::Board board_;
     std::atomic<bool> stop_requested_{false};
     engine_parallel::NNEvaluator evaluator_;

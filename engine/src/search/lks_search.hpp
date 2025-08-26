@@ -22,6 +22,7 @@
 
 #include <cppcoro/task.hpp>
 #include <cppcoro/sync_wait.hpp>
+#include <cppcoro/static_thread_pool.hpp>
 
 namespace engine {
 
@@ -30,7 +31,8 @@ namespace engine {
 class LksSearch : public SearchAlgo {
 public:
     explicit LksSearch(engine::Options &options, const engine::TimeHandler *time_handler)
-        : SearchAlgo(options, time_handler), board_(), evaluator_(options) {
+        : SearchAlgo(options, time_handler), board_(), evaluator_(options),
+          pool_(static_cast<std::size_t>(std::max(1u, std::thread::hardware_concurrency()))) {
         evaluator_.start();
     }
 
@@ -88,7 +90,10 @@ public:
         while (currentDepth <= maxDepth + 1e-2f) {
             if (stop_requested_.load(std::memory_order_acquire)) break;
             if (!node_limit_check(limits)) break;
-            auto [score, move, aborted] = cppcoro::sync_wait(lks_root(*root_, currentDepth, -1.0f, 1.0f));
+            auto [score, move, aborted] = cppcoro::sync_wait([&]() -> cppcoro::task<RootResult> {
+                co_await pool_.schedule();
+                co_return co_await lks_root(*root_, currentDepth, -1.0f, 1.0f);
+            }());
             if (aborted) break;
             bestScore = score;
             if (move != chess::Move::NO_MOVE) bestMove = move;
@@ -338,6 +343,7 @@ private:
     chess::Board board_;
     std::atomic<bool> stop_requested_{false};
     engine_parallel::NNEvaluator evaluator_;
+    cppcoro::static_thread_pool pool_;
     
     std::unique_ptr<LKSNode> root_;
     std::atomic<std::uint64_t> stat_gpu_evaluations_{0};
@@ -404,6 +410,17 @@ private:
         auto tokens = engine_tokenizer::tokenizeBoard(b);
         engine_parallel::EvalAwaitable awaitable{&evaluator_, tokens};
         engine_parallel::EvalResult res = co_await awaitable;
+        co_return res;
+    }
+
+    // Wrapper that ensures continuation resumes on our thread pool and tracks stats
+    cppcoro::task<engine_parallel::EvalResult> evaluate_on_pool(const chess::Board &b) {
+        // Count this evaluation request
+        stat_gpu_evaluations_.fetch_add(1, std::memory_order_relaxed);
+        // Await GPU evaluation (may resume on evaluator worker thread)
+        engine_parallel::EvalResult res = co_await evaluateAsync(b);
+        // Bounce back to the search thread pool to continue the coroutine on the desired executor
+        co_await pool_.schedule();
         co_return res;
     }
 
@@ -492,7 +509,7 @@ public:
         }
 
         // Evaluate network fully (suspend until ready)
-        engine_parallel::EvalResult eval = co_await evaluateAsync(board);
+        engine_parallel::EvalResult eval = co_await evaluate_on_pool(board);
         if (eval.canceled || stop_requested_.load(std::memory_order_acquire)) {
             co_return LKSNode(board, 0.0f, {}, 0.0f, false);
         }

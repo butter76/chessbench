@@ -95,7 +95,6 @@ public:
         if (stop.load(std::memory_order_acquire)) {
             EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
             r.handle.resume();
-            if (r.handle.done()) r.handle.destroy();
             return;
         }
         {
@@ -276,7 +275,6 @@ private:
                 for (auto& r : batch) {
                     EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
                     r.handle.resume();
-                    if (r.handle.done()) r.handle.destroy();
                 }
                 continue;
             }
@@ -342,7 +340,16 @@ private:
 
                 // Execute
                 if (!trt_context->enqueueV3(trt_stream)) {
-                    std::cerr << "[NNEvaluator] enqueueV2 failed" << std::endl;
+                    std::cerr << "[NNEvaluator] enqueueV3 failed" << std::endl;
+                    // Fail the batch safely
+                    for (auto& r : batch) {
+                        EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
+                    }
+                    // Skip device copies and resume continuations
+                    for (auto& r : batch) {
+                        r.handle.resume();
+                    }
+                    continue;
                 }
 
                 // Copy back outputs and distribute results
@@ -408,17 +415,15 @@ private:
                 if (d_U) cudaFree(d_U);
                 if (d_Q) cudaFree(d_Q);
             } else {
-                // No TensorRT available: cancel all requests and throw
+                // No TensorRT available: cancel all requests and continue without throwing
                 for (auto& r : batch) {
                     EvalResult er; er.value = 0.0f; er.canceled = true; r.latch->set(std::move(er));
                     r.handle.resume();
-                    if (r.handle.done()) r.handle.destroy();
                 }
-                throw std::runtime_error("[NNEvaluator] TensorRT not initialized; fallback behavior disabled");
+                continue;
             }
             for (auto& r : batch) {
                 r.handle.resume();
-                if (r.handle.done()) r.handle.destroy();
             }
         }
     }

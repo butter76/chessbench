@@ -26,8 +26,16 @@ target_include_directories(cppcoro INTERFACE
 target_compile_definitions(cppcoro INTERFACE _LIBCPP_ENABLE_EXPERIMENTAL)
 add_library(cppcoro_objects STATIC
     third_party/cppcoro/lib/lightweight_manual_reset_event.cpp
+    third_party/cppcoro/lib/static_thread_pool.cpp
+    third_party/cppcoro/lib/auto_reset_event.cpp
+    third_party/cppcoro/lib/spin_wait.cpp
+    third_party/cppcoro/lib/spin_mutex.cpp
 )
-target_include_directories(cppcoro_objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include")
+target_include_directories(cppcoro_objects PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat"
+)
+target_compile_definitions(cppcoro_objects PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(cppcoro_objects PRIVATE -stdlib=libc++)
     target_link_options(cppcoro_objects PRIVATE -stdlib=libc++ -lc++abi)

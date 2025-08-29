@@ -22,6 +22,8 @@
 #include <unordered_map>
 #include <mutex>
 #include <array>
+#include <string>
+#include <tbb/concurrent_hash_map.h>
 
 #include <cppcoro/task.hpp>
 #include <cppcoro/sync_wait.hpp>
@@ -52,10 +54,9 @@ public:
         board_ = chess::Board();
         root_.reset();
         // Clear eval cache
-        {
-            std::lock_guard<std::mutex> lk(eval_cache_mutex_);
-            eval_cache_.clear();
-        }
+        eval_cache_.clear();
+        // Clear transposition table
+        tt_.clear();
     }
 
     void makemove(const std::string &uci) override {
@@ -190,6 +191,14 @@ public:
             co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
         }
 
+        const float alpha0 = alpha;
+        const float beta0 = beta;
+
+        // Transposition Table probe (after recursion depth guard)
+        if (auto tt_score = query_tt(node.board, alpha0, beta0, depth)) {
+            co_return SearchOutcome{*tt_score, chess::Move::NO_MOVE, false};
+        }
+
         // Ensure policy is sorted and normalized before expansion
         sort_and_normalize(node);
 
@@ -217,6 +226,7 @@ public:
         }
         if (is_leaf_node(node)) {
             if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + node_depth_reduction) {
+                update_tt(node.board, alpha0, beta0, depth, node.value);
                 co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
             }
 
@@ -277,6 +287,7 @@ public:
             bestScore = r0.score;
             bestMove = r0.move;
             if (r0.cutoff) {
+                update_tt(node.board, alpha0, beta0, depth, bestScore);
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
 
@@ -359,10 +370,12 @@ public:
                 bestMove = pe.move;
             }
             if (score >= beta) {
+                update_tt(node.board, alpha0, beta0, depth, bestScore);
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
         }
 
+        update_tt(node.board, alpha0, beta0, depth, bestScore);
         co_return SearchOutcome{bestScore, bestMove, false};
     }
 
@@ -377,31 +390,28 @@ private:
     struct CachedNodeData { float value; std::vector<CachedPolicyEntry> entries; float node_U; };
     struct NodeBuildResult { float value; std::vector<LKSPolicyEntry> entries; float node_U; };
 
-    struct TokenArrayHasher {
-        std::size_t operator()(const std::array<std::uint8_t, 68> &a) const noexcept {
+    struct TokenArrayHashCompare {
+        std::size_t hash(const std::array<std::uint8_t, 68> &a) const noexcept {
             // FNV-1a 64-bit
             const std::size_t fnv_offset = 1469598103934665603ull;
             const std::size_t fnv_prime  = 1099511628211ull;
-            std::size_t hash = fnv_offset;
-            for (std::uint8_t b : a) { hash ^= static_cast<std::size_t>(b); hash *= fnv_prime; }
-            return hash;
+            std::size_t h = fnv_offset;
+            for (std::uint8_t b : a) { h ^= static_cast<std::size_t>(b); h *= fnv_prime; }
+            return h;
         }
-    };
-    struct TokenArrayEq {
-        bool operator()(const std::array<std::uint8_t, 68> &lhs, const std::array<std::uint8_t, 68> &rhs) const noexcept {
+        bool equal(const std::array<std::uint8_t, 68> &lhs, const std::array<std::uint8_t, 68> &rhs) const noexcept {
             for (std::size_t i = 0; i < lhs.size(); ++i) if (lhs[i] != rhs[i]) return false;
             return true;
         }
     };
 
-    std::unordered_map<std::array<std::uint8_t, 68>, CachedNodeData, TokenArrayHasher, TokenArrayEq> eval_cache_;
-    std::mutex eval_cache_mutex_;
+    using EvalCacheMap = tbb::concurrent_hash_map<std::array<std::uint8_t, 68>, CachedNodeData, TokenArrayHashCompare>;
+    EvalCacheMap eval_cache_;
 
     std::optional<NodeBuildResult> try_load_from_cache(const std::array<std::uint8_t, 68> &tokens) {
-        std::lock_guard<std::mutex> lk(eval_cache_mutex_);
-        auto it = eval_cache_.find(tokens);
-        if (it == eval_cache_.end()) return std::nullopt;
-        const CachedNodeData &c = it->second;
+        EvalCacheMap::const_accessor acc;
+        if (!eval_cache_.find(acc, tokens)) return std::nullopt;
+        const CachedNodeData &c = acc->second;
         std::vector<LKSPolicyEntry> entries;
         entries.reserve(c.entries.size());
         for (const auto &ce : c.entries) {
@@ -504,12 +514,76 @@ private:
             for (const auto &e : entries) {
                 cached_entries.push_back(CachedPolicyEntry{e.move, e.policy, e.U, e.Q});
             }
-            std::lock_guard<std::mutex> lk(eval_cache_mutex_);
-            eval_cache_[tokens] = CachedNodeData{value, std::move(cached_entries), node_U};
+            EvalCacheMap::accessor acc;
+            eval_cache_.insert(acc, tokens);
+            acc->second = CachedNodeData{value, std::move(cached_entries), node_U};
         }
 
         return NodeBuildResult{value, std::move(entries), node_U};
     }
+
+    // --- Transposition Table (TT) ---
+public:
+    enum class TTBoundType { EXACT = 0, LOWER_BOUND = 1, UPPER_BOUND = 2 };
+
+    struct TTBoundRec {
+        bool has{false};
+        float score{0.0f};
+        float depth{0.0f};
+    };
+
+    struct TTEntry {
+        TTBoundRec exact;
+        TTBoundRec lower;
+        TTBoundRec upper;
+    };
+
+    // Query the transposition table for a given board state.
+    // Returns a score if the TT can establish an exact value or a cutoff with the given alpha/beta and depth.
+    std::optional<float> query_tt(const chess::Board &board, float alpha, float beta, float depth) {
+        const std::string key = board.getFen(false);
+        TTMap::const_accessor acc;
+        if (!tt_.find(acc, key)) return std::nullopt;
+        const TTEntry &e = acc->second;
+        // Prefer exact value if at sufficient depth
+        if (e.exact.has && e.exact.depth >= depth) return e.exact.score;
+        // Lower bound can trigger beta cutoff
+        if (e.lower.has && e.lower.depth >= depth && e.lower.score >= beta) return e.lower.score;
+        // Upper bound can trigger alpha cutoff
+        if (e.upper.has && e.upper.depth >= depth && e.upper.score <= alpha) return e.upper.score;
+        return std::nullopt;
+    }
+
+    // Update the transposition table entry for this board with a result at the given window and depth.
+    void update_tt(const chess::Board &board, float alpha, float beta, float depth, float score) {
+        const std::string key = board.getFen(false);
+        TTMap::accessor acc;
+        tt_.insert(acc, key);
+        TTEntry &e = acc->second;
+        if (score <= alpha) {
+            if (!e.upper.has || e.upper.depth <= depth) {
+                e.upper.has = true;
+                e.upper.score = score;
+                e.upper.depth = depth;
+            }
+        } else if (score >= beta) {
+            if (!e.lower.has || e.lower.depth <= depth) {
+                e.lower.has = true;
+                e.lower.score = score;
+                e.lower.depth = depth;
+            }
+        } else {
+            if (!e.exact.has || e.exact.depth <= depth) {
+                e.exact.has = true;
+                e.exact.score = score;
+                e.exact.depth = depth;
+            }
+        }
+    }
+
+private:
+    using TTMap = tbb::concurrent_hash_map<std::string, TTEntry>;
+    TTMap tt_;
     cppcoro::task<Phase2ChildResult> process_phase2_child(
         LKSNode &node,
         std::size_t i,

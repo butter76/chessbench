@@ -27,7 +27,7 @@
 #include <cppcoro/when_all_ready.hpp>
 
 namespace engine {
-constexpr float IT_DEPTH_STEP = 0.4f;
+constexpr float IT_DEPTH_STEP = 0.2f;
 constexpr float RE_SEARCH_DEPTH = IT_DEPTH_STEP;
 constexpr float IMPROVER_POLICY_INCREASE = RE_SEARCH_DEPTH / 2;
 

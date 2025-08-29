@@ -180,7 +180,7 @@ public:
         bool is_improver;
     };
 
-    cppcoro::task<SearchOutcome> lks_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, int rec_depth = 0) {
+    cppcoro::task<SearchOutcome> lks_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, int rec_depth = 0, bool root = false) {
         if (stop_requested_.load(std::memory_order_acquire)) co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, true};
 
         if (node.terminal || node.policy.empty()) {
@@ -189,6 +189,11 @@ public:
 
         if (rec_depth > 50) {
             co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
+        }
+
+        // During search, use 2-fold repetition, but don't allow it for the root node
+        if (node.board.isRepetition(1) && !root) {
+            co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, false};
         }
 
         const float alpha0 = alpha;
@@ -265,7 +270,7 @@ public:
                 const float local_reduction = -2.0f * std::log(pe.U + 1e-6f);
                 if (new_depth <= local_reduction) {
                     if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
-                        should_filter = true;
+                        should_filter = !root;
                     }
                 }
             }
@@ -380,7 +385,7 @@ public:
     }
 
     cppcoro::task<RootResult> lks_root(LKSNode& root, float depth, float alpha, float beta) {
-        auto out = co_await lks_search(root, depth, alpha, beta, NodeType::PV, 0);
+        auto out = co_await lks_search(root, depth, alpha, beta, NodeType::PV, 0, true);
         co_return RootResult{out.score, out.bestMove, out.aborted};
     }
 
@@ -646,8 +651,16 @@ private:
     // --- Helpers for UCI info output ---
     void print_info_line(float depth, float bestScore) {
         std::ostringstream oss;
-        // depth with fractional display
-        oss << "info depth " << std::fixed << std::setprecision(1) << depth;
+        {
+            const std::string showfrac = options_.get("fractionaldepth", "");
+            if (!showfrac.empty() && showfrac != "0") {
+                // depth with fractional display
+                oss << "info depth " << std::fixed << std::setprecision(1) << depth;
+            } else {
+                float classic_depth = std::lround((depth + 0.01f) / IT_DEPTH_STEP);
+                oss << "info depth " << classic_depth;
+            }
+        }
         // seldepth
         oss << " seldepth " << getSelDepth();
         // multipv always 1

@@ -73,6 +73,7 @@ public:
         stat_tbhits_.store(0, std::memory_order_relaxed);
         stat_tthits_.store(0, std::memory_order_relaxed);
         stat_seldepth_.store(0, std::memory_order_relaxed);
+        stat_parent_nodes_.store(0, std::memory_order_relaxed);
         // Mark search start time
         {
             using namespace std::chrono;
@@ -124,6 +125,10 @@ public:
 
     std::uint64_t getNodesCreatedCount() const {
         return stat_nodes_created_.load(std::memory_order_relaxed);
+    }
+
+    std::uint64_t getParentNodesCount() const {
+        return stat_parent_nodes_.load(std::memory_order_relaxed);
     }
 
     int getSelDepth() const {
@@ -205,6 +210,7 @@ public:
             }
 
             // First expansion bookkeeping: update maximum selective depth
+            stat_parent_nodes_.fetch_add(1, std::memory_order_relaxed);
             const int new_seldepth = rec_depth + 1;
             int observed = stat_seldepth_.load(std::memory_order_relaxed);
             if (new_seldepth > observed) {
@@ -408,6 +414,7 @@ private:
     std::unique_ptr<LKSNode> root_;
     std::atomic<std::uint64_t> stat_gpu_evaluations_{0};
     std::atomic<std::uint64_t> stat_nodes_created_{0};
+    std::atomic<std::uint64_t> stat_parent_nodes_{0};
     std::atomic<int> stat_seldepth_{0};
     std::atomic<std::uint64_t> stat_tbhits_{0};
     std::atomic<std::uint64_t> stat_tthits_{0};
@@ -434,6 +441,16 @@ private:
         // tbhits and time
         oss << " tbhits " << getTBHitsCount();
         oss << " time " << ms;
+        // optional branching factor (gpu evaluations to parent nodes)
+        {
+            const std::string showbf = options_.get("showbf", "");
+            if (!showbf.empty() && showbf != "0") {
+                const std::uint64_t evals = getGpuEvaluationsCount();
+                const std::uint64_t parents = getParentNodesCount();
+                double bf = (parents == 0ULL) ? 0.0 : static_cast<double>(evals) / static_cast<double>(parents);
+                oss << " bf " << std::fixed << std::setprecision(2) << bf;
+            }
+        }
         // pv line
         std::string pv_line = build_pv_line();
         if (!pv_line.empty()) {

@@ -19,6 +19,9 @@
 #include <chrono>
 #include <sstream>
 #include <iomanip>
+#include <unordered_map>
+#include <mutex>
+#include <array>
 
 #include <cppcoro/task.hpp>
 #include <cppcoro/sync_wait.hpp>
@@ -45,7 +48,15 @@ public:
         evaluator_.stop_and_join();
     }
 
-    void reset() override { board_ = chess::Board(); root_.reset(); }
+    void reset() override {
+        board_ = chess::Board();
+        root_.reset();
+        // Clear eval cache
+        {
+            std::lock_guard<std::mutex> lk(eval_cache_mutex_);
+            eval_cache_.clear();
+        }
+    }
 
     void makemove(const std::string &uci) override {
         const chess::Move move = chess::uci::uciToMove(board_, uci);
@@ -361,6 +372,144 @@ public:
     }
 
 private:
+    // --- GPU evaluation cache ---
+    struct CachedPolicyEntry { chess::Move move; float policy; float U; float Q; };
+    struct CachedNodeData { float value; std::vector<CachedPolicyEntry> entries; float node_U; };
+    struct NodeBuildResult { float value; std::vector<LKSPolicyEntry> entries; float node_U; };
+
+    struct TokenArrayHasher {
+        std::size_t operator()(const std::array<std::uint8_t, 68> &a) const noexcept {
+            // FNV-1a 64-bit
+            const std::size_t fnv_offset = 1469598103934665603ull;
+            const std::size_t fnv_prime  = 1099511628211ull;
+            std::size_t hash = fnv_offset;
+            for (std::uint8_t b : a) { hash ^= static_cast<std::size_t>(b); hash *= fnv_prime; }
+            return hash;
+        }
+    };
+    struct TokenArrayEq {
+        bool operator()(const std::array<std::uint8_t, 68> &lhs, const std::array<std::uint8_t, 68> &rhs) const noexcept {
+            for (std::size_t i = 0; i < lhs.size(); ++i) if (lhs[i] != rhs[i]) return false;
+            return true;
+        }
+    };
+
+    std::unordered_map<std::array<std::uint8_t, 68>, CachedNodeData, TokenArrayHasher, TokenArrayEq> eval_cache_;
+    std::mutex eval_cache_mutex_;
+
+    std::optional<NodeBuildResult> try_load_from_cache(const std::array<std::uint8_t, 68> &tokens) {
+        std::lock_guard<std::mutex> lk(eval_cache_mutex_);
+        auto it = eval_cache_.find(tokens);
+        if (it == eval_cache_.end()) return std::nullopt;
+        const CachedNodeData &c = it->second;
+        std::vector<LKSPolicyEntry> entries;
+        entries.reserve(c.entries.size());
+        for (const auto &ce : c.entries) {
+            LKSPolicyEntry e;
+            e.move = ce.move;
+            e.policy = ce.policy;
+            e.U = ce.U;
+            e.Q = ce.Q;
+            e.child = nullptr;
+            entries.push_back(std::move(e));
+        }
+        return NodeBuildResult{c.value, std::move(entries), c.node_U};
+    }
+
+    NodeBuildResult build_from_eval_and_cache(const chess::Board &board,
+                                              const engine_parallel::EvalResult &eval,
+                                              const std::array<std::uint8_t, 68> &tokens) {
+        // Convert scalar value to [-1, 1]
+        float value = 2.0f * eval.value - 1.0f;
+
+        // Prepare policy over legal moves using logits from eval.policy (hardest_policy)
+        chess::Movelist legal;
+        chess::movegen::legalmoves(legal, board);
+        const bool flip = (board.sideToMove() == chess::Color::BLACK);
+
+        struct Gathered { chess::Move mv; float logit; float U; float Q; int idx; int s1; int s2; };
+        std::vector<Gathered> gathered;
+        gathered.reserve(legal.size());
+
+        const int stride = 68;
+        const int policy_size = static_cast<int>(eval.policy.size());
+        const int U_size = static_cast<int>(eval.U.size());
+        const int Q_size = static_cast<int>(eval.Q.size());
+
+        for (const auto &mv : legal) {
+            auto [s1, s2] = move_to_indices(mv, flip);
+            long long flat = static_cast<long long>(s1) * stride + static_cast<long long>(s2);
+            if (flat < 0 || flat >= policy_size) continue;
+            float logit = eval.policy[static_cast<std::size_t>(flat)];
+            float Um = (flat >= 0 && flat < U_size) ? eval.U[static_cast<std::size_t>(flat)] : 0.0f;
+            float Qm = (flat >= 0 && flat < Q_size) ? eval.Q[static_cast<std::size_t>(flat)] : 0.0f;
+            gathered.push_back(Gathered{mv, logit, Um, Qm, static_cast<int>(flat), s1, s2});
+        }
+
+        // Softmax over gathered logits
+        float max_logit = -std::numeric_limits<float>::infinity();
+        for (const auto &g : gathered) max_logit = std::max(max_logit, g.logit);
+        double sum_exp = 0.0;
+        for (auto &g : gathered) { g.logit = std::exp(static_cast<double>(g.logit - max_logit)); sum_exp += g.logit; }
+        if (sum_exp <= 0.0) sum_exp = 1.0;
+
+        // Build policy entries, transform U/Q with sigmoid and Q from parent's perspective
+        std::vector<LKSPolicyEntry> entries;
+        entries.reserve(gathered.size());
+        auto sigmoid = [](float x) { return 1.0f / (1.0f + std::exp(-x)); };
+        for (const auto &g : gathered) {
+            float prob = static_cast<float>(g.logit / sum_exp);
+            float U_val = sigmoid(g.U);
+            float Q_val = sigmoid(g.Q);
+            Q_val = (Q_val * 2.0f - 1.0f) * -1.0f;
+            LKSPolicyEntry e;
+            e.move = g.mv;
+            e.policy = prob;
+            e.U = U_val;
+            e.Q = Q_val;
+            e.child = nullptr;
+            entries.push_back(std::move(e));
+        }
+        std::sort(entries.begin(), entries.end(), [](const LKSPolicyEntry &a, const LKSPolicyEntry &b){ return a.policy > b.policy; });
+
+        // Compute node-level U from hl logits as wdl_variance
+        float node_U = 0.0f;
+        const int bins = static_cast<int>(eval.hl.size());
+        if (bins > 0) {
+            // softmax over hl
+            double max_hl = -std::numeric_limits<double>::infinity();
+            for (float v : eval.hl) if (v > max_hl) max_hl = v;
+            std::vector<double> probs(eval.hl.size());
+            double sump = 0.0;
+            for (std::size_t i = 0; i < eval.hl.size(); ++i) { probs[i] = std::exp(static_cast<double>(eval.hl[i]) - max_hl); sump += probs[i]; }
+            if (sump <= 0.0) sump = 1.0;
+            for (double &p : probs) p /= sump;
+
+            // bin centers in [0,1]
+            const double N = static_cast<double>(bins);
+            double mean = 0.0, mean_sq = 0.0;
+            for (int i = 0; i < bins; ++i) {
+                double center = (2.0 * static_cast<double>(i) + 1.0) / (2.0 * N);
+                mean += probs[i] * center;
+                mean_sq += probs[i] * center * center;
+            }
+            double variance = std::max(0.0, mean_sq - mean * mean);
+            node_U = static_cast<float>(std::sqrt(variance * 4.0));
+        }
+
+        // Insert into cache as a flat copy (no child pointers)
+        {
+            std::vector<CachedPolicyEntry> cached_entries;
+            cached_entries.reserve(entries.size());
+            for (const auto &e : entries) {
+                cached_entries.push_back(CachedPolicyEntry{e.move, e.policy, e.U, e.Q});
+            }
+            std::lock_guard<std::mutex> lk(eval_cache_mutex_);
+            eval_cache_[tokens] = CachedNodeData{value, std::move(cached_entries), node_U};
+        }
+
+        return NodeBuildResult{value, std::move(entries), node_U};
+    }
     cppcoro::task<Phase2ChildResult> process_phase2_child(
         LKSNode &node,
         std::size_t i,
@@ -581,6 +730,11 @@ public:
             }
             co_return LKSNode(board, terminal_value, {}, 0.0f, true);
         }
+        // Cache lookup by tokenized board
+        auto tokens = engine_tokenizer::tokenizeBoard(board);
+        if (auto cached = try_load_from_cache(tokens)) {
+            co_return LKSNode(board, cached->value, std::move(cached->entries), cached->node_U, false);
+        }
 
         // Evaluate network fully (suspend until ready)
         engine_parallel::EvalResult eval = co_await evaluate_on_pool(board);
@@ -588,85 +742,9 @@ public:
             co_return LKSNode(board, 0.0f, {}, 0.0f, false);
         }
 
-        // Convert scalar value to [-1, 1]
-        float value = 2.0f * eval.value - 1.0f;
-
-        // Prepare policy over legal moves using logits from eval.policy (hardest_policy)
-        chess::Movelist legal;
-        chess::movegen::legalmoves(legal, board);
-        const bool flip = (board.sideToMove() == chess::Color::BLACK);
-
-        struct Gathered { chess::Move mv; float logit; float U; float Q; int idx; int s1; int s2; };
-        std::vector<Gathered> gathered;
-        gathered.reserve(legal.size());
-
-        const int stride = 68;
-        const int policy_size = static_cast<int>(eval.policy.size());
-        const int U_size = static_cast<int>(eval.U.size());
-        const int Q_size = static_cast<int>(eval.Q.size());
-
-        for (const auto &mv : legal) {
-            auto [s1, s2] = move_to_indices(mv, flip);
-            long long flat = static_cast<long long>(s1) * stride + static_cast<long long>(s2);
-            if (flat < 0 || flat >= policy_size) continue;
-            float logit = eval.policy[static_cast<std::size_t>(flat)];
-            float Um = (flat >= 0 && flat < U_size) ? eval.U[static_cast<std::size_t>(flat)] : 0.0f;
-            float Qm = (flat >= 0 && flat < Q_size) ? eval.Q[static_cast<std::size_t>(flat)] : 0.0f;
-            gathered.push_back(Gathered{mv, logit, Um, Qm, static_cast<int>(flat), s1, s2});
-        }
-
-        // Softmax over gathered logits
-        float max_logit = -std::numeric_limits<float>::infinity();
-        for (const auto &g : gathered) max_logit = std::max(max_logit, g.logit);
-        double sum_exp = 0.0;
-        for (auto &g : gathered) { g.logit = std::exp(static_cast<double>(g.logit - max_logit)); sum_exp += g.logit; }
-        if (sum_exp <= 0.0) sum_exp = 1.0;
-
-        // Build policy entries, transform U/Q with sigmoid and Q from parent's perspective
-        std::vector<LKSPolicyEntry> entries;
-        entries.reserve(gathered.size());
-        auto sigmoid = [](float x) { return 1.0f / (1.0f + std::exp(-x)); };
-        for (const auto &g : gathered) {
-            float prob = static_cast<float>(g.logit / sum_exp);
-            float U_val = sigmoid(g.U);
-            float Q_val = sigmoid(g.Q);
-            Q_val = (Q_val * 2.0f - 1.0f) * -1.0f;
-            LKSPolicyEntry e;
-            e.move = g.mv;
-            e.policy = prob;
-            e.U = U_val;
-            e.Q = Q_val;
-            e.child = nullptr;
-            entries.push_back(std::move(e));
-        }
-        std::sort(entries.begin(), entries.end(), [](const LKSPolicyEntry &a, const LKSPolicyEntry &b){ return a.policy > b.policy; });
-
-        // Compute node-level U from hl logits as wdl_variance
-        float node_U = 0.0f;
-        const int bins = static_cast<int>(eval.hl.size());
-        if (bins > 0) {
-            // softmax over hl
-            double max_hl = -std::numeric_limits<double>::infinity();
-            for (float v : eval.hl) if (v > max_hl) max_hl = v;
-            std::vector<double> probs(eval.hl.size());
-            double sump = 0.0;
-            for (std::size_t i = 0; i < eval.hl.size(); ++i) { probs[i] = std::exp(static_cast<double>(eval.hl[i]) - max_hl); sump += probs[i]; }
-            if (sump <= 0.0) sump = 1.0;
-            for (double &p : probs) p /= sump;
-
-            // bin centers in [0,1]
-            const double N = static_cast<double>(bins);
-            double mean = 0.0, mean_sq = 0.0;
-            for (int i = 0; i < bins; ++i) {
-                double center = (2.0 * static_cast<double>(i) + 1.0) / (2.0 * N);
-                mean += probs[i] * center;
-                mean_sq += probs[i] * center * center;
-            }
-            double variance = std::max(0.0, mean_sq - mean * mean);
-            node_U = static_cast<float>(std::sqrt(variance * 4.0));
-        }
-
-        co_return LKSNode(board, value, std::move(entries), node_U, false);
+        // Build node data from eval and store in cache
+        auto built = build_from_eval_and_cache(board, eval, tokens);
+        co_return LKSNode(board, built.value, std::move(built.entries), built.node_U, false);
     }
 };
 

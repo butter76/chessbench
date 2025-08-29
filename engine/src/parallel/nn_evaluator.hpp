@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 #include <functional>
+#include <algorithm>
+#include <array>
 
 #include <cstdio>
 #include <cuda_runtime_api.h>
@@ -41,7 +43,7 @@ struct EvalResult {
 
 class NNEvaluator {
 public:
-    static constexpr std::size_t kBatchSize = 64;
+    static constexpr std::size_t kBatchSize = 32;
 
     NNEvaluator() = default;
 
@@ -91,6 +93,169 @@ private:
     nvinfer1::IExecutionContext* trt_context{nullptr};
     cudaStream_t trt_stream{};
 
+    // CUDA Graph caching per batch size 1..kBatchSize
+    struct BatchGraph {
+        int batchSize{0};
+        bool valid{false};
+        // Graph handles
+        cudaGraph_t graph{nullptr};
+        cudaGraphExec_t graphExec{nullptr};
+        // Device buffers
+        void* d_tokens{nullptr};
+        void* d_value{nullptr};
+        void* d_hl{nullptr};
+        void* d_hard{nullptr};
+        void* d_U{nullptr};
+        void* d_Q{nullptr};
+        // Pinned host buffers (fixed address for capture)
+        void* h_tokens{nullptr}; // int32_t* or int64_t* depending on tokens_dtype
+        void* h_value{nullptr};  // __half* or float*, matches dt_value
+        void* h_hl{nullptr};     // __half* or float*
+        void* h_hard{nullptr};   // __half* or float*
+        void* h_U{nullptr};      // __half* or float*
+        void* h_Q{nullptr};      // __half* or float*
+        // Sizes and dtypes
+        size_t n_value{0}; nvinfer1::DataType dt_value{nvinfer1::DataType::kFLOAT};
+        size_t n_hl{0};    nvinfer1::DataType dt_hl{nvinfer1::DataType::kFLOAT};
+        size_t n_hard{0};  nvinfer1::DataType dt_hard{nvinfer1::DataType::kFLOAT};
+        size_t n_U{0};     nvinfer1::DataType dt_U{nvinfer1::DataType::kFLOAT};
+        size_t n_Q{0};     nvinfer1::DataType dt_Q{nvinfer1::DataType::kFLOAT};
+        size_t tokensCount{0}; // number of scalar token elements (B*68)
+        size_t tokensBytes{0};
+        size_t bytes_value{0};
+        size_t bytes_hl{0};
+        size_t bytes_hard{0};
+        size_t bytes_U{0};
+        size_t bytes_Q{0};
+    };
+    std::array<BatchGraph, kBatchSize + 1> graphs_{}; // index by batch size
+
+    void release_one_graph(BatchGraph& g) {
+        if (g.graphExec) { cudaGraphExecDestroy(g.graphExec); g.graphExec = nullptr; }
+        if (g.graph) { cudaGraphDestroy(g.graph); g.graph = nullptr; }
+        if (g.d_tokens) { cudaFree(g.d_tokens); g.d_tokens = nullptr; }
+        if (g.d_value) { cudaFree(g.d_value); g.d_value = nullptr; }
+        if (g.d_hl) { cudaFree(g.d_hl); g.d_hl = nullptr; }
+        if (g.d_hard) { cudaFree(g.d_hard); g.d_hard = nullptr; }
+        if (g.d_U) { cudaFree(g.d_U); g.d_U = nullptr; }
+        if (g.d_Q) { cudaFree(g.d_Q); g.d_Q = nullptr; }
+        if (g.h_tokens) { cudaFreeHost(g.h_tokens); g.h_tokens = nullptr; }
+        if (g.h_value) { cudaFreeHost(g.h_value); g.h_value = nullptr; }
+        if (g.h_hl) { cudaFreeHost(g.h_hl); g.h_hl = nullptr; }
+        if (g.h_hard) { cudaFreeHost(g.h_hard); g.h_hard = nullptr; }
+        if (g.h_U) { cudaFreeHost(g.h_U); g.h_U = nullptr; }
+        if (g.h_Q) { cudaFreeHost(g.h_Q); g.h_Q = nullptr; }
+        g.valid = false; g.batchSize = 0;
+        g.n_value = g.n_hl = g.n_hard = g.n_U = g.n_Q = 0;
+        g.tokensBytes = g.tokensCount = 0;
+        g.bytes_value = g.bytes_hl = g.bytes_hard = g.bytes_U = g.bytes_Q = 0;
+    }
+
+    void release_graphs() {
+        for (auto& g : graphs_) release_one_graph(g);
+    }
+
+    bool build_graph_for_batch(int B) {
+        BatchGraph& G = graphs_[static_cast<size_t>(B)];
+        release_one_graph(G);
+        if (!trt_context) return false;
+
+        // Configure input shape for this batch
+        nvinfer1::Dims inputDims; inputDims.nbDims = 2; inputDims.d[0] = B; inputDims.d[1] = 68;
+        if (!trt_context->setInputShape("tokens", inputDims)) {
+            std::cerr << "[NNEvaluator] setInputShape failed for B=" << B << "\n";
+            return false;
+        }
+
+        // Allocate tokens buffers
+        G.batchSize = B;
+        G.tokensCount = static_cast<size_t>(B) * 68;
+        G.tokensBytes = G.tokensCount * (tokens_dtype == nvinfer1::DataType::kINT32 ? sizeof(int32_t) : sizeof(int64_t));
+        if (cudaHostAlloc(&G.h_tokens, G.tokensBytes, cudaHostAllocPortable) != cudaSuccess) {
+            std::cerr << "[NNEvaluator] cudaHostAlloc h_tokens failed\n";
+            return false;
+        }
+        if (cudaMalloc(&G.d_tokens, G.tokensBytes) != cudaSuccess) {
+            std::cerr << "[NNEvaluator] cudaMalloc d_tokens failed\n";
+            return false;
+        }
+        trt_context->setTensorAddress("tokens", G.d_tokens);
+
+        // Helper to prepare an output binding
+        auto prep_out = [&](const char* name, int bindingIndex, void** d_ptr, void** h_ptr, size_t& n_elem, size_t& n_bytes, nvinfer1::DataType& dt) {
+            if (bindingIndex < 0) return;
+            nvinfer1::Dims d = trt_context->getTensorShape(name);
+            n_elem = volume(d);
+            dt = trt_engine->getTensorDataType(name);
+            n_bytes = n_elem * elementSize(dt);
+            if (n_bytes == 0) return;
+            if (cudaMalloc(d_ptr, n_bytes) != cudaSuccess) {
+                std::cerr << "[NNEvaluator] cudaMalloc output failed for " << name << "\n";
+                return;
+            }
+            if (cudaHostAlloc(h_ptr, n_bytes, cudaHostAllocPortable) != cudaSuccess) {
+                std::cerr << "[NNEvaluator] cudaHostAlloc output failed for " << name << "\n";
+                return;
+            }
+            trt_context->setTensorAddress(name, *d_ptr);
+        };
+
+        // Outputs
+        prep_out("value", binding_idx_value, &G.d_value, &G.h_value, G.n_value, G.bytes_value, G.dt_value);
+        if (binding_idx_hl >= 0)    prep_out("hl", binding_idx_hl, &G.d_hl, &G.h_hl, G.n_hl, G.bytes_hl, G.dt_hl);
+        if (binding_idx_hardest >= 0) prep_out("hardest_policy", binding_idx_hardest, &G.d_hard, &G.h_hard, G.n_hard, G.bytes_hard, G.dt_hard);
+        if (binding_idx_U >= 0)     prep_out("U", binding_idx_U, &G.d_U, &G.h_U, G.n_U, G.bytes_U, G.dt_U);
+        if (binding_idx_Q >= 0)     prep_out("Q", binding_idx_Q, &G.d_Q, &G.h_Q, G.n_Q, G.bytes_Q, G.dt_Q);
+
+        // Begin capture
+        if (cudaStreamBeginCapture(trt_stream, cudaStreamCaptureModeGlobal) != cudaSuccess) {
+            std::cerr << "[NNEvaluator] cudaStreamBeginCapture failed\n";
+            return false;
+        }
+        // H2D tokens copy from pinned host
+        cudaMemcpyAsync(G.d_tokens, G.h_tokens, G.tokensBytes, cudaMemcpyHostToDevice, trt_stream);
+        // Enqueue inference
+        trt_context->setTensorAddress("tokens", G.d_tokens);
+        if (G.d_value) trt_context->setTensorAddress("value", G.d_value);
+        if (G.d_hl) trt_context->setTensorAddress("hl", G.d_hl);
+        if (G.d_hard) trt_context->setTensorAddress("hardest_policy", G.d_hard);
+        if (G.d_U) trt_context->setTensorAddress("U", G.d_U);
+        if (G.d_Q) trt_context->setTensorAddress("Q", G.d_Q);
+        trt_context->enqueueV3(trt_stream);
+        // D2H copies into pinned host buffers
+        if (G.d_value && G.h_value && G.bytes_value) cudaMemcpyAsync(G.h_value, G.d_value, G.bytes_value, cudaMemcpyDeviceToHost, trt_stream);
+        if (G.d_hl && G.h_hl && G.bytes_hl) cudaMemcpyAsync(G.h_hl, G.d_hl, G.bytes_hl, cudaMemcpyDeviceToHost, trt_stream);
+        if (G.d_hard && G.h_hard && G.bytes_hard) cudaMemcpyAsync(G.h_hard, G.d_hard, G.bytes_hard, cudaMemcpyDeviceToHost, trt_stream);
+        if (G.d_U && G.h_U && G.bytes_U) cudaMemcpyAsync(G.h_U, G.d_U, G.bytes_U, cudaMemcpyDeviceToHost, trt_stream);
+        if (G.d_Q && G.h_Q && G.bytes_Q) cudaMemcpyAsync(G.h_Q, G.d_Q, G.bytes_Q, cudaMemcpyDeviceToHost, trt_stream);
+
+        if (cudaStreamEndCapture(trt_stream, &G.graph) != cudaSuccess || !G.graph) {
+            std::cerr << "[NNEvaluator] cudaStreamEndCapture failed\n";
+            release_one_graph(G);
+            return false;
+        }
+        if (cudaGraphInstantiate(&G.graphExec, G.graph, 0) != cudaSuccess || !G.graphExec) {
+            std::cerr << "[NNEvaluator] cudaGraphInstantiate failed\n";
+            release_one_graph(G);
+            return false;
+        }
+
+        G.valid = true;
+        return true;
+    }
+
+    void initialize_graphs() {
+        // Ensure stream and context available
+        if (!trt_context || !trt_stream) return;
+        for (int B = 1; B <= static_cast<int>(kBatchSize); ++B) {
+            bool ok = build_graph_for_batch(B);
+            if (!ok) {
+                // Keep going; some batch sizes may be unsupported if outputs depend on B
+                graphs_[static_cast<size_t>(B)].valid = false;
+            }
+        }
+    }
+
     // Simple TensorRT logger
     class TrtLogger : public nvinfer1::ILogger {
     public:
@@ -130,6 +295,7 @@ private:
     }
 
     void release_trt() {
+        release_graphs();
         if (trt_context) { delete trt_context; trt_context = nullptr; }
         if (trt_engine) { delete trt_engine; trt_engine = nullptr; }
         if (trt_runtime) { delete trt_runtime; trt_runtime = nullptr; }
@@ -203,6 +369,9 @@ private:
             return;
         }
         std::cout << "[NNEvaluator] TensorRT engine loaded from " << plan_path << "\n";
+
+        // Initialize CUDA Graphs for batch sizes 1..kBatchSize
+        initialize_graphs();
     }
 
     static inline char tokenIndexToChar(std::uint8_t idx) {
@@ -254,135 +423,204 @@ private:
             // If TensorRT is initialized, run inference; otherwise fallback
             if (trt_context && binding_idx_tokens >= 0 && binding_idx_value >= 0) {
                 const int B = static_cast<int>(batch.size());
-                // Set input shape [B, 68]
-                nvinfer1::Dims inputDims; inputDims.nbDims = 2; inputDims.d[0] = B; inputDims.d[1] = 68;
-                if (!trt_context->setInputShape("tokens", inputDims)) {
-                    std::cerr << "[NNEvaluator] Failed to set input shape" << std::endl;
-                }
-
-                // Host staging for tokens cast
-                size_t tokensCount = static_cast<size_t>(B) * 68;
-                std::vector<int32_t> tokens_i32;
-                std::vector<int64_t> tokens_i64;
-                void* d_tokens = nullptr;
-                size_t tokensBytes = 0;
-                if (tokens_dtype == nvinfer1::DataType::kINT32) {
-                    tokens_i32.resize(tokensCount);
-                    for (size_t i = 0; i < batch.size(); ++i) {
-                        const auto& arr = batch[i].tokens;
-                        for (int j = 0; j < 68; ++j) tokens_i32[i * 68 + j] = static_cast<int32_t>(arr[j]);
-                    }
-                    tokensBytes = tokens_i32.size() * sizeof(int32_t);
-                    cudaMalloc(&d_tokens, tokensBytes);
-                    cudaMemcpyAsync(d_tokens, tokens_i32.data(), tokensBytes, cudaMemcpyHostToDevice, trt_stream);
-                } else {
-                    tokens_i64.resize(tokensCount);
-                    for (size_t i = 0; i < batch.size(); ++i) {
-                        const auto& arr = batch[i].tokens;
-                        for (int j = 0; j < 68; ++j) tokens_i64[i * 68 + j] = static_cast<int64_t>(arr[j]);
-                    }
-                    tokensBytes = tokens_i64.size() * sizeof(int64_t);
-                    cudaMalloc(&d_tokens, tokensBytes);
-                    cudaMemcpyAsync(d_tokens, tokens_i64.data(), tokensBytes, cudaMemcpyHostToDevice, trt_stream);
-                }
-                trt_context->setTensorAddress("tokens", d_tokens);
-
-                // Prepare outputs; we need at least 'value', but provide all if present
-                auto prepare_output = [&](const char* name, int bindingIndex, void** d_ptr, nvinfer1::DataType& dtype_out, size_t& elems) {
-                    if (bindingIndex < 0) return;
-                    nvinfer1::Dims d = trt_context->getTensorShape(name);
-                    elems = volume(d);
-                    dtype_out = trt_engine->getTensorDataType(name);
-                    size_t bytes = elems * elementSize(dtype_out);
-                    cudaMalloc(d_ptr, bytes);
-                    trt_context->setTensorAddress(name, *d_ptr);
-                };
-
-                void* d_value = nullptr; size_t n_value = 0; nvinfer1::DataType dt_value = nvinfer1::DataType::kFLOAT;
-                void* d_hl = nullptr; size_t n_hl = 0; nvinfer1::DataType dt_hl = nvinfer1::DataType::kFLOAT;
-                void* d_hard = nullptr; size_t n_hard = 0; nvinfer1::DataType dt_hard = nvinfer1::DataType::kFLOAT;
-                void* d_U = nullptr; size_t n_U = 0; nvinfer1::DataType dt_U = nvinfer1::DataType::kFLOAT;
-                void* d_Q = nullptr; size_t n_Q = 0; nvinfer1::DataType dt_Q = nvinfer1::DataType::kFLOAT;
-
-                prepare_output("value", binding_idx_value, &d_value, dt_value, n_value);
-                if (binding_idx_hl >= 0) prepare_output("hl", binding_idx_hl, &d_hl, dt_hl, n_hl);
-                if (binding_idx_hardest >= 0) prepare_output("hardest_policy", binding_idx_hardest, &d_hard, dt_hard, n_hard);
-                if (binding_idx_U >= 0) prepare_output("U", binding_idx_U, &d_U, dt_U, n_U);
-                if (binding_idx_Q >= 0) prepare_output("Q", binding_idx_Q, &d_Q, dt_Q, n_Q);
-
-                // Execute
-                if (!trt_context->enqueueV3(trt_stream)) {
-                    std::cerr << "[NNEvaluator] enqueueV3 failed" << std::endl;
-                    // Fail the batch safely
-                    for (auto& r : batch) {
-                        EvalResult er; er.value = 0.0f; er.canceled = true; r.on_ready(std::move(er));
-                    }
-                    // Skip device copies and continue loop
-                    continue;
-                }
-
-                // Copy back outputs and distribute results
-                std::vector<float> host_values(n_value);
-                if (dt_value == nvinfer1::DataType::kHALF) {
-                    std::vector<__half> tmp(n_value);
-                    cudaMemcpyAsync(tmp.data(), d_value, n_value * sizeof(__half), cudaMemcpyDeviceToHost, trt_stream);
-                    cudaStreamSynchronize(trt_stream);
-                    for (size_t i = 0; i < n_value; ++i) host_values[i] = __half2float(tmp[i]);
-                } else {
-                    cudaMemcpyAsync(host_values.data(), d_value, n_value * sizeof(float), cudaMemcpyDeviceToHost, trt_stream);
-                }
-                cudaStreamSynchronize(trt_stream);
-
-                auto copy_out_float = [&](void* d_ptr, size_t n_elem, nvinfer1::DataType dt) -> std::vector<float> {
-                    std::vector<float> host;
-                    if (!d_ptr || n_elem == 0) return host;
-                    host.resize(n_elem);
-                    if (dt == nvinfer1::DataType::kHALF) {
-                        std::vector<__half> tmp(n_elem);
-                        cudaMemcpyAsync(tmp.data(), d_ptr, n_elem * sizeof(__half), cudaMemcpyDeviceToHost, trt_stream);
-                        cudaStreamSynchronize(trt_stream);
-                        for (size_t i = 0; i < n_elem; ++i) host[i] = __half2float(tmp[i]);
+                // Use CUDA Graph if available for this batch size
+                if (B > 0 && B <= static_cast<int>(kBatchSize) && graphs_[static_cast<size_t>(B)].valid) {
+                    BatchGraph& G = graphs_[static_cast<size_t>(B)];
+                    // Pack tokens into pinned host input buffer
+                    if (tokens_dtype == nvinfer1::DataType::kINT32) {
+                        int32_t* ht = reinterpret_cast<int32_t*>(G.h_tokens);
+                        for (int i = 0; i < B; ++i) {
+                            const auto& arr = batch[static_cast<size_t>(i)].tokens;
+                            for (int j = 0; j < 68; ++j) ht[i * 68 + j] = static_cast<int32_t>(arr[j]);
+                        }
                     } else {
-                        cudaMemcpyAsync(host.data(), d_ptr, n_elem * sizeof(float), cudaMemcpyDeviceToHost, trt_stream);
+                        int64_t* ht = reinterpret_cast<int64_t*>(G.h_tokens);
+                        for (int i = 0; i < B; ++i) {
+                            const auto& arr = batch[static_cast<size_t>(i)].tokens;
+                            for (int j = 0; j < 68; ++j) ht[i * 68 + j] = static_cast<int64_t>(arr[j]);
+                        }
+                    }
+
+                    // Launch captured graph
+                    cudaGraphLaunch(G.graphExec, trt_stream);
+                    cudaStreamSynchronize(trt_stream);
+
+                    // Read outputs from pinned host buffers and dispatch
+                    auto pinned_to_float = [&](void* h_ptr, size_t n_elem, nvinfer1::DataType dt) -> std::vector<float> {
+                        std::vector<float> out;
+                        if (!h_ptr || n_elem == 0) return out;
+                        out.resize(n_elem);
+                        if (dt == nvinfer1::DataType::kHALF) {
+                            const __half* p = reinterpret_cast<const __half*>(h_ptr);
+                            for (size_t i = 0; i < n_elem; ++i) out[i] = __half2float(p[i]);
+                        } else if (dt == nvinfer1::DataType::kFLOAT) {
+                            const float* p = reinterpret_cast<const float*>(h_ptr);
+                            std::copy(p, p + n_elem, out.begin());
+                        } else {
+                            // Unsupported dtype for outputs
+                            out.assign(n_elem, 0.0f);
+                        }
+                        return out;
+                    };
+
+                    std::vector<float> host_values = pinned_to_float(G.h_value, G.n_value, G.dt_value);
+                    std::vector<float> host_hl    = pinned_to_float(G.h_hl,    G.n_hl,    G.dt_hl);
+                    std::vector<float> host_hard  = pinned_to_float(G.h_hard,  G.n_hard,  G.dt_hard);
+                    std::vector<float> host_U     = pinned_to_float(G.h_U,     G.n_U,     G.dt_U);
+                    std::vector<float> host_Q     = pinned_to_float(G.h_Q,     G.n_Q,     G.dt_Q);
+
+                    auto per_or_zero = [&](size_t total) -> size_t { return (B > 0 && total % static_cast<size_t>(B) == 0) ? (total / static_cast<size_t>(B)) : 0; };
+                    const size_t per_hl = per_or_zero(G.n_hl);
+                    const size_t per_hard = per_or_zero(G.n_hard);
+                    const size_t per_U = per_or_zero(G.n_U);
+                    const size_t per_Q = per_or_zero(G.n_Q);
+
+                    for (int i = 0; i < B; ++i) {
+                        float score = (G.n_value >= static_cast<size_t>((i + 1))) ? host_values[static_cast<size_t>(i)] : 0.0f;
+                        if (is_batch_verbose()) {
+                            std::cout << tokensToString(batch[static_cast<size_t>(i)].tokens) << " => " << score << std::endl;
+                        }
+                        EvalResult er;
+                        er.value = score;
+                        er.canceled = false;
+                        if (per_hl > 0) er.hl = std::vector<float>(host_hl.begin() + static_cast<std::ptrdiff_t>(i * per_hl), host_hl.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hl));
+                        if (per_hard > 0) er.policy = std::vector<float>(host_hard.begin() + static_cast<std::ptrdiff_t>(i * per_hard), host_hard.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hard));
+                        if (per_U > 0) er.U = std::vector<float>(host_U.begin() + static_cast<std::ptrdiff_t>(i * per_U), host_U.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_U));
+                        if (per_Q > 0) er.Q = std::vector<float>(host_Q.begin() + static_cast<std::ptrdiff_t>(i * per_Q), host_Q.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_Q));
+                        batch[static_cast<size_t>(i)].on_ready(std::move(er));
+                    }
+                } else {
+                    // Fallback: dynamic path as before
+                    // Set input shape [B, 68]
+                    nvinfer1::Dims inputDims; inputDims.nbDims = 2; inputDims.d[0] = B; inputDims.d[1] = 68;
+                    if (!trt_context->setInputShape("tokens", inputDims)) {
+                        std::cerr << "[NNEvaluator] Failed to set input shape" << std::endl;
+                    }
+
+                    // Host staging for tokens cast
+                    size_t tokensCount = static_cast<size_t>(B) * 68;
+                    std::vector<int32_t> tokens_i32;
+                    std::vector<int64_t> tokens_i64;
+                    void* d_tokens = nullptr;
+                    size_t tokensBytes = 0;
+                    if (tokens_dtype == nvinfer1::DataType::kINT32) {
+                        tokens_i32.resize(tokensCount);
+                        for (size_t i = 0; i < batch.size(); ++i) {
+                            const auto& arr = batch[i].tokens;
+                            for (int j = 0; j < 68; ++j) tokens_i32[i * 68 + j] = static_cast<int32_t>(arr[j]);
+                        }
+                        tokensBytes = tokens_i32.size() * sizeof(int32_t);
+                        cudaMalloc(&d_tokens, tokensBytes);
+                        cudaMemcpyAsync(d_tokens, tokens_i32.data(), tokensBytes, cudaMemcpyHostToDevice, trt_stream);
+                    } else {
+                        tokens_i64.resize(tokensCount);
+                        for (size_t i = 0; i < batch.size(); ++i) {
+                            const auto& arr = batch[i].tokens;
+                            for (int j = 0; j < 68; ++j) tokens_i64[i * 68 + j] = static_cast<int64_t>(arr[j]);
+                        }
+                        tokensBytes = tokens_i64.size() * sizeof(int64_t);
+                        cudaMalloc(&d_tokens, tokensBytes);
+                        cudaMemcpyAsync(d_tokens, tokens_i64.data(), tokensBytes, cudaMemcpyHostToDevice, trt_stream);
+                    }
+                    trt_context->setTensorAddress("tokens", d_tokens);
+
+                    // Prepare outputs; we need at least 'value', but provide all if present
+                    auto prepare_output = [&](const char* name, int bindingIndex, void** d_ptr, nvinfer1::DataType& dtype_out, size_t& elems) {
+                        if (bindingIndex < 0) return;
+                        nvinfer1::Dims d = trt_context->getTensorShape(name);
+                        elems = volume(d);
+                        dtype_out = trt_engine->getTensorDataType(name);
+                        size_t bytes = elems * elementSize(dtype_out);
+                        cudaMalloc(d_ptr, bytes);
+                        trt_context->setTensorAddress(name, *d_ptr);
+                    };
+
+                    void* d_value = nullptr; size_t n_value = 0; nvinfer1::DataType dt_value = nvinfer1::DataType::kFLOAT;
+                    void* d_hl = nullptr; size_t n_hl = 0; nvinfer1::DataType dt_hl = nvinfer1::DataType::kFLOAT;
+                    void* d_hard = nullptr; size_t n_hard = 0; nvinfer1::DataType dt_hard = nvinfer1::DataType::kFLOAT;
+                    void* d_U = nullptr; size_t n_U = 0; nvinfer1::DataType dt_U = nvinfer1::DataType::kFLOAT;
+                    void* d_Q = nullptr; size_t n_Q = 0; nvinfer1::DataType dt_Q = nvinfer1::DataType::kFLOAT;
+
+                    prepare_output("value", binding_idx_value, &d_value, dt_value, n_value);
+                    if (binding_idx_hl >= 0) prepare_output("hl", binding_idx_hl, &d_hl, dt_hl, n_hl);
+                    if (binding_idx_hardest >= 0) prepare_output("hardest_policy", binding_idx_hardest, &d_hard, dt_hard, n_hard);
+                    if (binding_idx_U >= 0) prepare_output("U", binding_idx_U, &d_U, dt_U, n_U);
+                    if (binding_idx_Q >= 0) prepare_output("Q", binding_idx_Q, &d_Q, dt_Q, n_Q);
+
+                    // Execute
+                    if (!trt_context->enqueueV3(trt_stream)) {
+                        std::cerr << "[NNEvaluator] enqueueV3 failed" << std::endl;
+                        // Fail the batch safely
+                        for (auto& r : batch) {
+                            EvalResult er; er.value = 0.0f; er.canceled = true; r.on_ready(std::move(er));
+                        }
+                        // Skip device copies and continue loop
+                        continue;
+                    }
+
+                    // Copy back outputs and distribute results
+                    std::vector<float> host_values(n_value);
+                    if (dt_value == nvinfer1::DataType::kHALF) {
+                        std::vector<__half> tmp(n_value);
+                        cudaMemcpyAsync(tmp.data(), d_value, n_value * sizeof(__half), cudaMemcpyDeviceToHost, trt_stream);
                         cudaStreamSynchronize(trt_stream);
+                        for (size_t i = 0; i < n_value; ++i) host_values[i] = __half2float(tmp[i]);
+                    } else {
+                        cudaMemcpyAsync(host_values.data(), d_value, n_value * sizeof(float), cudaMemcpyDeviceToHost, trt_stream);
                     }
-                    return host;
-                };
+                    cudaStreamSynchronize(trt_stream);
 
-                std::vector<float> host_hl = copy_out_float(d_hl, n_hl, dt_hl);
-                std::vector<float> host_hard = copy_out_float(d_hard, n_hard, dt_hard);
-                std::vector<float> host_U = copy_out_float(d_U, n_U, dt_U);
-                std::vector<float> host_Q = copy_out_float(d_Q, n_Q, dt_Q);
+                    auto copy_out_float = [&](void* d_ptr, size_t n_elem, nvinfer1::DataType dt) -> std::vector<float> {
+                        std::vector<float> host;
+                        if (!d_ptr || n_elem == 0) return host;
+                        host.resize(n_elem);
+                        if (dt == nvinfer1::DataType::kHALF) {
+                            std::vector<__half> tmp(n_elem);
+                            cudaMemcpyAsync(tmp.data(), d_ptr, n_elem * sizeof(__half), cudaMemcpyDeviceToHost, trt_stream);
+                            cudaStreamSynchronize(trt_stream);
+                            for (size_t i = 0; i < n_elem; ++i) host[i] = __half2float(tmp[i]);
+                        } else {
+                            cudaMemcpyAsync(host.data(), d_ptr, n_elem * sizeof(float), cudaMemcpyDeviceToHost, trt_stream);
+                            cudaStreamSynchronize(trt_stream);
+                        }
+                        return host;
+                    };
 
-                // Determine per-sample sizes (assume leading batch dim)
-                auto per_or_zero = [&](size_t total) -> size_t { return (B > 0 && total % static_cast<size_t>(B) == 0) ? (total / static_cast<size_t>(B)) : 0; };
-                const size_t per_hl = per_or_zero(n_hl);
-                const size_t per_hard = per_or_zero(n_hard);
-                const size_t per_U = per_or_zero(n_U);
-                const size_t per_Q = per_or_zero(n_Q);
+                    std::vector<float> host_hl = copy_out_float(d_hl, n_hl, dt_hl);
+                    std::vector<float> host_hard = copy_out_float(d_hard, n_hard, dt_hard);
+                    std::vector<float> host_U = copy_out_float(d_U, n_U, dt_U);
+                    std::vector<float> host_Q = copy_out_float(d_Q, n_Q, dt_Q);
 
-                for (int i = 0; i < B; ++i) {
-                    float score = (n_value >= static_cast<size_t>((i + 1))) ? host_values[i] : 0.0f;
-                    if (is_batch_verbose()) {
-                        std::cout << tokensToString(batch[i].tokens) << " => " << score << std::endl;
+                    // Determine per-sample sizes (assume leading batch dim)
+                    auto per_or_zero2 = [&](size_t total) -> size_t { return (B > 0 && total % static_cast<size_t>(B) == 0) ? (total / static_cast<size_t>(B)) : 0; };
+                    const size_t per_hl = per_or_zero2(n_hl);
+                    const size_t per_hard = per_or_zero2(n_hard);
+                    const size_t per_U = per_or_zero2(n_U);
+                    const size_t per_Q = per_or_zero2(n_Q);
+
+                    for (int i = 0; i < B; ++i) {
+                        float score = (n_value >= static_cast<size_t>((i + 1))) ? host_values[static_cast<size_t>(i)] : 0.0f;
+                        if (is_batch_verbose()) {
+                            std::cout << tokensToString(batch[static_cast<size_t>(i)].tokens) << " => " << score << std::endl;
+                        }
+                        EvalResult er;
+                        er.value = score;
+                        er.canceled = false;
+                        if (per_hl > 0) er.hl = std::vector<float>(host_hl.begin() + static_cast<std::ptrdiff_t>(i * per_hl), host_hl.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hl));
+                        if (per_hard > 0) er.policy = std::vector<float>(host_hard.begin() + static_cast<std::ptrdiff_t>(i * per_hard), host_hard.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hard));
+                        if (per_U > 0) er.U = std::vector<float>(host_U.begin() + static_cast<std::ptrdiff_t>(i * per_U), host_U.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_U));
+                        if (per_Q > 0) er.Q = std::vector<float>(host_Q.begin() + static_cast<std::ptrdiff_t>(i * per_Q), host_Q.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_Q));
+                        batch[static_cast<size_t>(i)].on_ready(std::move(er));
                     }
-                    EvalResult er;
-                    er.value = score;
-                    er.canceled = false;
-                    if (per_hl > 0) er.hl = std::vector<float>(host_hl.begin() + static_cast<std::ptrdiff_t>(i * per_hl), host_hl.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hl));
-                    if (per_hard > 0) er.policy = std::vector<float>(host_hard.begin() + static_cast<std::ptrdiff_t>(i * per_hard), host_hard.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hard));
-                    if (per_U > 0) er.U = std::vector<float>(host_U.begin() + static_cast<std::ptrdiff_t>(i * per_U), host_U.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_U));
-                    if (per_Q > 0) er.Q = std::vector<float>(host_Q.begin() + static_cast<std::ptrdiff_t>(i * per_Q), host_Q.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_Q));
-                    batch[i].on_ready(std::move(er));
+
+                    // Cleanup device buffers
+                    if (d_tokens) cudaFree(d_tokens);
+                    if (d_value) cudaFree(d_value);
+                    if (d_hl) cudaFree(d_hl);
+                    if (d_hard) cudaFree(d_hard);
+                    if (d_U) cudaFree(d_U);
+                    if (d_Q) cudaFree(d_Q);
                 }
-
-                // Cleanup device buffers
-                if (d_tokens) cudaFree(d_tokens);
-                if (d_value) cudaFree(d_value);
-                if (d_hl) cudaFree(d_hl);
-                if (d_hard) cudaFree(d_hard);
-                if (d_U) cudaFree(d_U);
-                if (d_Q) cudaFree(d_Q);
             } else {
                 // No TensorRT available: cancel all requests and continue without throwing
                 for (auto& r : batch) {

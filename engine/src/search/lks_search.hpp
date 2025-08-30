@@ -92,7 +92,7 @@ public:
             const std::int64_t now_ns = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
             stat_search_start_ns_.store(now_ns, std::memory_order_relaxed);
         }
-        float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 30.0f;
+        float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 20.0f;
         float currentDepth = std::min(2.0f, maxDepth);
 
         chess::Movelist rootMoves;
@@ -395,27 +395,21 @@ private:
     struct CachedNodeData { float value; std::vector<CachedPolicyEntry> entries; float node_U; };
     struct NodeBuildResult { float value; std::vector<LKSPolicyEntry> entries; float node_U; };
 
-    struct TokenArrayHashCompare {
-        std::size_t hash(const std::array<std::uint8_t, 68> &a) const noexcept {
-            // FNV-1a 64-bit
-            const std::size_t fnv_offset = 1469598103934665603ull;
-            const std::size_t fnv_prime  = 1099511628211ull;
-            std::size_t h = fnv_offset;
-            for (std::uint8_t b : a) { h ^= static_cast<std::size_t>(b); h *= fnv_prime; }
-            return h;
+    struct StringHashCompare {
+        std::size_t hash(const std::string &s) const noexcept {
+            return std::hash<std::string>{}(s);
         }
-        bool equal(const std::array<std::uint8_t, 68> &lhs, const std::array<std::uint8_t, 68> &rhs) const noexcept {
-            for (std::size_t i = 0; i < lhs.size(); ++i) if (lhs[i] != rhs[i]) return false;
-            return true;
+        bool equal(const std::string &lhs, const std::string &rhs) const noexcept {
+            return lhs == rhs;
         }
     };
 
-    using EvalCacheMap = tbb::concurrent_hash_map<std::array<std::uint8_t, 68>, CachedNodeData, TokenArrayHashCompare>;
+    using EvalCacheMap = tbb::concurrent_hash_map<std::string, CachedNodeData, StringHashCompare>;
     EvalCacheMap eval_cache_;
 
-    std::optional<NodeBuildResult> try_load_from_cache(const std::array<std::uint8_t, 68> &tokens) {
+    std::optional<NodeBuildResult> try_load_from_cache(const std::string &fen) {
         EvalCacheMap::const_accessor acc;
-        if (!eval_cache_.find(acc, tokens)) return std::nullopt;
+        if (!eval_cache_.find(acc, fen)) return std::nullopt;
         const CachedNodeData &c = acc->second;
         std::vector<LKSPolicyEntry> entries;
         entries.reserve(c.entries.size());
@@ -432,8 +426,7 @@ private:
     }
 
     NodeBuildResult build_from_eval_and_cache(const chess::Board &board,
-                                              const engine_parallel::EvalResult &eval,
-                                              const std::array<std::uint8_t, 68> &tokens) {
+                                              const engine_parallel::EvalResult &eval) {
         // Convert scalar value to [-1, 1]
         float value = 2.0f * eval.value - 1.0f;
 
@@ -520,7 +513,8 @@ private:
                 cached_entries.push_back(CachedPolicyEntry{e.move, e.policy, e.U, e.Q});
             }
             EvalCacheMap::accessor acc;
-            eval_cache_.insert(acc, tokens);
+            const std::string fen = board.getFen(false);
+            eval_cache_.insert(acc, fen);
             acc->second = CachedNodeData{value, std::move(cached_entries), node_U};
         }
 
@@ -817,9 +811,9 @@ public:
             }
             co_return LKSNode(board, terminal_value, {}, 0.0f, true);
         }
-        // Cache lookup by tokenized board
-        auto tokens = engine_tokenizer::tokenizeBoard(board);
-        if (auto cached = try_load_from_cache(tokens)) {
+        // Cache lookup by FEN board key
+        const std::string fen = board.getFen(false);
+        if (auto cached = try_load_from_cache(fen)) {
             co_return LKSNode(board, cached->value, std::move(cached->entries), cached->node_U, false);
         }
 
@@ -830,7 +824,7 @@ public:
         }
 
         // Build node data from eval and store in cache
-        auto built = build_from_eval_and_cache(board, eval, tokens);
+        auto built = build_from_eval_and_cache(board, eval);
         co_return LKSNode(board, built.value, std::move(built.entries), built.node_U, false);
     }
 };

@@ -43,7 +43,7 @@ struct EvalResult {
 
 class NNEvaluator {
 public:
-    static constexpr std::size_t kBatchSize = 32;
+    static constexpr std::size_t kBatchSize = 25;
 
     NNEvaluator() = default;
 
@@ -401,7 +401,13 @@ private:
                 std::unique_lock<std::mutex> lock(mutex);
                 cv.wait(lock, [&]{ return stop.load() || !queue.empty(); });
                 if (stop.load() && queue.empty()) break;
-                while (!queue.empty() && batch.size() < kBatchSize) {
+                // Prefer odd batch sizes when N>=10 by keeping one item in the queue if N is even
+                std::size_t available = queue.size();
+                std::size_t to_take = std::min<std::size_t>(available, kBatchSize);
+                if (to_take >= 10 && (to_take % 2 == 0)) {
+                    to_take -= 1;
+                }
+                while (!queue.empty() && batch.size() < to_take) {
                     batch.push_back(std::move(queue.front()));
                     queue.pop();
                 }

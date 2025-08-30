@@ -5,12 +5,12 @@ if(NOT CMAKE_CXX_COMPILER AND EXISTS "/usr/bin/clang++-18")
     set(CMAKE_CXX_COMPILER "/usr/bin/clang++-18" CACHE FILEPATH "" FORCE)
 endif()
 
-# Ensure CMake's compiler check uses libc++ with Clang to avoid -lstdc++
-set(CMAKE_CXX_FLAGS_INIT "-stdlib=libc++")
-set(CMAKE_EXE_LINKER_FLAGS_INIT "-stdlib=libc++ -lc++abi")
-set(CMAKE_SHARED_LINKER_FLAGS_INIT "-stdlib=libc++ -lc++abi")
+## Configure C++ to use libc++ for compiler checks and default builds
+set(CMAKE_CXX_FLAGS "-stdlib=libc++ ${CMAKE_CXX_FLAGS}" CACHE STRING "" FORCE)
+set(CMAKE_CXX_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES} -lc++ -lc++abi" CACHE STRING "" FORCE)
+## Note: Avoid setting global non-language-specific linker flags; keep C++-only above
 
-project(chess_sample LANGUAGES CXX)
+project(chess_sample LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -53,16 +53,26 @@ if(NOT EXISTS "${CHESS_HEADER}")
     file(DOWNLOAD "${CHESS_URL}" "${CHESS_HEADER}" SHOW_PROGRESS TLS_VERIFY ON)
 endif()
 
+# Fathom Syzygy tablebases (third_party/fathom)
+# Build only tbprobe.c which includes tbchess.c internally
+add_library(fathom STATIC
+    third_party/fathom/src/tbprobe.c
+)
+set_target_properties(fathom PROPERTIES C_STANDARD 99)
+target_include_directories(fathom PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fathom/src")
+set_property(TARGET fathom PROPERTY POSITION_INDEPENDENT_CODE ON)
+
 add_executable(chess_sample src/main.cpp)
 target_include_directories(chess_sample PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(chess_sample PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
 target_include_directories(chess_sample PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include")
 target_include_directories(chess_sample PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat")
+target_include_directories(chess_sample PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fathom/src")
 
 # Link pthreads for threading support (required for std::jthread and friends)
 find_package(Threads REQUIRED)
 find_package(TBB REQUIRED)
-target_link_libraries(chess_sample PRIVATE Threads::Threads cppcoro cppcoro_objects)
+target_link_libraries(chess_sample PRIVATE Threads::Threads cppcoro cppcoro_objects fathom)
 target_link_libraries(chess_sample PRIVATE TBB::tbb)
 
 # Build and link against libc++ when using Clang
@@ -144,7 +154,9 @@ if (CUDAToolkit_FOUND AND TENSORRT_NVINFER AND TENSORRT_INCLUDE)
     target_compile_definitions(print_lks_node PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL USE_TENSORRT)
     target_include_directories(print_lks_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include")
     target_include_directories(print_lks_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat")
+    target_include_directories(print_lks_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fathom/src")
     target_link_libraries(print_lks_node PRIVATE Threads::Threads cppcoro cppcoro_objects ${TENSORRT_NVINFER})
+    target_link_libraries(print_lks_node PRIVATE fathom)
     target_link_libraries(print_lks_node PRIVATE TBB::tbb)
     if (CUDAToolkit_FOUND)
         target_link_libraries(print_lks_node PRIVATE CUDA::cudart)

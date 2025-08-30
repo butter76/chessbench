@@ -1,3 +1,6 @@
 [submodule "engine/third_party/cppcoro"]
 	path = engine/third_party/cppcoro
 	url = https://github.com/lewissbaker/cppcoro
+[submodule "engine/third_party/fathom"]
+	path = engine/third_party/fathom
+	url = https://github.com/jdart1/Fathom.git

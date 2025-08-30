@@ -25,8 +25,8 @@
 #include <string>
 #include <tbb/concurrent_hash_map.h>
 
-// Syzygy Fathom API
-#include <tbprobe.h>
+// Syzygy helpers
+#include "../syzygy_helpers.hpp"
 
 #include <cppcoro/task.hpp>
 #include <cppcoro/sync_wait.hpp>
@@ -97,63 +97,9 @@ public:
         }
 
         // Syzygy TB early exit for 3-5 men
-        {
-            const int piece_count = static_cast<int>(board_.occ().count());
-            if (piece_count >= 3 && piece_count <= 5) {
-                static bool tb_inited = false;
-                if (!tb_inited) {
-                    // Multiple paths can be separated by ':'; we stick to the requested directory
-                    const char *TB_PATH = "../syzygy_tables/3-4-5/";
-                    (void)tb_init(TB_PATH);
-                    tb_inited = true; // Even if no files found, avoid reinitializing each call
-                }
-
-                // Build bitboards for Fathom
-                const uint64_t bb_white   = board_.us(chess::Color::WHITE).getBits();
-                const uint64_t bb_black   = board_.us(chess::Color::BLACK).getBits();
-                const uint64_t bb_kings   = board_.pieces(chess::PieceType::KING).getBits();
-                const uint64_t bb_queens  = board_.pieces(chess::PieceType::QUEEN).getBits();
-                const uint64_t bb_rooks   = board_.pieces(chess::PieceType::ROOK).getBits();
-                const uint64_t bb_bishops = board_.pieces(chess::PieceType::BISHOP).getBits();
-                const uint64_t bb_knights = board_.pieces(chess::PieceType::KNIGHT).getBits();
-                const uint64_t bb_pawns   = board_.pieces(chess::PieceType::PAWN).getBits();
-
-                const unsigned rule50 = static_cast<unsigned>(board_.halfMoveClock());
-                const unsigned castling = 0; // Required by Fathom root probes
-                const unsigned ep = (board_.enpassantSq() == chess::Square::NO_SQ)
-                    ? 0u
-                    : static_cast<unsigned>(board_.enpassantSq().index());
-                const bool turn_is_white = (board_.sideToMove() == chess::Color::WHITE);
-
-                unsigned tb_res = tb_probe_root(bb_white, bb_black, bb_kings, bb_queens, bb_rooks,
-                                                bb_bishops, bb_knights, bb_pawns,
-                                                rule50, castling, ep, turn_is_white, (unsigned*)nullptr);
-
-                if (tb_res != TB_RESULT_FAILED) {
-                    // Decode move from TB result
-                    const int from = static_cast<int>(TB_GET_FROM(tb_res));
-                    const int to   = static_cast<int>(TB_GET_TO(tb_res));
-                    const int prm  = static_cast<int>(TB_GET_PROMOTES(tb_res));
-                    const bool is_ep = TB_GET_EP(tb_res) != 0;
-
-                    chess::Move best;
-                    if (is_ep) {
-                        best = chess::Move::make<chess::Move::ENPASSANT>(static_cast<chess::Square>(from), static_cast<chess::Square>(to));
-                    } else if (prm != TB_PROMOTES_NONE) {
-                        chess::PieceType::underlying promo_pt = chess::PieceType::QUEEN;
-                        if (prm == TB_PROMOTES_QUEEN) promo_pt = chess::PieceType::QUEEN;
-                        else if (prm == TB_PROMOTES_ROOK) promo_pt = chess::PieceType::ROOK;
-                        else if (prm == TB_PROMOTES_BISHOP) promo_pt = chess::PieceType::BISHOP;
-                        else if (prm == TB_PROMOTES_KNIGHT) promo_pt = chess::PieceType::KNIGHT;
-                        best = chess::Move::make<chess::Move::PROMOTION>(static_cast<chess::Square>(from), static_cast<chess::Square>(to), promo_pt);
-                    } else {
-                        best = chess::Move::make<chess::Move::NORMAL>(static_cast<chess::Square>(from), static_cast<chess::Square>(to));
-                    }
-
-                    stat_tbhits_.fetch_add(1, std::memory_order_relaxed);
-                    return chess::uci::moveToUci(best);
-                }
-            }
+        if (auto tb_move = engine::syzygy::probe_best_move_3to5(board_)) {
+            stat_tbhits_.fetch_add(1, std::memory_order_relaxed);
+            return chess::uci::moveToUci(*tb_move);
         }
         float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 20.0f;
         float currentDepth = std::min(2.0f, maxDepth);
@@ -878,6 +824,16 @@ public:
         const std::string fen = board.getFen(false);
         if (auto cached = try_load_from_cache(fen)) {
             co_return LKSNode(board, cached->value, std::move(cached->entries), cached->node_U, false);
+        }
+
+        // Syzygy: if <= 5 pieces, use TB WDL to set terminal value (cursed/blessed treated as draw)
+        {
+            const int piece_count = static_cast<int>(board.occ().count());
+            if (piece_count <= 5) {
+                if (auto wdl_v = engine::syzygy::probe_wdl_value_upto5(board)) {
+                    co_return LKSNode(board, *wdl_v, {}, 0.0f, true);
+                }
+            }
         }
 
         // Evaluate network fully (suspend until ready)

@@ -189,6 +189,7 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     flip = fen.split(' ')[1] == 'b'
 
     max_p = max(p for _, p in leela_policy)
+    assert max_p > 0, f'max_p is 0, board:{fen}'
     # First pass to get raw policy values
     for move, p in leela_policy:
         s1, s2 = utils.move_to_indices(chess.Move.from_uci(move), flip)
@@ -201,6 +202,8 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     # Compute temperature-adjusted policies
     # Flatten for numerical stability
     flat_policy = policy.reshape(-1)
+
+    hardest_policy = hardest_policy / hardest_policy.sum()
 
     if _move != 'CDB':
     
@@ -217,15 +220,14 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
       soft_policy = (exp_logits / exp_logits.sum()).reshape(S, S)
     else:
       policy = np.zeros((S, S))
-
-    hardest_policy = hardest_policy / hardest_policy.sum()
+      hard_policy = hardest_policy.copy()
 
     wdl = np.array([int(-result + 1)])
     probs = _process_prob(Q)
     draw_probs = _process_prob(D)
 
-    if _move == 'CDB':
-      draw_probs = np.zeros(NUM_BINS)
+    # if _move == 'CDB':
+    #   draw_probs = np.zeros(NUM_BINS)
 
     return state, legal_actions, policy, soft_policy, hard_policy, hardest_policy, probs, draw_probs, wdl, np.array([Q]), np.array([D]), np.array([plies_left])
 

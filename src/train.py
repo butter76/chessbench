@@ -173,7 +173,7 @@ def train(
         scaler.load_state_dict(checkpoint['scaler'])
         del checkpoint['scaler']
 
-    warmup_epochs = 60
+    warmup_epochs = 60 * 24
     scheduler1 = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lr_lambda=lambda epoch: 1.3 - (0.3 * min(epoch, warmup_epochs) / max(1, warmup_epochs)),
@@ -181,7 +181,7 @@ def train(
 
     scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=55,
+        T_max=55 * 24,
         eta_min=0.01,
     )
 
@@ -191,11 +191,10 @@ def train(
         milestones=[warmup_epochs],
     )
 
-    if checkpoint is not None and 'scheduler' in checkpoint:
-        if is_main_process():
-            print("Loading Scheduler from checkpoint...")
-        scheduler.load_state_dict(checkpoint['scheduler'])
-        del checkpoint['scheduler']
+    if checkpoint is not None:
+        already_epochs = step // train_config.steps_per_epoch
+        for i in range(already_epochs):
+            scheduler.step()
 
     # Free any remaining checkpoint data ASAP
     if checkpoint is not None:
@@ -208,6 +207,9 @@ def train(
     total_params = sum(p.numel() for p in model.parameters())
     if is_main_process():
         print(f"Total number of parameters: {total_params:,}")
+
+        print("Resumed LR:", optimizer.param_groups[0]["lr"])
+        print("Scheduler last LR:", scheduler.get_last_lr())
     
     # Training loop
     for epoch in range(num_epochs):
@@ -414,7 +416,7 @@ def main():
     # Create model config
     model_config = TransformerConfig(
         embedding_dim=768,
-        num_layers=24,
+        num_layers=19,
         num_heads=48,
         widening_factor=3,
         dropout=0,
@@ -423,7 +425,7 @@ def main():
     
     # Create training config
     train_config = config_lib.TrainConfig(
-        learning_rate=0.1,
+        learning_rate=0.12,
         data=config_lib.DataConfig(
             batch_size=512,
             shuffle=True,
@@ -432,7 +434,7 @@ def main():
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='train',
-            dataset_path='./training_data/*_0017.bag',
+            dataset_path='./training_data/*.bag',
         ),
         eval_data=config_lib.DataConfig(
             batch_size=512,
@@ -446,11 +448,10 @@ def main():
         ),
         compile=True,
         max_grad_norm=1.0,
-        num_steps=110 * 1000 * 2,
+        num_steps=110 * 1000 * 2 * 24,
         steps_per_epoch=1000 * 2,
         save_frequency=5,
-        save_checkpoint_path='./checkpoints/r1-lr-01/',
-        # checkpoint_path='../checkpoints/r1-base/checkpoint_last.pt',
+        save_checkpoint_path='./checkpoints/r1/',
     )
     
     # Train model

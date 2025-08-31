@@ -64,16 +64,37 @@ public:
 
     void makemove(const std::string &uci) override {
         const chess::Move move = chess::uci::uciToMove(board_, uci);
-        if (move != chess::Move::NO_MOVE) {
-            board_.makeMove(move);
-        } else {
-            chess::Movelist legal;
-            chess::movegen::legalmoves(legal, board_);
-            for (const auto &m : legal) {
-                if (chess::uci::moveToUci(m) == uci) { board_.makeMove(m); break; }
-            }
+        if (move == chess::Move::NO_MOVE) {
+            root_.reset();
+            tt_.clear();
+            return;
         }
-        root_.reset();
+
+        // Always update the board state
+        board_.makeMove(move);
+
+        // Clear the TT if the board has repeated as we have 2-fold repetition on
+        if (board_.isRepetition(1)) {
+            tt_.clear();
+        }
+
+        // If we have a search tree, try to advance the root to the played move
+        if (root_) {
+            for (auto &entry : root_->policy) {
+                if (entry.move == move) {
+                    if (entry.child) {
+                        // Re-root the tree by taking ownership of the child's subtree
+                        root_ = std::move(entry.child);
+                    } else {
+                        // No existing subtree for this move; cannot reuse
+                        root_.reset();
+                    }
+                    return;
+                }
+            }
+            // Move not found among root's known policy entries; drop the old tree
+            root_.reset();
+        }
     }
 
     chess::Board &getBoard() override { return board_; }
@@ -341,6 +362,12 @@ public:
             int re_search_count = 1;
             new_depth += RE_SEARCH_DEPTH;
 
+            if (root) {
+                std::ostringstream oss;
+                oss << "info string re-searching improver " << chess::uci::moveToUci(pe.move) << " at nodes " << getGpuEvaluationsCount();
+                std::cout << oss.str() << '\n' << std::flush;
+            }
+
             // Continue incremental null-window searches until reaching best_move_depth
             while (score > alpha && new_depth < best_move_depth) {
                 // Increment depth
@@ -371,6 +398,13 @@ public:
                 if (!(score > alpha)) {
                     float clip = std::max(node.policy[0].policy * 0.98f, pe.policy);
                     new_policy = std::min(new_policy, clip);
+                }
+            }
+            if (score > alpha) {
+                if (root) {
+                    std::ostringstream oss;
+                    oss << "info string successfully re-searched improver " << chess::uci::moveToUci(pe.move) << " at nodes " << getGpuEvaluationsCount();
+                    std::cout << oss.str() << '\n' << std::flush;
                 }
             }
             pe.policy = new_policy;
@@ -820,11 +854,6 @@ public:
             }
             co_return LKSNode(board, terminal_value, {}, 0.0f, true);
         }
-        // Cache lookup by FEN board key
-        const std::string fen = board.getFen(false);
-        if (auto cached = try_load_from_cache(fen)) {
-            co_return LKSNode(board, cached->value, std::move(cached->entries), cached->node_U, false);
-        }
 
         // Syzygy: if <= 5 pieces, use TB WDL to set terminal value (cursed/blessed treated as draw)
         {
@@ -834,6 +863,12 @@ public:
                     co_return LKSNode(board, *wdl_v, {}, 0.0f, true);
                 }
             }
+        }
+
+        // Cache lookup by FEN board key
+        const std::string fen = board.getFen(false);
+        if (auto cached = try_load_from_cache(fen)) {
+            co_return LKSNode(board, cached->value, std::move(cached->entries), cached->node_U, false);
         }
 
         // Evaluate network fully (suspend until ready)

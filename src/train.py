@@ -423,6 +423,13 @@ def main():
         use_smolgen=True,
     )
     
+
+    ti = os.environ.get("TRAINING_ITER")
+    ti = int(ti)
+    ts = f"{ti:02d}"
+    print("Loading training data from:", f'./training_data/*_{ts}17.bag')
+
+
     # Create training config
     train_config = config_lib.TrainConfig(
         learning_rate=0.12,
@@ -434,12 +441,12 @@ def main():
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='train',
-            dataset_path='./training_data/*.bag',
+            dataset_path=f'./training_data/*_{ts}17.bag',
         ),
         eval_data=config_lib.DataConfig(
             batch_size=512,
             shuffle=False,
-            worker_count=8,  # 0 disables multiprocessing
+            worker_count=3,  # 0 disables multiprocessing
             num_return_buckets=num_return_buckets,
             policy=policy,
             split='test',
@@ -448,10 +455,11 @@ def main():
         ),
         compile=True,
         max_grad_norm=1.0,
-        num_steps=110 * 1000 * 2 * 24,
+        num_steps=110 * 1000 * 2,
         steps_per_epoch=1000 * 2,
         save_frequency=5,
         save_checkpoint_path='./checkpoints/r1/',
+        checkpoint_path=f'./checkpoints/r1/checkpoint_{ti * 110 * 1000 * 2}.pt',
     )
     
     # Train model
@@ -459,36 +467,6 @@ def main():
         train_config=train_config,
         model_config=model_config,
     )
-
-    # Only perform puzzle evaluation on main process
-    if int(os.environ.get("RANK", "0")) == 0:
-        puzzles_path = os.path.join(
-            os.getcwd(),
-            '../data/puzzles.csv',
-        )
-        puzzles = pd.read_csv(puzzles_path, nrows=10000)
-        for strategy in [
-            MoveSelectionStrategy.VALUE, 
-            MoveSelectionStrategy.POLICY,
-            MoveSelectionStrategy.SOFT_POLICY,
-            MoveSelectionStrategy.HARD_POLICY,
-            MoveSelectionStrategy.HARDEST_POLICY
-        ]:
-            engine = MyTransformerEngine(
-                f"{train_config.save_checkpoint_path}checkpoint_last.pt",
-                chess.engine.Limit(nodes=1),
-                strategy=strategy,
-            )
-            with open(f'puzzles-{strategy}.txt', 'w') as f:
-                num_correct = 0
-                for puzzle_id, puzzle in puzzles.iterrows():
-                    correct = evaluate_puzzle_from_pandas_row(
-                        puzzle=puzzle,
-                        engine=engine,
-                    )
-                    num_correct += correct
-                    f.write(str({'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}) + '\n')
-                print(f'{strategy}: {num_correct / len(puzzles):.2%}')
 
     
     if int(os.environ.get("RANK", "0")) == 0:

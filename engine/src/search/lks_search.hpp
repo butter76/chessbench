@@ -798,7 +798,7 @@ private:
         int score_cp = static_cast<int>(std::lround(std::tan(static_cast<double>(bestScore) * 1.563754) * 90.0));
         oss << " score cp " << score_cp;
         // nodes and nps
-        std::uint64_t nodes = getNodesCreatedCount();
+        std::uint64_t nodes = getGpuEvaluationsCount();
         oss << " nodes " << nodes;
         std::uint64_t ms = getElapsedTimeMs();
         std::uint64_t nps = (ms == 0) ? nodes : (nodes * 1000ULL) / ms;

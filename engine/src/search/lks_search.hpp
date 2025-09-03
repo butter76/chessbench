@@ -99,7 +99,10 @@ public:
 
     chess::Board &getBoard() override { return board_; }
 
-    void stop() override { stop_requested_.store(true, std::memory_order_release); }
+    void stop() override {
+        stop_requested_.store(true, std::memory_order_release);
+        evaluator_.cancelQueue();
+    }
 
     std::string searchBestMove(const Limits &limits) override {
         stop_requested_.store(false, std::memory_order_release);

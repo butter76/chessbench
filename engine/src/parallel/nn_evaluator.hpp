@@ -75,6 +75,21 @@ public:
         cv.notify_one();
     }
 
+    // Cancel all pending requests in the queue. In-flight work is not interrupted.
+    void cancelQueue() {
+        std::queue<Request> pending;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            std::swap(pending, queue);
+        }
+        while (!pending.empty()) {
+            Request r = std::move(pending.front());
+            pending.pop();
+            EvalResult er; er.value = 0.0f; er.canceled = true;
+            if (r.on_ready) r.on_ready(std::move(er));
+        }
+    }
+
 private:
     std::mutex mutex;
     std::condition_variable cv;

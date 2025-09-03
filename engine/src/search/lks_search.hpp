@@ -125,6 +125,31 @@ public:
             stat_tbhits_.fetch_add(1, std::memory_order_relaxed);
             return chess::uci::moveToUci(*tb_move);
         }
+        
+        // Establish time budgets (only if time controls are provided)
+        engine::TimeHandler::TimeBudget budget{};
+        const bool has_time_limits = (limits.movetime_ms > 0ULL) || (limits.wtime_ms > 0ULL) || (limits.btime_ms > 0ULL);
+        if (time_handler_ != nullptr && has_time_limits && !limits.infinite) {
+            budget = time_handler_->selectTimeBudget(limits, board_.sideToMove());
+        }
+        using clock = std::chrono::steady_clock;
+        const clock::time_point start_tp = clock::now();
+        const clock::time_point soft_deadline = (budget.soft_ms > 0ULL) ? (start_tp + std::chrono::milliseconds(budget.soft_ms)) : clock::time_point::max();
+        const clock::time_point hard_deadline = (budget.hard_ms > 0ULL) ? (start_tp + std::chrono::milliseconds(budget.hard_ms)) : clock::time_point::max();
+        // Watchdog to enforce hard deadline by triggering stop()
+        std::jthread watchdog([this, hard_deadline](std::stop_token st){
+            if (hard_deadline == std::chrono::steady_clock::time_point::max()) return;
+            for (;;) {
+                if (st.stop_requested()) break;
+                if (std::chrono::steady_clock::now() >= hard_deadline) {
+                    this->stop();
+                    std::cout << "info string hard deadline reached\n" << std::flush;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
+        
         float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 20.0f;
         float currentDepth = std::min(2.0f, maxDepth);
 
@@ -145,6 +170,7 @@ public:
         }
         
         while (currentDepth <= maxDepth + 1e-2f) {
+            if (clock::now() >= hard_deadline) { stop(); break; }
             if (stop_requested_.load(std::memory_order_acquire)) break;
             if (!node_limit_check(limits)) break;
             auto [score, move, aborted] = cppcoro::sync_wait([&]() -> cppcoro::task<RootResult> {
@@ -157,6 +183,8 @@ public:
             // Emit UCI info line for this iteration
             print_info_line(currentDepth, bestScore);
             currentDepth += IT_DEPTH_STEP;
+            // Respect soft deadline: finish current iteration then exit
+            if (clock::now() >= soft_deadline) break;
         }
 
         if (bestMove == chess::Move::NO_MOVE) {

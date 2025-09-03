@@ -8,8 +8,8 @@ class FixedTime : public TimeHandler {
 public:
 	explicit FixedTime(unsigned long long fixed_ms) : fixed_ms_(fixed_ms) {}
 
-	unsigned long long selectTimeMs(const Limits & /*limits*/) const override {
-		return fixed_ms_;
+	TimeBudget selectTimeBudget(const Limits & /*limits*/, chess::Color /*stm*/) const override {
+		return TimeBudget{fixed_ms_, fixed_ms_};
 	}
 
 private:

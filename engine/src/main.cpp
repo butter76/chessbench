@@ -29,6 +29,8 @@ PositionCache g_pos_cache;
 void send_id() {
     std::cout << "id name SearchlessRandom" << '\n';
     std::cout << "id author Searchless" << '\n';
+    // Advertise configurable options
+    std::cout << "option name Network type string default ./p2.plan" << '\n';
 }
 
 std::vector<std::string> split(const std::string &line) {
@@ -215,6 +217,8 @@ int main(int argc, char **argv) {
             send_id();
             std::cout << "uciok" << '\n' << std::flush;
         } else if (line == "isready") {
+            // Initialize TensorRT now that options could have been set
+            search.initialize_trt();
             std::cout << "readyok" << '\n' << std::flush;
         } else if (line.rfind("setoption", 0) == 0) {
             // setoption name <id> [value <x>]

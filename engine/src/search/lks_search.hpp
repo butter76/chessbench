@@ -99,6 +99,11 @@ public:
 
     chess::Board &getBoard() override { return board_; }
 
+    // Initialize TensorRT engine explicitly (e.g., after isready)
+    void initialize_trt() {
+        evaluator_.initialize_trt();
+    }
+
     void stop() override {
         stop_requested_.store(true, std::memory_order_release);
         evaluator_.cancelQueue();

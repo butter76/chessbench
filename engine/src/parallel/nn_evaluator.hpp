@@ -51,7 +51,6 @@ public:
 
     void start() {
         stop.store(false, std::memory_order_release);
-        initialize_trt("./p2.plan");
         worker = std::jthread([this](std::stop_token st) { run(st); });
     }
 
@@ -60,6 +59,13 @@ public:
         cv.notify_all();
         if (worker.joinable()) worker.join();
         release_trt();
+    }
+
+    // Explicitly initialize TensorRT using configured or default plan path.
+    // Safe to call multiple times; it will release any previous engine.
+    void initialize_trt() {
+        const std::string plan_path = resolve_plan_path();
+        initialize_trt(plan_path.c_str());
     }
 
     void enqueue(const std::array<std::uint8_t, 68>& tokens,
@@ -317,6 +323,20 @@ private:
         if (trt_stream) { cudaStreamDestroy(trt_stream); trt_stream = nullptr; }
     }
 
+    std::string resolve_plan_path() const {
+        std::string path;
+        if (options_) {
+            // Try a few sensible option keys; stored in lowercase by Options
+            const char* keys[] = {"network", "plan", "model", "trtplan"};
+            for (const char* k : keys) {
+                path = options_->get(k, "");
+                if (!path.empty()) break;
+            }
+        }
+        if (path.empty()) path = "./p2.plan";
+        return path;
+    }
+
     void initialize_trt(const char* plan_path) {
         release_trt();
         // Read plan file
@@ -439,6 +459,12 @@ private:
                     EvalResult er; er.value = 0.0f; er.canceled = true; r.on_ready(std::move(er));
                 }
                 continue;
+            }
+
+            // Ensure TensorRT is initialized lazily using configured plan path
+            if (!trt_context) {
+                const std::string plan_path = resolve_plan_path();
+                initialize_trt(plan_path.c_str());
             }
 
             // If TensorRT is initialized, run inference; otherwise fallback

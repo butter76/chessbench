@@ -44,9 +44,9 @@ constexpr float IMPROVER_POLICY_INCREASE = RE_SEARCH_DEPTH / 2;
 class LksSearch : public SearchAlgo {
 public:
     explicit LksSearch(engine::Options &options, const engine::TimeHandler *time_handler)
-        : SearchAlgo(options, time_handler), board_(), evaluator_(options),
-          pool_(static_cast<std::size_t>(32u)) {
+        : SearchAlgo(options, time_handler), board_(), evaluator_(options) {
         evaluator_.start();
+        ensure_pool_built();
     }
 
     ~LksSearch() override {
@@ -102,6 +102,7 @@ public:
     // Initialize TensorRT engine explicitly (e.g., after isready)
     void initialize_trt() {
         evaluator_.initialize_trt();
+        ensure_pool_built();
     }
 
     void stop() override {
@@ -110,6 +111,7 @@ public:
     }
 
     std::string searchBestMove(const Limits &limits) override {
+        ensure_pool_built();
         stop_requested_.store(false, std::memory_order_release);
         // Reset per-search statistics
         stat_gpu_evaluations_.store(0, std::memory_order_relaxed);
@@ -179,7 +181,7 @@ public:
             if (stop_requested_.load(std::memory_order_acquire)) break;
             if (!node_limit_check(limits)) break;
             auto [score, move, aborted] = cppcoro::sync_wait([&]() -> cppcoro::task<RootResult> {
-                co_await pool_.schedule();
+                co_await pool_->schedule();
                 co_return co_await lks_root(*root_, currentDepth, -1.0f, 1.0f);
             }());
             if (aborted) break;
@@ -719,7 +721,34 @@ private:
     chess::Board board_;
     std::atomic<bool> stop_requested_{false};
     engine_parallel::NNEvaluator evaluator_;
-    cppcoro::static_thread_pool pool_;
+    std::unique_ptr<cppcoro::static_thread_pool> pool_;
+    std::size_t pool_threads_{8};
+
+    std::size_t desired_thread_count_from_options() const {
+        const std::string val = options_.get("threads", "");
+        unsigned int hc = std::thread::hardware_concurrency();
+        if (hc == 0u) hc = 8u;
+        unsigned int t = hc;
+        if (!val.empty()) {
+            try {
+                unsigned long parsed = std::stoul(val);
+                if (parsed > 0ul) t = static_cast<unsigned int>(parsed);
+            } catch (...) {
+                // ignore parse errors, keep default
+            }
+        }
+        if (t < 1u) t = 1u;
+        if (t > 512u) t = 512u;
+        return static_cast<std::size_t>(t);
+    }
+
+    void ensure_pool_built() {
+        const std::size_t desired = desired_thread_count_from_options();
+        if (!pool_ || pool_threads_ != desired) {
+            pool_threads_ = desired;
+            pool_ = std::make_unique<cppcoro::static_thread_pool>(desired);
+        }
+    }
     
     std::unique_ptr<LKSNode> root_;
     std::atomic<std::uint64_t> stat_gpu_evaluations_{0};
@@ -820,7 +849,7 @@ private:
         evaluator_.enqueue(tokens, [shared](engine_parallel::EvalResult r){ shared->res = std::move(r); shared->done.set(); });
         co_await shared->done;
         // Bounce back to the search thread pool to continue the coroutine on the desired executor
-        co_await pool_.schedule();
+        co_await pool_->schedule();
         co_return std::move(shared->res);
     }
 

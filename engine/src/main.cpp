@@ -31,6 +31,10 @@ void send_id() {
     std::cout << "id author Searchless" << '\n';
     // Advertise configurable options
     std::cout << "option name Network type string default ./p2.plan" << '\n';
+    // Threads option (default to hardware concurrency if available)
+    unsigned int hc = std::thread::hardware_concurrency();
+    if (hc == 0u) hc = 32u;
+    std::cout << "option name Threads type spin default " << hc << " min 1 max 512" << '\n';
 }
 
 std::vector<std::string> split(const std::string &line) {

@@ -23,6 +23,7 @@
 #include <mutex>
 #include <array>
 #include <string>
+#include <algorithm>
 #include <tbb/concurrent_hash_map.h>
 
 // Syzygy helpers
@@ -167,7 +168,6 @@ public:
         chess::movegen::legalmoves(rootMoves, board_);
         if (rootMoves.empty()) return "0000";
 
-        chess::Move bestMove = chess::Move::NO_MOVE;
         float bestScore = -std::numeric_limits<float>::infinity();
         if (!root_) {
             auto rootMaybe = cppcoro::sync_wait(create_node(board_));
@@ -189,7 +189,6 @@ public:
             }());
             if (aborted) break;
             bestScore = score;
-            if (move != chess::Move::NO_MOVE) bestMove = move;
             // Emit UCI info line for this iteration
             print_info_line(currentDepth, bestScore);
             currentDepth += IT_DEPTH_STEP;
@@ -197,13 +196,13 @@ public:
             if (clock::now() >= soft_deadline) break;
         }
 
-        if (bestMove == chess::Move::NO_MOVE) {
+        if (root_->bestMove == chess::Move::NO_MOVE) {
             if (root_ && !root_->policy.empty()) {
                 return chess::uci::moveToUci(root_->policy[0].move);
             }
             return "0000";
         }
-        return chess::uci::moveToUci(bestMove);
+        return chess::uci::moveToUci(root_->bestMove);
     }
 
     // Statistics API (thread-safe)
@@ -400,6 +399,21 @@ public:
             }
         }
 
+        // Reorder improvers: prioritize current bestMove if present and multiple improvers exist
+        if (improver_indices.size() > 1) {
+            chess::Move currentBest = node.bestMove;
+            if (currentBest != chess::Move::NO_MOVE) {
+                auto it = std::find_if(improver_indices.begin(), improver_indices.end(), [&](std::size_t idx) {
+                    return node.policy[idx].move == currentBest;
+                });
+                if (it != improver_indices.end() && it != improver_indices.begin()) {
+                    std::size_t idxVal = *it;
+                    improver_indices.erase(it);
+                    improver_indices.insert(improver_indices.begin(), idxVal);
+                }
+            }
+        }
+
         // Phase 3: re-search improvers (non-first moves)
         for (std::size_t k = 0; k < improver_indices.size(); ++k) {
             std::size_t i = improver_indices[k];
@@ -461,6 +475,7 @@ public:
             if (score > bestScore) {
                 bestScore = score;
                 bestMove = pe.move;
+                node.bestMove = bestMove; // update bestMove immediately in case of an abort
             }
             if (score >= beta) {
                 update_tt(node.board, alpha0, beta0, depth, bestScore);

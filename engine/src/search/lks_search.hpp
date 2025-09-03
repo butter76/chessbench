@@ -834,6 +834,7 @@ private:
     }
 
     void backpropagate_policy_updates(LKSNode &parent, const LKSNode &child, const chess::Move &move) {
+        return; // Turning off backproagation due to segfaults
         // Find entry for move in parent
         for (auto &entry : parent.policy) {
             if (entry.move == move) {

@@ -27,8 +27,8 @@ struct PositionCache {
 PositionCache g_pos_cache;
 
 void send_id() {
-    std::cout << "id name SearchlessRandom" << '\n';
-    std::cout << "id author Searchless" << '\n';
+    std::cout << "id name CatGPT" << '\n';
+    std::cout << "id author Nikhil Reddy (butter)" << '\n';
     // Advertise configurable options
     std::cout << "option name Network type string default ./p2.plan" << '\n';
     // Threads option (default to hardware concurrency if available)

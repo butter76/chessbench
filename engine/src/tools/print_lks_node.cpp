@@ -31,7 +31,12 @@ int main(int argc, char** argv) {
         search.getBoard().setFen(fen);
 
         // Create node (await)
-        engine::LKSNode node = cppcoro::sync_wait(search.create_node(search.getBoard()));
+        auto maybeNode = cppcoro::sync_wait(search.create_node(search.getBoard()));
+        if (!maybeNode) {
+            std::cerr << "Evaluation canceled; no node created." << '\n';
+            return 3;
+        }
+        engine::LKSNode node = std::move(*maybeNode);
 
         // Print
         std::cout << "FEN: " << fen << '\n';

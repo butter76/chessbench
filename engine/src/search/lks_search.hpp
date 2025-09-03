@@ -132,7 +132,12 @@ public:
         chess::Move bestMove = chess::Move::NO_MOVE;
         float bestScore = -std::numeric_limits<float>::infinity();
         if (!root_) {
-            LKSNode rootNode = cppcoro::sync_wait(create_node(board_));
+            auto rootMaybe = cppcoro::sync_wait(create_node(board_));
+            if (!rootMaybe) {
+                // Fallback: return the first legal move
+                return chess::uci::moveToUci(rootMoves[0]);
+            }
+            LKSNode rootNode = std::move(*rootMaybe);
             root_ = std::make_unique<LKSNode>(std::move(rootNode));
         }
         
@@ -195,7 +200,7 @@ public:
         return static_cast<std::uint64_t>(delta_ns / 1000000);
     }
 
-    struct RootResult { float score; chess::Move pvMove; bool aborted; };
+    struct RootResult { float score; chess::Move pvMove; bool aborted; bool updatePVDespiteAbort; };
 
     enum class NodeType { PV, CUT, ALL };
 
@@ -408,8 +413,6 @@ public:
                 }
             }
             pe.policy = new_policy;
-            // Deviating from the python implementation, by removing this line:
-            // if (new_depth > best_move_depth) best_move_depth = new_depth;
 
             // After finishing this child's re-searches, update global alpha
             if (score > alpha) alpha = score;
@@ -642,8 +645,11 @@ private:
         if (!pe.child) {
             chess::Board child_board = node.board;
             child_board.makeMove(pe.move);
-            LKSNode created = co_await create_node(child_board);
-            pe.child = std::make_unique<LKSNode>(std::move(created));
+            auto created = co_await create_node(child_board);
+            if (!created) {
+                co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
+            }
+            pe.child = std::make_unique<LKSNode>(std::move(*created));
             backpropagate_policy_updates(node, *pe.child, pe.move);
         }
 
@@ -839,7 +845,7 @@ private:
 
 public:
     // Create an LKS node from a board by evaluating model outputs
-    cppcoro::task<LKSNode> create_node(const chess::Board &board) {
+    cppcoro::task<std::optional<LKSNode>> create_node(const chess::Board &board) {
         // Track node creation
         stat_nodes_created_.fetch_add(1, std::memory_order_relaxed);
         // Terminal detection (ignore syzygy and TT)
@@ -852,7 +858,7 @@ public:
             } else {
                 terminal_value = 0.0f; // stalemate, repetition, fifty-move, insufficient material
             }
-            co_return LKSNode(board, terminal_value, {}, 0.0f, true);
+            co_return std::optional<LKSNode>(std::in_place, board, terminal_value, std::vector<LKSPolicyEntry>{}, 0.0f, true);
         }
 
         // Syzygy: if <= 5 pieces, use TB WDL to set terminal value (cursed/blessed treated as draw)
@@ -860,7 +866,7 @@ public:
             const int piece_count = static_cast<int>(board.occ().count());
             if (piece_count <= 5) {
                 if (auto wdl_v = engine::syzygy::probe_wdl_value_upto5(board)) {
-                    co_return LKSNode(board, *wdl_v, {}, 0.0f, true);
+                    co_return std::optional<LKSNode>(std::in_place, board, *wdl_v, std::vector<LKSPolicyEntry>{}, 0.0f, true);
                 }
             }
         }
@@ -868,18 +874,18 @@ public:
         // Cache lookup by FEN board key
         const std::string fen = board.getFen(false);
         if (auto cached = try_load_from_cache(fen)) {
-            co_return LKSNode(board, cached->value, std::move(cached->entries), cached->node_U, false);
+            co_return std::optional<LKSNode>(std::in_place, board, cached->value, std::move(cached->entries), cached->node_U, false);
         }
 
         // Evaluate network fully (suspend until ready)
         engine_parallel::EvalResult eval = co_await evaluate_on_pool(board);
         if (eval.canceled || stop_requested_.load(std::memory_order_acquire)) {
-            co_return LKSNode(board, 0.0f, {}, 0.0f, false);
+            co_return std::nullopt;
         }
 
         // Build node data from eval and store in cache
         auto built = build_from_eval_and_cache(board, eval);
-        co_return LKSNode(board, built.value, std::move(built.entries), built.node_U, false);
+        co_return std::optional<LKSNode>(std::in_place, board, built.value, std::move(built.entries), built.node_U, false);
     }
 };
 

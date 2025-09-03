@@ -25,6 +25,7 @@ struct LKSNode {
     std::vector<LKSPolicyEntry> policy;   // ordered list of policy moves and heads
     float U{0.0f};                        // node-level uncertainty (e.g., stddev)
     bool terminal{false};                 // terminal position flag
+    chess::Move bestMove{chess::Move::NO_MOVE}; // cached best move from search
 
     LKSNode() = default;
 

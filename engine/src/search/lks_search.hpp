@@ -359,6 +359,7 @@ public:
             bestMove = r0.move;
             if (r0.cutoff) {
                 update_tt(node.board, alpha0, beta0, depth, bestScore);
+                node.bestMove = bestMove;
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
 
@@ -453,11 +454,13 @@ public:
             }
             if (score >= beta) {
                 update_tt(node.board, alpha0, beta0, depth, bestScore);
+                node.bestMove = bestMove;
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
         }
 
         update_tt(node.board, alpha0, beta0, depth, bestScore);
+        node.bestMove = bestMove;
         co_return SearchOutcome{bestScore, bestMove, false};
     }
 
@@ -775,12 +778,20 @@ private:
         std::ostringstream pv;
         bool first = true;
         while (node && !node->policy.empty()) {
-            const auto &pe = node->policy[0];
-            if (pe.move == chess::Move::NO_MOVE) break;
+            chess::Move mv = node->bestMove;
+            if (mv == chess::Move::NO_MOVE) {
+                break;
+            }
             if (!first) pv << ' ';
-            pv << chess::uci::moveToUci(pe.move);
+            pv << chess::uci::moveToUci(mv);
             first = false;
-            if (pe.child) node = pe.child.get(); else break;
+            // Follow the child corresponding to mv
+            const LKSNode *next = nullptr;
+            for (const auto &pe : node->policy) {
+                if (pe.move == mv && pe.child) { next = pe.child.get(); break; }
+            }
+            if (!next) break;
+            node = next;
         }
         return pv.str();
     }

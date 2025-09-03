@@ -200,7 +200,7 @@ public:
         return static_cast<std::uint64_t>(delta_ns / 1000000);
     }
 
-    struct RootResult { float score; chess::Move pvMove; bool aborted; bool updatePVDespiteAbort; };
+    struct RootResult { float score; chess::Move pvMove; bool aborted; };
 
     enum class NodeType { PV, CUT, ALL };
 

@@ -128,7 +128,10 @@ public:
         }
 
         // Syzygy TB early exit for 3-5 men
-        if (auto tb_move = engine::syzygy::probe_best_move_3to5(board_)) {
+        // Syzygy path from options if provided
+        const std::string tb_path_opt = options_.get("syzygypath", "../syzygy_tables/3-4-5/");
+        const char *tb_path_cstr = tb_path_opt.empty() ? nullptr : tb_path_opt.c_str();
+        if (auto tb_move = engine::syzygy::probe_best_move(board_, tb_path_cstr)) {
             stat_tbhits_.fetch_add(1, std::memory_order_relaxed);
             return chess::uci::moveToUci(*tb_move);
         }
@@ -942,7 +945,7 @@ public:
         {
             const int piece_count = static_cast<int>(board.occ().count());
             if (piece_count <= 5) {
-                if (auto wdl_v = engine::syzygy::probe_wdl_value_upto5(board)) {
+                if (auto wdl_v = engine::syzygy::probe_wdl_value(board)) {
                     co_return std::optional<LKSNode>(std::in_place, board, *wdl_v, std::vector<LKSPolicyEntry>{}, 0.0f, true);
                 }
             }

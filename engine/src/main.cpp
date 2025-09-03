@@ -35,6 +35,8 @@ void send_id() {
     unsigned int hc = std::thread::hardware_concurrency();
     if (hc == 0u) hc = 32u;
     std::cout << "option name Threads type spin default " << hc << " min 1 max 512" << '\n';
+    // Syzygy tablebase root path
+    std::cout << "option name SyzygyPath type string default ../syzygy_tables/3-4-5/" << '\n';
 }
 
 std::vector<std::string> split(const std::string &line) {

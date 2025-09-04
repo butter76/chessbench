@@ -185,7 +185,7 @@ public:
             if (!node_limit_check(limits)) break;
             auto [score, move, aborted] = cppcoro::sync_wait([&]() -> cppcoro::task<RootResult> {
                 co_await pool_->schedule();
-                co_return co_await lks_root(*root_, currentDepth, -1.0f, 1.0f);
+                co_return co_await lks_root(*root_, board_, currentDepth, -1.0f, 1.0f);
             }());
             if (aborted) break;
             bestScore = score;
@@ -255,7 +255,7 @@ public:
         bool is_improver;
     };
 
-    cppcoro::task<SearchOutcome> lks_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, int rec_depth = 0, bool root = false) {
+    cppcoro::task<SearchOutcome> lks_search(LKSNode& node, const chess::Board &board, float depth, float alpha, float beta, NodeType node_type, int rec_depth = 0, bool root = false) {
         if (stop_requested_.load(std::memory_order_acquire)) co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, true};
 
         if (node.terminal || node.policy.empty()) {
@@ -267,7 +267,7 @@ public:
         }
 
         // During search, use 2-fold repetition, but don't allow it for the root node
-        if (node.board.isRepetition(1) && !root) {
+        if (board.isRepetition(1) && !root) {
             co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, false};
         }
 
@@ -275,7 +275,7 @@ public:
         const float beta0 = beta;
 
         // Transposition Table probe (after recursion depth guard)
-        if (auto tt_score = query_tt(node.board, alpha0, beta0, depth)) {
+        if (auto tt_score = query_tt(board, alpha0, beta0, depth)) {
             co_return SearchOutcome{*tt_score, chess::Move::NO_MOVE, false};
         }
 
@@ -306,7 +306,7 @@ public:
         }
         if (is_leaf_node(node)) {
             if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + node_depth_reduction) {
-                update_tt(node.board, alpha0, beta0, depth, node.value);
+                update_tt(board, alpha0, beta0, depth, node.value);
                 co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
             }
 
@@ -361,13 +361,13 @@ public:
         if (!filtered_indices.empty()) {
             std::size_t i0 = filtered_indices[0];
             float depth0 = new_depths[i0];
-            auto r0 = co_await process_phase2_child(node, i0, depth0, alpha, beta, node_type, rec_depth);
+            auto r0 = co_await process_phase2_child(node, board, i0, depth0, alpha, beta, node_type, rec_depth);
             if (r0.aborted) co_return SearchOutcome{0.0f, bestMove, true};
             alpha = r0.alpha_out;
             bestScore = r0.score;
             bestMove = r0.move;
             if (r0.cutoff) {
-                update_tt(node.board, alpha0, beta0, depth, bestScore);
+                update_tt(board, alpha0, beta0, depth, bestScore);
                 node.bestMove = bestMove;
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
@@ -383,7 +383,7 @@ public:
                 std::size_t i = filtered_indices[idx_pos];
                 float nd = new_depths[i];
                 non_first_indices.push_back(i);
-                tasks.push_back(process_phase2_child(node, i, nd, alpha_after_first, beta, node_type, rec_depth));
+                tasks.push_back(process_phase2_child(node, board, i, nd, alpha_after_first, beta, node_type, rec_depth));
             }
 
             // Await completion of all non-first children without blocking pool threads
@@ -434,7 +434,9 @@ public:
                 // Increment depth
 
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
-                auto child_out = co_await lks_search(*pe.child, new_depth, -alpha - NULL_EPS, -alpha, next_type, rec_depth + 1);
+                chess::Board child_board = board;
+                child_board.makeMove(pe.move);
+                auto child_out = co_await lks_search(*pe.child, child_board, new_depth, -alpha - NULL_EPS, -alpha, next_type, rec_depth + 1);
                 if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
                 new_depth += RE_SEARCH_DEPTH;
@@ -445,7 +447,9 @@ public:
             if (score > alpha) {
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
                 NodeType fw_type = (node_type == NodeType::PV) ? NodeType::PV : next_type;
-                auto child_out = co_await lks_search(*pe.child, new_depth, -beta, -alpha, fw_type, rec_depth + 1);
+                chess::Board child_board = board;
+                child_board.makeMove(pe.move);
+                auto child_out = co_await lks_search(*pe.child, child_board, new_depth, -beta, -alpha, fw_type, rec_depth + 1);
                 if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
             }
@@ -478,19 +482,19 @@ public:
                 node.bestMove = bestMove; // update bestMove immediately in case of an abort
             }
             if (score >= beta) {
-                update_tt(node.board, alpha0, beta0, depth, bestScore);
+                update_tt(board, alpha0, beta0, depth, bestScore);
                 node.bestMove = bestMove;
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
         }
 
-        update_tt(node.board, alpha0, beta0, depth, bestScore);
+        update_tt(board, alpha0, beta0, depth, bestScore);
         node.bestMove = bestMove;
         co_return SearchOutcome{bestScore, bestMove, false};
     }
 
-    cppcoro::task<RootResult> lks_root(LKSNode& root, float depth, float alpha, float beta) {
-        auto out = co_await lks_search(root, depth, alpha, beta, NodeType::PV, 0, true);
+    cppcoro::task<RootResult> lks_root(LKSNode& root, const chess::Board &board, float depth, float alpha, float beta) {
+        auto out = co_await lks_search(root, board, depth, alpha, beta, NodeType::PV, 0, true);
         co_return RootResult{out.score, out.bestMove, out.aborted};
     }
 
@@ -690,6 +694,7 @@ private:
     TTMap tt_;
     cppcoro::task<Phase2ChildResult> process_phase2_child(
         LKSNode &node,
+        const chess::Board &board,
         std::size_t i,
         float new_depth,
         float alpha,
@@ -702,7 +707,7 @@ private:
 
         // Ensure child exists and backpropagate policy updates
         if (!pe.child) {
-            chess::Board child_board = node.board;
+            chess::Board child_board = board;
             child_board.makeMove(pe.move);
             auto created = co_await create_node(child_board);
             if (!created) {
@@ -719,7 +724,9 @@ private:
         else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
         else next_type = NodeType::CUT;
 
-        auto child_out = co_await lks_search(*pe.child, new_depth, search_alpha, search_beta, next_type, rec_depth + 1);
+        chess::Board child_board = board;
+        child_board.makeMove(pe.move);
+        auto child_out = co_await lks_search(*pe.child, child_board, new_depth, search_alpha, search_beta, next_type, rec_depth + 1);
         if (child_out.aborted) {
             co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
         }
@@ -953,7 +960,7 @@ public:
             } else {
                 terminal_value = 0.0f; // stalemate, repetition, fifty-move, insufficient material
             }
-            co_return std::optional<LKSNode>(std::in_place, board, terminal_value, std::vector<LKSPolicyEntry>{}, 0.0f, true);
+            co_return std::optional<LKSNode>(std::in_place, terminal_value, std::vector<LKSPolicyEntry>{}, 0.0f, true);
         }
 
         // Syzygy: if <= 5 pieces, use TB WDL to set terminal value (cursed/blessed treated as draw)
@@ -961,7 +968,7 @@ public:
             const int piece_count = static_cast<int>(board.occ().count());
             if (piece_count <= 5) {
                 if (auto wdl_v = engine::syzygy::probe_wdl_value(board)) {
-                    co_return std::optional<LKSNode>(std::in_place, board, *wdl_v, std::vector<LKSPolicyEntry>{}, 0.0f, true);
+                    co_return std::optional<LKSNode>(std::in_place, *wdl_v, std::vector<LKSPolicyEntry>{}, 0.0f, true);
                 }
             }
         }
@@ -969,7 +976,7 @@ public:
         // Cache lookup by FEN board key
         const std::string fen = board.getFen(false);
         if (auto cached = try_load_from_cache(fen)) {
-            co_return std::optional<LKSNode>(std::in_place, board, cached->value, std::move(cached->entries), cached->node_U, false);
+            co_return std::optional<LKSNode>(std::in_place, cached->value, std::move(cached->entries), cached->node_U, false);
         }
 
         // Evaluate network fully (suspend until ready)
@@ -980,7 +987,7 @@ public:
 
         // Build node data from eval and store in cache
         auto built = build_from_eval_and_cache(board, eval);
-        co_return std::optional<LKSNode>(std::in_place, board, built.value, std::move(built.entries), built.node_U, false);
+        co_return std::optional<LKSNode>(std::in_place, built.value, std::move(built.entries), built.node_U, false);
     }
 };
 

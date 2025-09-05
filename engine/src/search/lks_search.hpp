@@ -255,7 +255,7 @@ public:
         bool is_improver;
     };
 
-    cppcoro::task<SearchOutcome> lks_search(LKSNode& node, const chess::Board &board, float depth, float alpha, float beta, NodeType node_type, int rec_depth = 0, bool root = false) {
+    cppcoro::task<SearchOutcome> lks_search(LKSNode& node, const chess::Board &board, float depth, float alpha, float beta, NodeType node_type, int rec_depth = 0, int pv_depth = 0, bool root = false) {
         if (stop_requested_.load(std::memory_order_acquire)) co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, true};
 
         if (node.terminal || node.policy.empty()) {
@@ -345,7 +345,7 @@ public:
                 const float local_reduction = -2.0f * std::log(pe.U + 1e-6f);
                 if (new_depth <= local_reduction) {
                     if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
-                        should_filter = !root;
+                        should_filter = !(pv_depth < 2);
                     }
                 }
             }
@@ -361,7 +361,7 @@ public:
         if (!filtered_indices.empty()) {
             std::size_t i0 = filtered_indices[0];
             float depth0 = new_depths[i0];
-            auto r0 = co_await process_phase2_child(node, board, i0, depth0, alpha, beta, node_type, rec_depth);
+            auto r0 = co_await process_phase2_child(node, board, i0, depth0, alpha, beta, node_type, rec_depth, pv_depth);
             if (r0.aborted) co_return SearchOutcome{0.0f, bestMove, true};
             alpha = r0.alpha_out;
             bestScore = r0.score;
@@ -383,7 +383,7 @@ public:
                 std::size_t i = filtered_indices[idx_pos];
                 float nd = new_depths[i];
                 non_first_indices.push_back(i);
-                tasks.push_back(process_phase2_child(node, board, i, nd, alpha_after_first, beta, node_type, rec_depth));
+                tasks.push_back(process_phase2_child(node, board, i, nd, alpha_after_first, beta, node_type, rec_depth, pv_depth));
             }
 
             // Await completion of all non-first children without blocking pool threads
@@ -436,7 +436,8 @@ public:
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
                 chess::Board child_board = board;
                 child_board.makeMove(pe.move);
-                auto child_out = co_await lks_search(*pe.child, child_board, new_depth, -alpha - NULL_EPS, -alpha, next_type, rec_depth + 1);
+                int child_pv_depth = pv_depth + ((next_type != NodeType::PV) ? 1 : 0);
+                auto child_out = co_await lks_search(*pe.child, child_board, new_depth, -alpha - NULL_EPS, -alpha, next_type, rec_depth + 1, child_pv_depth);
                 if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
                 new_depth += RE_SEARCH_DEPTH;
@@ -447,9 +448,10 @@ public:
             if (score > alpha) {
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
                 NodeType fw_type = (node_type == NodeType::PV) ? NodeType::PV : next_type;
+                int fw_pv_depth = pv_depth + ((fw_type != NodeType::PV) ? 1 : 0);
                 chess::Board child_board = board;
                 child_board.makeMove(pe.move);
-                auto child_out = co_await lks_search(*pe.child, child_board, new_depth, -beta, -alpha, fw_type, rec_depth + 1);
+                auto child_out = co_await lks_search(*pe.child, child_board, new_depth, -beta, -alpha, fw_type, rec_depth + 1, fw_pv_depth);
                 if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
             }
@@ -494,7 +496,7 @@ public:
     }
 
     cppcoro::task<RootResult> lks_root(LKSNode& root, const chess::Board &board, float depth, float alpha, float beta) {
-        auto out = co_await lks_search(root, board, depth, alpha, beta, NodeType::PV, 0, true);
+        auto out = co_await lks_search(root, board, depth, alpha, beta, NodeType::PV, 0, 0, true);
         co_return RootResult{out.score, out.bestMove, out.aborted};
     }
 
@@ -700,7 +702,8 @@ private:
         float alpha,
         float beta,
         NodeType node_type,
-        int rec_depth
+        int rec_depth,
+        int pv_depth
     ) {
         const float NULL_EPS = 1e-4f;
         auto &pe = node.policy[i];
@@ -726,7 +729,8 @@ private:
 
         chess::Board child_board = board;
         child_board.makeMove(pe.move);
-        auto child_out = co_await lks_search(*pe.child, child_board, new_depth, search_alpha, search_beta, next_type, rec_depth + 1);
+        int child_pv_depth = pv_depth + ((next_type != NodeType::PV) ? 1 : 0);
+        auto child_out = co_await lks_search(*pe.child, child_board, new_depth, search_alpha, search_beta, next_type, rec_depth + 1, child_pv_depth);
         if (child_out.aborted) {
             co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
         }

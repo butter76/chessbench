@@ -87,6 +87,7 @@ _TYPE = flags.DEFINE_enum(
         'positional',
         'tactical',
         'blunderbase',
+        'fortressbase',
     ],
     help='The type of puzzles to evaluate.',
 )
@@ -372,6 +373,65 @@ def worker_evaluate_blunderbase(entry: tuple[str, str]) -> dict:
             'result': 'FAILED',
             'bestmove_uci': best_move.uci() if best_move is not None else None,
         }
+
+
+def _final_centipawns_at_nodes(board: chess.Board) -> int | None:
+    """Run fixed-nodes analysis and return final CP score from the engine's POV.
+
+    Returns None if score is unavailable.
+    """
+    global worker_engine, worker_num_nodes
+    if worker_engine is None:
+        raise RuntimeError('Worker engine not initialized')
+    if not hasattr(worker_engine, '_raw_engine'):
+        raise RuntimeError('Fortressbase requires a UCI engine (Lc0/Stockfish/generic UCI).')
+    raw_engine = getattr(worker_engine, '_raw_engine')
+    _ucinewgame_if_possible(raw_engine)
+
+    limit = chess.engine.Limit(nodes=worker_num_nodes or 0)
+    try:
+        # Non-streaming final analysis; python-chess returns final info including 'score'
+        result = raw_engine.analyse(board, limit=limit)
+        score = result.get('score')
+        if score is None:
+            return None
+        # Convert to centipawns from the side to move perspective
+        rel = score.relative
+        if rel.is_mate():
+            # Map mates to large CP magnitude keeping sign
+            sign = 1 if rel.mate() and rel.mate() > 0 else -1
+            return 100000 * sign
+        return int(rel.cp)
+    except Exception:
+        return None
+
+
+def worker_evaluate_fortressbase(entry: tuple[str, str]) -> dict:
+    """Evaluate a single Fortressbase entry.
+
+    Args:
+        entry: (fen, result_label) where result_label is 'Win' or 'Draw'
+
+    Returns:
+        dict with fields: 'fen', 'result' (float), 'cp'
+    """
+    fen, result_label = entry
+    board = chess.Board(fen)
+    cp = _final_centipawns_at_nodes(board)
+    if cp is None:
+        return {'fen': fen, 'result': float('nan'), 'cp': None}
+
+    # decisive probability
+    dp = math.atan(abs(cp) / 90.0) / 1.5637541897
+
+    # If fortress is a win, return 1 - dp; if draw, return 0
+    label = (result_label or '').strip().lower()
+    if label == 'win':
+        value = 1.0 - dp
+    else:
+        value = dp
+
+    return {'fen': fen, 'result': float(value), 'cp': int(cp)}
 
 def validate_chessbench(engine: engine_lib.Engine):
     """Sample positions from validation set and compare MyEngine policy with dataset policy."""
@@ -672,6 +732,63 @@ def main(argv: Sequence[str]) -> None:
         success_pct = (correct_count / total_examples) if total_examples > 0 else 0.0
         print(f"Average log(nodes): {avg_log_nodes:.6f}")
         print(f"Success (not FAILED): {success_pct:.2%}")
+
+    elif _TYPE.value == 'fortressbase':
+        # Evaluate on the Fortressbase dataset. For each entry, run fixed-nodes
+        # analysis, convert final CP to decisive probability via
+        # atan(|cp|/90)/1.5637541897, then return (1 - dp) if the fortress is a
+        # win, or 0 if it's a draw.
+
+        fortress_path = os.path.join(
+            os.getcwd(),
+            '../data/Fortressbase.csv',
+        )
+        df = pd.read_csv(fortress_path)
+
+        fen_col = 'FEN of the position'
+        result_col = 'Result'
+        valid = df[[fen_col, result_col]].dropna()
+
+        entries: list[tuple[str, str]] = []
+        for _, row in valid.iterrows():
+            fen = str(row[fen_col]).strip()
+            label = str(row[result_col]).strip()
+            if fen and label and fen != 'nan' and label != 'nan':
+                entries.append((fen, label))
+
+        print(f"Evaluating {len(entries)} Fortressbase positions...")
+
+        with mp.Pool(
+            processes=num_processes,
+            initializer=init_worker,
+            initargs=(strategy, network, depth, num_nodes, checkpoint_path, _UCI_ENGINE_BIN.value)
+        ) as pool:
+            pbar = tqdm(
+                pool.imap(worker_evaluate_fortressbase, entries),
+                total=len(entries),
+                desc=f"Evaluating Fortressbase ({name})"
+            )
+
+            out_path = f'fortressbase-{name}.txt'
+            sum_values = 0.0
+            count_values = 0
+            with open(out_path, 'w') as f:
+                for res in pbar:
+                    f.write(str(res) + '\n')
+                    f.flush()
+                    val = res['result']
+                    if isinstance(val, float) and not math.isnan(val):
+                        sum_values += val
+                        count_values += 1
+                    pbar.set_postfix({
+                        'avg': f"{(sum_values / max(1, count_values)):.4f}",
+                    })
+
+        print(f"Results written to {out_path}")
+        if count_values > 0:
+            print(f"Average fortress score: {sum_values / count_values:.6f}")
+        else:
+            print("Average fortress score: NaN (no valid results)")
 
 
 if __name__ == '__main__':

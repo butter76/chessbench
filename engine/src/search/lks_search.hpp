@@ -161,7 +161,7 @@ public:
             }
         });
         
-        float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 20.0f;
+        float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 35.0f;
         float currentDepth = std::min(2.0f, maxDepth);
 
         chess::Movelist rootMoves;

@@ -262,7 +262,7 @@ public:
             co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
         }
 
-        if (rec_depth > 50) {
+        if (rec_depth > 100) {
             co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
         }
 

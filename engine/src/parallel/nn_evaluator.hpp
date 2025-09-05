@@ -403,7 +403,7 @@ private:
             release_trt();
             return;
         }
-        std::cout << "[NNEvaluator] TensorRT engine loaded from " << plan_path << "\n";
+        std::cerr << "[NNEvaluator] TensorRT engine loaded from " << plan_path << "\n";
 
         // Initialize CUDA Graphs for batch sizes 1..kBatchSize
         initialize_graphs();
@@ -450,7 +450,7 @@ private:
 
             if (!batch.empty()) {
                 if (is_batch_verbose()) {
-                    std::cout << "BATCHED " << batch.size() << " EVALS" << std::endl;
+                    std::cerr << "BATCHED " << batch.size() << " EVALS" << std::endl;
                 }
             }
 
@@ -525,7 +525,7 @@ private:
                     for (int i = 0; i < B; ++i) {
                         float score = (G.n_value >= static_cast<size_t>((i + 1))) ? host_values[static_cast<size_t>(i)] : 0.0f;
                         if (is_batch_verbose()) {
-                            std::cout << tokensToString(batch[static_cast<size_t>(i)].tokens) << " => " << score << std::endl;
+                            std::cerr << tokensToString(batch[static_cast<size_t>(i)].tokens) << " => " << score << std::endl;
                         }
                         EvalResult er;
                         er.value = score;
@@ -648,7 +648,7 @@ private:
                     for (int i = 0; i < B; ++i) {
                         float score = (n_value >= static_cast<size_t>((i + 1))) ? host_values[static_cast<size_t>(i)] : 0.0f;
                         if (is_batch_verbose()) {
-                            std::cout << tokensToString(batch[static_cast<size_t>(i)].tokens) << " => " << score << std::endl;
+                            std::cerr << tokensToString(batch[static_cast<size_t>(i)].tokens) << " => " << score << std::endl;
                         }
                         EvalResult er;
                         er.value = score;

@@ -249,8 +249,8 @@ int main(int argc, char **argv) {
                     }
                     options.set(name, "");
                 } else {
-                    // name = tokens[name_index..value_index-1]
-                    for (std::size_t i = name_index; i < value_index && i < tokens.size(); ++i) {
+                    // name = tokens[name_index..(value_index-2)] (exclude the literal "value")
+                    for (std::size_t i = name_index; (i + 1) < value_index && i < tokens.size(); ++i) {
                         if (!name.empty()) name.push_back(' ');
                         name += tokens[i];
                     }

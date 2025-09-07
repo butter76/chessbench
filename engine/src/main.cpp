@@ -224,11 +224,11 @@ int main(int argc, char **argv) {
             send_id();
             std::cout << "uciok" << '\n' << std::flush;
         } else if (line == "isready") {
-            // Initialize TensorRT only on the first isready
-            static bool trt_initialized_once = false;
-            if (!trt_initialized_once) {
+            // Initialize only on the first isready
+            static bool initialized_once = false;
+            if (!initialized_once) {
                 search.initialize();
-                trt_initialized_once = true;
+                initialized_once = true;
             }
             std::cout << "readyok" << '\n' << std::flush;
         } else if (line.rfind("setoption", 0) == 0) {

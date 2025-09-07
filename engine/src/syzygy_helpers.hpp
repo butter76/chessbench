@@ -10,19 +10,12 @@
 namespace engine::syzygy {
 
 // Probe Syzygy DTZ at root for <= 7 men positions. Returns best move if available.
-inline std::optional<chess::Move> probe_best_move(const chess::Board &board,
-                                                       const char *tb_path = "../syzygy_tables/3-4-5/") {
+inline std::optional<chess::Move> probe_best_move(const chess::Board &board) {
     const int piece_count = static_cast<int>(board.occ().count());
     if (piece_count < 3 || piece_count > 7) return std::nullopt;
 
     // Skip Syzygy probing if any castling rights are available; TBs don't account for castling
     if (!board.castlingRights().isEmpty()) return std::nullopt;
-
-    static bool tb_inited = false;
-    if (!tb_inited) {
-        (void)tb_init(tb_path);
-        tb_inited = true;
-    }
 
     const uint64_t bb_white   = board.us(chess::Color::WHITE).getBits();
     const uint64_t bb_black   = board.us(chess::Color::BLACK).getBits();
@@ -69,19 +62,12 @@ inline std::optional<chess::Move> probe_best_move(const chess::Board &board,
 
 // Probe WDL for positions with <=7 men and convert to engine value in [-1, 0, 1].
 // Blessed losses and cursed wins are treated as draws (0).
-inline std::optional<float> probe_wdl_value(const chess::Board &board,
-                                                  const char *tb_path = "../syzygy_tables/3-4-5/") {
+inline std::optional<float> probe_wdl_value(const chess::Board &board) {
     const int piece_count = static_cast<int>(board.occ().count());
     if (piece_count > 7) return std::nullopt;
 
     // Skip Syzygy probing if any castling rights are available; TBs don't account for castling
     if (!board.castlingRights().isEmpty()) return std::nullopt;
-
-    static bool tb_inited = false;
-    if (!tb_inited) {
-        (void)tb_init(tb_path);
-        tb_inited = true;
-    }
 
     const uint64_t bb_white   = board.us(chess::Color::WHITE).getBits();
     const uint64_t bb_black   = board.us(chess::Color::BLACK).getBits();

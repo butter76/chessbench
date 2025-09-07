@@ -100,10 +100,17 @@ public:
 
     chess::Board &getBoard() override { return board_; }
 
-    // Initialize TensorRT engine explicitly (e.g., after isready)
-    void initialize_trt() {
+    // Initialize engine explicitly (e.g., after isready)
+    void initialize() {
         evaluator_.initialize_trt();
         ensure_pool_built();
+        // Initialize Syzygy tablebases once using configured path
+        static std::once_flag tb_once_flag;
+        std::call_once(tb_once_flag, [this]() {
+            const std::string tb_path_opt = options_.get("syzygypath", "../syzygy_tables/3-4-5/");
+            const char *tb_path_cstr = tb_path_opt.empty() ? nullptr : tb_path_opt.c_str();
+            (void)tb_init(tb_path_cstr);
+        });
     }
 
     void stop() override {
@@ -129,10 +136,7 @@ public:
         }
 
         // Syzygy TB early exit for 3-5 men
-        // Syzygy path from options if provided
-        const std::string tb_path_opt = options_.get("syzygypath", "../syzygy_tables/3-4-5/");
-        const char *tb_path_cstr = tb_path_opt.empty() ? nullptr : tb_path_opt.c_str();
-        if (auto tb_move = engine::syzygy::probe_best_move(board_, tb_path_cstr)) {
+        if (auto tb_move = engine::syzygy::probe_best_move(board_)) {
             stat_tbhits_.fetch_add(1, std::memory_order_relaxed);
             return chess::uci::moveToUci(*tb_move);
         }

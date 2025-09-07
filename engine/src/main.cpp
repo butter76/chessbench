@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <cctype>
 #include <thread>
+#include <tbprobe.h>
 
 namespace {
 
@@ -226,7 +227,7 @@ int main(int argc, char **argv) {
             // Initialize TensorRT only on the first isready
             static bool trt_initialized_once = false;
             if (!trt_initialized_once) {
-                search.initialize_trt();
+                search.initialize();
                 trt_initialized_once = true;
             }
             std::cout << "readyok" << '\n' << std::flush;
@@ -283,6 +284,7 @@ int main(int argc, char **argv) {
         } else if (line == "quit") {
             search.stop();
             if (search_thread.joinable()) search_thread.join();
+            tb_free();
             break;
         } else if (line == "options") {
             // Non-standard debug helper: print all options as key=value (keys are stored lowercase)

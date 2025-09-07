@@ -223,8 +223,12 @@ int main(int argc, char **argv) {
             send_id();
             std::cout << "uciok" << '\n' << std::flush;
         } else if (line == "isready") {
-            // Initialize TensorRT now that options could have been set
-            search.initialize_trt();
+            // Initialize TensorRT only on the first isready
+            static bool trt_initialized_once = false;
+            if (!trt_initialized_once) {
+                search.initialize_trt();
+                trt_initialized_once = true;
+            }
             std::cout << "readyok" << '\n' << std::flush;
         } else if (line.rfind("setoption", 0) == 0) {
             // setoption name <id> [value <x>]

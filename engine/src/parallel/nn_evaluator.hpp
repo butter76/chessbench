@@ -43,7 +43,9 @@ struct EvalResult {
 
 class NNEvaluator {
 public:
-    static constexpr std::size_t kBatchSize = 25;
+    // Runtime-configurable maximum batch size, set during initialize_trt()
+    // Defaults to 25 if no option provided.
+    std::size_t max_batch_size_{25};
 
     NNEvaluator() = default;
 
@@ -114,7 +116,7 @@ private:
     nvinfer1::IExecutionContext* trt_context{nullptr};
     cudaStream_t trt_stream{};
 
-    // CUDA Graph caching per batch size 1..kBatchSize
+    // CUDA Graph caching per batch size 1..max_batch_size_
     struct BatchGraph {
         int batchSize{0};
         bool valid{false};
@@ -149,7 +151,7 @@ private:
         size_t bytes_U{0};
         size_t bytes_Q{0};
     };
-    std::array<BatchGraph, kBatchSize + 1> graphs_{}; // index by batch size
+    std::vector<BatchGraph> graphs_; // index by batch size
 
     void release_one_graph(BatchGraph& g) {
         if (g.graphExec) { cudaGraphExecDestroy(g.graphExec); g.graphExec = nullptr; }
@@ -177,6 +179,8 @@ private:
     }
 
     bool build_graph_for_batch(int B) {
+        if (B < 0) return false;
+        if (static_cast<size_t>(B) >= graphs_.size()) return false;
         BatchGraph& G = graphs_[static_cast<size_t>(B)];
         release_one_graph(G);
         if (!trt_context) return false;
@@ -268,7 +272,9 @@ private:
     void initialize_graphs() {
         // Ensure stream and context available
         if (!trt_context || !trt_stream) return;
-        for (int B = 1; B <= static_cast<int>(kBatchSize); ++B) {
+        // Prepare graphs_ storage for indices [0..max_batch_size_]
+        graphs_.assign(max_batch_size_ + 1, BatchGraph{});
+        for (int B = 1; B <= static_cast<int>(max_batch_size_); ++B) {
             bool ok = build_graph_for_batch(B);
             if (!ok) {
                 // Keep going; some batch sizes may be unsupported if outputs depend on B
@@ -405,7 +411,23 @@ private:
         }
         std::cerr << "[NNEvaluator] TensorRT engine loaded from " << plan_path << "\n";
 
-        // Initialize CUDA Graphs for batch sizes 1..kBatchSize
+        // Determine max batch size from options (only once)
+        if (options_) {
+            std::string bs = options_->get("batchsize", "");
+            if (!bs.empty()) {
+                try {
+                    unsigned long parsed = std::stoul(bs);
+                    if (parsed >= 1ul && parsed <= 1024ul) {
+                        max_batch_size_ = static_cast<std::size_t>(parsed);
+                    }
+                } catch (...) {
+                    // ignore invalid input, keep default
+                    std::cerr << "[NNEvaluator] Invalid batch size option: " << bs << "\n";
+                }
+            }
+        }
+
+        // Initialize CUDA Graphs for batch sizes 1..max_batch_size_
         initialize_graphs();
     }
 
@@ -431,14 +453,14 @@ private:
     void run(std::stop_token) {
         for (;;) {
             std::vector<Request> batch;
-            batch.reserve(kBatchSize);
+            batch.reserve(max_batch_size_);
             {
                 std::unique_lock<std::mutex> lock(mutex);
                 cv.wait(lock, [&]{ return stop.load() || !queue.empty(); });
                 if (stop.load() && queue.empty()) break;
                 // Prefer odd batch sizes when N>=10 by keeping one item in the queue if N is even
                 std::size_t available = queue.size();
-                std::size_t to_take = std::min<std::size_t>(available, kBatchSize);
+                std::size_t to_take = std::min<std::size_t>(available, max_batch_size_);
                 if (to_take >= 10 && (to_take % 2 == 0)) {
                     to_take -= 1;
                 }
@@ -471,7 +493,7 @@ private:
             if (trt_context && binding_idx_tokens >= 0 && binding_idx_value >= 0) {
                 const int B = static_cast<int>(batch.size());
                 // Use CUDA Graph if available for this batch size
-                if (B > 0 && B <= static_cast<int>(kBatchSize) && graphs_[static_cast<size_t>(B)].valid) {
+                if (B > 0 && B <= static_cast<int>(max_batch_size_) && static_cast<size_t>(B) < graphs_.size() && graphs_[static_cast<size_t>(B)].valid) {
                     BatchGraph& G = graphs_[static_cast<size_t>(B)];
                     // Pack tokens into pinned host input buffer
                     if (tokens_dtype == nvinfer1::DataType::kINT32) {

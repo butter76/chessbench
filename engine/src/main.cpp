@@ -4,7 +4,7 @@
 #include "search/random_search.hpp"
 #include "search/fixed_depth_search.hpp"
 #include "search/lks_search.hpp"
-#include "time/fixed_time.hpp"
+#include "time/uci_time.hpp"
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <cctype>
 #include <thread>
+#include <tbprobe.h>
 
 namespace {
 
@@ -27,8 +28,18 @@ struct PositionCache {
 PositionCache g_pos_cache;
 
 void send_id() {
-    std::cout << "id name SearchlessRandom" << '\n';
-    std::cout << "id author Searchless" << '\n';
+    std::cout << "id name CatGPT" << '\n';
+    std::cout << "id author Nikhil Reddy (butter)" << '\n';
+    // Advertise configurable options
+    std::cout << "option name Network type string default ./p2.plan" << '\n';
+    // Threads option (default to hardware concurrency if available)
+    unsigned int hc = std::thread::hardware_concurrency();
+    if (hc == 0u) hc = 32u;
+    std::cout << "option name Threads type spin default " << hc << " min 1 max 512" << '\n';
+    // Syzygy tablebase root path
+    std::cout << "option name SyzygyPath type string default ../syzygy_tables/3-4-5/" << '\n';
+    // ForceAllChildrenOnPVDepth: force expanding all children while pv_depth < N
+    std::cout << "option name ForceAllChildrenOnPVDepth type spin default 2 min 0 max 16" << '\n';
 }
 
 std::vector<std::string> split(const std::string &line) {
@@ -201,9 +212,9 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Instantiate search with a simple fixed time handler (e.g., 50ms per move)
-    engine::FixedTime fixed_time_handler(50);
-    engine::LksSearch search(options, &fixed_time_handler);
+    // Instantiate search with UCI time handler (obeys go movetime/wtime/btime, etc.)
+    engine::UciTimeHandler time_handler;
+    engine::LksSearch search(options, &time_handler);
     std::jthread search_thread; // background search thread
 
     std::ios::sync_with_stdio(false);
@@ -215,6 +226,12 @@ int main(int argc, char **argv) {
             send_id();
             std::cout << "uciok" << '\n' << std::flush;
         } else if (line == "isready") {
+            // Initialize only on the first isready
+            static bool initialized_once = false;
+            if (!initialized_once) {
+                search.initialize();
+                initialized_once = true;
+            }
             std::cout << "readyok" << '\n' << std::flush;
         } else if (line.rfind("setoption", 0) == 0) {
             // setoption name <id> [value <x>]
@@ -235,8 +252,8 @@ int main(int argc, char **argv) {
                     }
                     options.set(name, "");
                 } else {
-                    // name = tokens[name_index..value_index-1]
-                    for (std::size_t i = name_index; i < value_index && i < tokens.size(); ++i) {
+                    // name = tokens[name_index..(value_index-2)] (exclude the literal "value")
+                    for (std::size_t i = name_index; (i + 1) < value_index && i < tokens.size(); ++i) {
                         if (!name.empty()) name.push_back(' ');
                         name += tokens[i];
                     }
@@ -269,6 +286,7 @@ int main(int argc, char **argv) {
         } else if (line == "quit") {
             search.stop();
             if (search_thread.joinable()) search_thread.join();
+            tb_free();
             break;
         } else if (line == "options") {
             // Non-standard debug helper: print all options as key=value (keys are stored lowercase)

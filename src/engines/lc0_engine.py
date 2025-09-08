@@ -29,6 +29,7 @@ class Lc0Network(str, Enum):
   T82 = 't82',
   BT4 = 'bt4',
   BT3 = 'bt3',
+  BT5 = 'bt5',
   LS15 = 'ls15',
 
 class Lc0Engine(engine.Engine):
@@ -60,6 +61,8 @@ class Lc0Engine(engine.Engine):
       network_path = '../lc0/build/release/BT4-1740.pb'
     elif network == Lc0Network.BT3:
       network_path = '../lc0/build/release/BT3-768x15x24h-swa-2790000.pb'
+    elif network == Lc0Network.BT5:
+      network_path = '../lc0/build/release/BT5-1024x15x32h-rpe-swa-3700000.pb'
     elif network == Lc0Network.LS15:
       network_path = '../lc0/build/release/LS15-20x256SE-jj-9-75000000.pb'
     else:
@@ -68,7 +71,7 @@ class Lc0Engine(engine.Engine):
         os.getcwd(),
         network_path,
     )
-    options = [f'--weights={weights_path}']
+    options = [f'--weights={weights_path}', '--backend-opts=policy_head=optimistic']
     self._raw_engine = chess.engine.SimpleEngine.popen_uci(
         command=[bin_path] + options,
     )

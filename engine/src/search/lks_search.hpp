@@ -2,7 +2,6 @@
 
 #include "search_algo.hpp"
 #include "../parallel/nn_evaluator.hpp"
-#include "../parallel/thread_pool.hpp"
 #include "../tokenizer.hpp"
 #include "lks_node.hpp"
 
@@ -20,64 +19,120 @@
 #include <chrono>
 #include <sstream>
 #include <iomanip>
+#include <unordered_map>
+#include <mutex>
+#include <array>
+#include <string>
+#include <algorithm>
+#include <tbb/concurrent_hash_map.h>
+
+// Syzygy helpers
+#include "../syzygy_helpers.hpp"
+
+#include <cppcoro/task.hpp>
+#include <cppcoro/sync_wait.hpp>
+#include <cppcoro/static_thread_pool.hpp>
+#include <cppcoro/async_manual_reset_event.hpp>
+#include <cppcoro/when_all_ready.hpp>
 
 namespace engine {
+constexpr float IT_DEPTH_STEP = 0.2f;
+constexpr float RE_SEARCH_DEPTH = IT_DEPTH_STEP;
+constexpr float IMPROVER_POLICY_INCREASE = RE_SEARCH_DEPTH / 2;
 
-// Minimal coroutine Task used to bridge awaitable to blocking waiting
-struct LksTaskVoid {
-    struct promise_type {
-        LksTaskVoid get_return_object() noexcept { return LksTaskVoid{std::coroutine_handle<promise_type>::from_promise(*this)}; }
-        std::suspend_always initial_suspend() const noexcept { return {}; }
-        std::suspend_always final_suspend() const noexcept { return {}; }
-        void unhandled_exception() { std::terminate(); }
-        void return_void() noexcept {}
-    };
-    std::coroutine_handle<promise_type> coro;
-    explicit LksTaskVoid(std::coroutine_handle<promise_type> h) : coro(h) {}
-    LksTaskVoid(LksTaskVoid&& other) noexcept : coro(std::exchange(other.coro, {})) {}
-    LksTaskVoid(const LksTaskVoid&) = delete;
-    LksTaskVoid& operator=(LksTaskVoid&& other) noexcept {
-        if (this != &other) {
-            if (coro) coro.destroy();
-            coro = std::exchange(other.coro, {});
-        }
-        return *this;
-    }
-    ~LksTaskVoid() { if (coro) coro.destroy(); }
-};
+// Using cppcoro::task for async operations
 
 class LksSearch : public SearchAlgo {
 public:
     explicit LksSearch(engine::Options &options, const engine::TimeHandler *time_handler)
         : SearchAlgo(options, time_handler), board_(), evaluator_(options) {
         evaluator_.start();
+        ensure_pool_built();
     }
 
     ~LksSearch() override {
         evaluator_.stop_and_join();
     }
 
-    void reset() override { board_ = chess::Board(); root_.reset(); }
+    void reset() override {
+        board_ = chess::Board();
+        root_.reset();
+        // Clear eval cache
+        eval_cache_.clear();
+        // Clear transposition table
+        tt_.clear();
+    }
 
     void makemove(const std::string &uci) override {
         const chess::Move move = chess::uci::uciToMove(board_, uci);
-        if (move != chess::Move::NO_MOVE) {
-            board_.makeMove(move);
-        } else {
-            chess::Movelist legal;
-            chess::movegen::legalmoves(legal, board_);
-            for (const auto &m : legal) {
-                if (chess::uci::moveToUci(m) == uci) { board_.makeMove(m); break; }
-            }
+        if (move == chess::Move::NO_MOVE) {
+            root_.reset();
+            tt_.clear();
+            return;
         }
-        root_.reset();
+
+        // Always update the board state
+        board_.makeMove(move);
+
+        // Clear the TT if the board has repeated as we have 2-fold repetition on
+        if (board_.isRepetition(1)) {
+            tt_.clear();
+        }
+
+        // If we have a search tree, try to advance the root to the played move
+        if (root_) {
+            for (auto &entry : root_->policy) {
+                if (entry.move == move) {
+                    if (entry.child) {
+                        // Re-root the tree by taking ownership of the child's subtree
+                        root_ = std::move(entry.child);
+                    } else {
+                        // No existing subtree for this move; cannot reuse
+                        root_.reset();
+                    }
+                    return;
+                }
+            }
+            // Move not found among root's known policy entries; drop the old tree
+            root_.reset();
+        }
     }
 
     chess::Board &getBoard() override { return board_; }
 
-    void stop() override { stop_requested_.store(true, std::memory_order_release); }
+    // Initialize engine explicitly (e.g., after isready)
+    void initialize() {
+        evaluator_.initialize_trt();
+        ensure_pool_built();
+        // Read configurable PV depth threshold for forcing all children expansion
+        {
+            int parsed = 2;
+            try {
+                const std::string opt = options_.get("forceallchildrenonpvdepth", "2");
+                parsed = std::stoi(opt);
+            } catch (...) {
+                parsed = 2;
+            }
+            if (parsed < 0) parsed = 0;
+            if (parsed > 16) parsed = 16;
+            force_all_children_on_pv_depth_ = parsed;
+        }
+        // Initialize Syzygy tablebases once using configured path
+        static std::once_flag tb_once_flag;
+        std::call_once(tb_once_flag, [this]() {
+            const std::string tb_path_opt = options_.get("syzygypath", "../syzygy_tables/3-4-5/");
+            const char *tb_path_cstr = tb_path_opt.empty() ? nullptr : tb_path_opt.c_str();
+            (void)tb_init(tb_path_cstr);
+        });
+    }
+
+    void stop() override {
+        stop_requested_.store(true, std::memory_order_release);
+        evaluator_.cancelQueue();
+    }
 
     std::string searchBestMove(const Limits &limits) override {
+        ensure_pool_built();
         stop_requested_.store(false, std::memory_order_release);
         // Reset per-search statistics
         stat_gpu_evaluations_.store(0, std::memory_order_relaxed);
@@ -85,43 +140,86 @@ public:
         stat_tbhits_.store(0, std::memory_order_relaxed);
         stat_tthits_.store(0, std::memory_order_relaxed);
         stat_seldepth_.store(0, std::memory_order_relaxed);
+        stat_parent_nodes_.store(0, std::memory_order_relaxed);
         // Mark search start time
         {
             using namespace std::chrono;
             const std::int64_t now_ns = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
             stat_search_start_ns_.store(now_ns, std::memory_order_relaxed);
         }
-        float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 30.0f;
+
+        // Syzygy TB early exit for 3-5 men
+        if (auto tb_move = engine::syzygy::probe_best_move(board_)) {
+            stat_tbhits_.fetch_add(1, std::memory_order_relaxed);
+            return chess::uci::moveToUci(*tb_move);
+        }
+        
+        // Establish time budgets (only if time controls are provided)
+        engine::TimeHandler::TimeBudget budget{};
+        const bool has_time_limits = (limits.movetime_ms > 0ULL) || (limits.wtime_ms > 0ULL) || (limits.btime_ms > 0ULL);
+        if (time_handler_ != nullptr && has_time_limits && !limits.infinite) {
+            budget = time_handler_->selectTimeBudget(limits, board_.sideToMove());
+        }
+        using clock = std::chrono::steady_clock;
+        const clock::time_point start_tp = clock::now();
+        const clock::time_point soft_deadline = (budget.soft_ms > 0ULL) ? (start_tp + std::chrono::milliseconds(budget.soft_ms)) : clock::time_point::max();
+        const clock::time_point hard_deadline = (budget.hard_ms > 0ULL) ? (start_tp + std::chrono::milliseconds(budget.hard_ms)) : clock::time_point::max();
+        // Watchdog to enforce hard deadline by triggering stop()
+        std::jthread watchdog([this, hard_deadline](std::stop_token st){
+            if (hard_deadline == std::chrono::steady_clock::time_point::max()) return;
+            for (;;) {
+                if (st.stop_requested()) break;
+                if (std::chrono::steady_clock::now() >= hard_deadline) {
+                    this->stop();
+                    std::cout << "info string hard deadline reached\n" << std::flush;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
+        
+        float maxDepth = (limits.depth > 0) ? static_cast<float>(limits.depth) : 35.0f;
         float currentDepth = std::min(2.0f, maxDepth);
 
         chess::Movelist rootMoves;
         chess::movegen::legalmoves(rootMoves, board_);
         if (rootMoves.empty()) return "0000";
 
-        chess::Move bestMove = chess::Move::NO_MOVE;
         float bestScore = -std::numeric_limits<float>::infinity();
         if (!root_) {
-            root_ = std::make_unique<LKSNode>(create_node(board_));
+            auto rootMaybe = cppcoro::sync_wait(create_node(board_));
+            if (!rootMaybe) {
+                // Fallback: return the first legal move
+                return chess::uci::moveToUci(rootMoves[0]);
+            }
+            LKSNode rootNode = std::move(*rootMaybe);
+            root_ = std::make_unique<LKSNode>(std::move(rootNode));
         }
-        while (currentDepth <= maxDepth + 1e-6f) {
+        
+        while (currentDepth <= maxDepth + 1e-2f) {
+            if (clock::now() >= hard_deadline) { stop(); break; }
             if (stop_requested_.load(std::memory_order_acquire)) break;
             if (!node_limit_check(limits)) break;
-            auto [score, move, aborted] = lks_root(*root_, currentDepth, -1.0f, 1.0f);
+            auto [score, move, aborted] = cppcoro::sync_wait([&]() -> cppcoro::task<RootResult> {
+                co_await pool_->schedule();
+                co_return co_await lks_root(*root_, board_, currentDepth, -1.0f, 1.0f);
+            }());
             if (aborted) break;
             bestScore = score;
-            if (move != chess::Move::NO_MOVE) bestMove = move;
             // Emit UCI info line for this iteration
             print_info_line(currentDepth, bestScore);
-            currentDepth += 0.2f;
+            currentDepth += IT_DEPTH_STEP;
+            // Respect soft deadline: finish current iteration then exit
+            if (clock::now() >= soft_deadline) break;
         }
 
-        if (bestMove == chess::Move::NO_MOVE) {
+        if (root_->bestMove == chess::Move::NO_MOVE) {
             if (root_ && !root_->policy.empty()) {
                 return chess::uci::moveToUci(root_->policy[0].move);
             }
             return "0000";
         }
-        return chess::uci::moveToUci(bestMove);
+        return chess::uci::moveToUci(root_->bestMove);
     }
 
     // Statistics API (thread-safe)
@@ -131,6 +229,10 @@ public:
 
     std::uint64_t getNodesCreatedCount() const {
         return stat_nodes_created_.load(std::memory_order_relaxed);
+    }
+
+    std::uint64_t getParentNodesCount() const {
+        return stat_parent_nodes_.load(std::memory_order_relaxed);
     }
 
     int getSelDepth() const {
@@ -161,15 +263,37 @@ public:
 
     struct SearchOutcome { float score; chess::Move bestMove; bool aborted; };
 
-    SearchOutcome pvs_search(LKSNode& node, float depth, float alpha, float beta, NodeType node_type, bool want_move, int rec_depth = 0) {
-        if (stop_requested_.load(std::memory_order_acquire)) return {0.0f, chess::Move::NO_MOVE, true};
+    struct Phase2ChildResult {
+        bool aborted;
+        bool cutoff;
+        float alpha_out;
+        float score;
+        chess::Move move;
+        bool is_improver;
+    };
+
+    cppcoro::task<SearchOutcome> lks_search(LKSNode& node, const chess::Board &board, float depth, float alpha, float beta, NodeType node_type, int rec_depth = 0, int pv_depth = 0, bool root = false) {
+        if (stop_requested_.load(std::memory_order_acquire)) co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, true};
 
         if (node.terminal || node.policy.empty()) {
-            return {node.value, chess::Move::NO_MOVE, false};
+            co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
         }
 
-        if (rec_depth > 50) {
-            return {node.value, chess::Move::NO_MOVE, false};
+        if (rec_depth > 100) {
+            co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
+        }
+
+        // During search, use 2-fold repetition, but don't allow it for the root node
+        if (board.isRepetition(1) && !root) {
+            co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, false};
+        }
+
+        const float alpha0 = alpha;
+        const float beta0 = beta;
+
+        // Transposition Table probe (after recursion depth guard)
+        if (auto tt_score = query_tt(board, alpha0, beta0, depth)) {
+            co_return SearchOutcome{*tt_score, chess::Move::NO_MOVE, false};
         }
 
         // Ensure policy is sorted and normalized before expansion
@@ -199,10 +323,12 @@ public:
         }
         if (is_leaf_node(node)) {
             if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + node_depth_reduction) {
-                return {node.value, chess::Move::NO_MOVE, false};
+                update_tt(board, alpha0, beta0, depth, node.value);
+                co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
             }
 
             // First expansion bookkeeping: update maximum selective depth
+            stat_parent_nodes_.fetch_add(1, std::memory_order_relaxed);
             const int new_seldepth = rec_depth + 1;
             int observed = stat_seldepth_.load(std::memory_order_relaxed);
             if (new_seldepth > observed) {
@@ -236,7 +362,7 @@ public:
                 const float local_reduction = -2.0f * std::log(pe.U + 1e-6f);
                 if (new_depth <= local_reduction) {
                     if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
-                        should_filter = true;
+                        should_filter = !(pv_depth < force_all_children_on_pv_depth_) && !root;
                     }
                 }
             }
@@ -244,46 +370,63 @@ public:
             total_weight += move_weight;
         }
 
-        // Phase 2: for each filtered child, ensure child exists, run initial search, collect improvers (i>0)
-        const float RE_SEARCH_DEPTH = 0.2f;
+        // Phase 2: for each filtered child, ensure child exists, run initial search
+        // Jamboree-style: i==0 sequential, others in parallel without beta cutoffs
         std::vector<std::size_t> improver_indices;
         improver_indices.reserve(filtered_indices.size());
 
-        for (std::size_t idx_pos = 0; idx_pos < filtered_indices.size(); ++idx_pos) {
-            std::size_t i = filtered_indices[idx_pos];
-            auto &pe = node.policy[i];
-
-            // Create child and backprop if needed
-            if (!pe.child) {
-                chess::Board child_board = node.board;
-                child_board.makeMove(pe.move);
-                pe.child = std::make_unique<LKSNode>(create_node(child_board));
-                backpropagate_policy_updates(node, *pe.child, pe.move);
+        if (!filtered_indices.empty()) {
+            std::size_t i0 = filtered_indices[0];
+            float depth0 = new_depths[i0];
+            auto r0 = co_await process_phase2_child(node, board, i0, depth0, alpha, beta, node_type, rec_depth, pv_depth);
+            if (r0.aborted) co_return SearchOutcome{0.0f, bestMove, true};
+            alpha = r0.alpha_out;
+            bestScore = r0.score;
+            bestMove = r0.move;
+            if (r0.cutoff) {
+                update_tt(board, alpha0, beta0, depth, bestScore);
+                node.bestMove = bestMove;
+                co_return SearchOutcome{bestScore, bestMove, false};
             }
 
-            float new_depth = new_depths[i];
-            float search_alpha = (i == 0) ? -beta : -alpha - NULL_EPS;
-            float search_beta = -alpha;
-            NodeType next_type;
-            if (i == 0 && node_type == NodeType::PV) next_type = NodeType::PV;
-            else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
-            else next_type = NodeType::CUT;
+            // Launch parallel searches for remaining children as coroutine tasks
+            std::vector<std::size_t> non_first_indices;
+            non_first_indices.reserve(filtered_indices.size() > 0 ? filtered_indices.size() - 1 : 0);
+            std::vector<cppcoro::task<Phase2ChildResult>> tasks;
+            tasks.reserve(filtered_indices.size() > 0 ? filtered_indices.size() - 1 : 0);
 
-            auto child_out = pvs_search(*pe.child, new_depth, search_alpha, search_beta, next_type, false, rec_depth + 1);
-            if (child_out.aborted) return {0.0f, bestMove, true};
-            float score = -child_out.score;
+            const float alpha_after_first = alpha;
+            for (std::size_t idx_pos = 1; idx_pos < filtered_indices.size(); ++idx_pos) {
+                std::size_t i = filtered_indices[idx_pos];
+                float nd = new_depths[i];
+                non_first_indices.push_back(i);
+                tasks.push_back(process_phase2_child(node, board, i, nd, alpha_after_first, beta, node_type, rec_depth, pv_depth));
+            }
 
-            // Use the first move to seed initial values
-            if (i == 0) {
-                if (score > alpha) alpha = score;
-                bestScore = score;
-                bestMove = pe.move;
-                if (score >= beta) {
-                    return {bestScore, bestMove, false};
+            // Await completion of all non-first children without blocking pool threads
+            if (!tasks.empty()) {
+                auto ready = co_await cppcoro::when_all_ready(std::move(tasks));
+                for (std::size_t t = 0; t < ready.size(); ++t) {
+                    Phase2ChildResult r = std::move(ready[t]).result();
+                    if (r.aborted) co_return SearchOutcome{0.0f, bestMove, true};
+                    if (r.is_improver) {
+                        improver_indices.push_back(non_first_indices[t]);
+                    }
                 }
-            } else {
-                if (score > alpha) {
-                    improver_indices.push_back(i);
+            }
+        }
+
+        // Reorder improvers: prioritize current bestMove if present and multiple improvers exist
+        if (improver_indices.size() > 1) {
+            chess::Move currentBest = node.bestMove;
+            if (currentBest != chess::Move::NO_MOVE) {
+                auto it = std::find_if(improver_indices.begin(), improver_indices.end(), [&](std::size_t idx) {
+                    return node.policy[idx].move == currentBest;
+                });
+                if (it != improver_indices.end() && it != improver_indices.begin()) {
+                    std::size_t idxVal = *it;
+                    improver_indices.erase(it);
+                    improver_indices.insert(improver_indices.begin(), idxVal);
                 }
             }
         }
@@ -294,27 +437,39 @@ public:
             auto &pe = node.policy[i];
             float new_depth = new_depths[i];
             float score = std::numeric_limits<float>::infinity();
-            int re_search_count = 0;
+            int re_search_count = 1;
+            new_depth += RE_SEARCH_DEPTH;
+
+            if (root) {
+                std::ostringstream oss;
+                oss << "info string re-searching improver " << chess::uci::moveToUci(pe.move) << " at nodes " << getGpuEvaluationsCount();
+                std::cout << oss.str() << '\n' << std::flush;
+            }
 
             // Continue incremental null-window searches until reaching best_move_depth
             while (score > alpha && new_depth < best_move_depth) {
                 // Increment depth
-                new_depth += RE_SEARCH_DEPTH;
-                if (new_depth >= best_move_depth) new_depth = best_move_depth + RE_SEARCH_DEPTH;
-                re_search_count += 1;
 
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
-                auto child_out = pvs_search(*pe.child, new_depth, -alpha - NULL_EPS, -alpha, next_type, false, rec_depth + 1);
-                if (child_out.aborted) return {0.0f, bestMove, true};
+                chess::Board child_board = board;
+                child_board.makeMove(pe.move);
+                int child_pv_depth = pv_depth + ((next_type != NodeType::PV) ? 1 : 0);
+                auto child_out = co_await lks_search(*pe.child, child_board, new_depth, -alpha - NULL_EPS, -alpha, next_type, rec_depth + 1, child_pv_depth);
+                if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
+                new_depth += RE_SEARCH_DEPTH;
+                re_search_count += 1;
             }
 
             // If still improving alpha, do full-window re-search
             if (score > alpha) {
                 NodeType next_type = (node_type == NodeType::CUT) ? NodeType::ALL : NodeType::CUT;
                 NodeType fw_type = (node_type == NodeType::PV) ? NodeType::PV : next_type;
-                auto child_out = pvs_search(*pe.child, new_depth, -beta, -alpha, fw_type, false, rec_depth + 1);
-                if (child_out.aborted) return {0.0f, bestMove, true};
+                int fw_pv_depth = pv_depth + ((fw_type != NodeType::PV) ? 1 : 0);
+                chess::Board child_board = board;
+                child_board.makeMove(pe.move);
+                auto child_out = co_await lks_search(*pe.child, child_board, new_depth, -beta, -alpha, fw_type, rec_depth + 1, fw_pv_depth);
+                if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
             }
 
@@ -323,239 +478,83 @@ public:
             if (node_type == NodeType::CUT && score > alpha) {
                 new_policy = pe.policy * std::exp(re_search_count * RE_SEARCH_DEPTH);
             } else {
-                new_policy = pe.policy + 0.1f;
+                new_policy = pe.policy + IMPROVER_POLICY_INCREASE;
                 if (!(score > alpha)) {
                     float clip = std::max(node.policy[0].policy * 0.98f, pe.policy);
                     new_policy = std::min(new_policy, clip);
                 }
             }
+            if (score > alpha) {
+                if (root) {
+                    std::ostringstream oss;
+                    oss << "info string successfully re-searched improver " << chess::uci::moveToUci(pe.move) << " at nodes " << getGpuEvaluationsCount();
+                    std::cout << oss.str() << '\n' << std::flush;
+                }
+            }
             pe.policy = new_policy;
-            if (new_depth > best_move_depth) best_move_depth = new_depth; // TODO: This line is suspicious
 
             // After finishing this child's re-searches, update global alpha
             if (score > alpha) alpha = score;
             if (score > bestScore) {
                 bestScore = score;
                 bestMove = pe.move;
+                node.bestMove = bestMove; // update bestMove immediately in case of an abort
             }
             if (score >= beta) {
-                return {bestScore, bestMove, false};
+                update_tt(board, alpha0, beta0, depth, bestScore);
+                node.bestMove = bestMove;
+                co_return SearchOutcome{bestScore, bestMove, false};
             }
         }
 
-        return {bestScore, bestMove, false};
+        update_tt(board, alpha0, beta0, depth, bestScore);
+        node.bestMove = bestMove;
+        co_return SearchOutcome{bestScore, bestMove, false};
     }
 
-    RootResult lks_root(LKSNode& root, float depth, float alpha, float beta) {
-        auto out = pvs_search(root, depth, alpha, beta, NodeType::PV, true, 0);
-        return {out.score, out.bestMove, out.aborted};
-    }
-
-    float lks(LKSNode& node, float depth, float alpha, float beta, bool& aborted, NodeType node_type) {
-        auto out = pvs_search(node, depth, alpha, beta, node_type, false, 0);
-        aborted = out.aborted;
-        return out.score;
+    cppcoro::task<RootResult> lks_root(LKSNode& root, const chess::Board &board, float depth, float alpha, float beta) {
+        auto out = co_await lks_search(root, board, depth, alpha, beta, NodeType::PV, 0, 0, true);
+        co_return RootResult{out.score, out.bestMove, out.aborted};
     }
 
 private:
-    chess::Board board_;
-    std::atomic<bool> stop_requested_{false};
-    engine_parallel::NNEvaluator evaluator_;
-    std::unique_ptr<engine_parallel::ThreadPool> pool_;
-    std::unique_ptr<LKSNode> root_;
-    std::atomic<std::uint64_t> stat_gpu_evaluations_{0};
-    std::atomic<std::uint64_t> stat_nodes_created_{0};
-    std::atomic<int> stat_seldepth_{0};
-    std::atomic<std::uint64_t> stat_tbhits_{0};
-    std::atomic<std::uint64_t> stat_tthits_{0};
-    std::atomic<std::int64_t> stat_search_start_ns_{0};
+    // --- GPU evaluation cache ---
+    struct CachedPolicyEntry { chess::Move move; float policy; float U; float Q; };
+    struct CachedNodeData { float value; std::vector<CachedPolicyEntry> entries; float node_U; };
+    struct NodeBuildResult { float value; std::vector<LKSPolicyEntry> entries; float node_U; };
 
-    // --- Helpers for UCI info output ---
-    void print_info_line(float depth, float bestScore) {
-        std::ostringstream oss;
-        // depth with fractional display
-        oss << "info depth " << std::fixed << std::setprecision(1) << depth;
-        // seldepth
-        oss << " seldepth " << getSelDepth();
-        // multipv always 1
-        oss << " multipv 1";
-        // score in centipawns using expected reward -> cp mapping
-        int score_cp = static_cast<int>(std::lround(std::tan(static_cast<double>(bestScore) * 1.563754) * 90.0));
-        oss << " score cp " << score_cp;
-        // nodes and nps
-        std::uint64_t nodes = getNodesCreatedCount();
-        oss << " nodes " << nodes;
-        std::uint64_t ms = getElapsedTimeMs();
-        std::uint64_t nps = (ms == 0) ? nodes : (nodes * 1000ULL) / ms;
-        oss << " nps " << nps;
-        // tbhits and time
-        oss << " tbhits " << getTBHitsCount();
-        oss << " time " << ms;
-        // pv line
-        std::string pv_line = build_pv_line();
-        if (!pv_line.empty()) {
-            oss << " pv " << pv_line;
+    struct StringHashCompare {
+        std::size_t hash(const std::string &s) const noexcept {
+            return std::hash<std::string>{}(s);
         }
-        std::cout << oss.str() << '\n';
-    }
-
-    std::string build_pv_line() const {
-        if (!root_) return {};
-        const LKSNode *node = root_.get();
-        std::ostringstream pv;
-        bool first = true;
-        while (node && !node->policy.empty()) {
-            const auto &pe = node->policy[0];
-            if (pe.move == chess::Move::NO_MOVE) break;
-            if (!first) pv << ' ';
-            pv << chess::uci::moveToUci(pe.move);
-            first = false;
-            if (pe.child) node = pe.child.get(); else break;
+        bool equal(const std::string &lhs, const std::string &rhs) const noexcept {
+            return lhs == rhs;
         }
-        return pv.str();
-    }
+    };
 
-    // Check node/evaluation limits for early termination
-    bool node_limit_check(const Limits &limits) const {
-        if (limits.nodes == 0ULL) return true; // no explicit node limit set
-        const std::uint64_t evals = stat_gpu_evaluations_.load(std::memory_order_relaxed);
-        // Continue while GPU evals remain under 95% of the node limit
-        return evals * 100ULL < limits.nodes * 95ULL;
-    }
+    using EvalCacheMap = tbb::concurrent_hash_map<std::string, CachedNodeData, StringHashCompare>;
+    EvalCacheMap eval_cache_;
 
-    // coroutine to await eval then set promise
-    LksTaskVoid evalTask(const std::array<std::uint8_t, 68> tokens, std::promise<engine_parallel::EvalResult> *p) {
-        engine_parallel::EvalAwaitable awaitable{&evaluator_, pool_.get(), tokens};
-        engine_parallel::EvalResult res = co_await awaitable;
-        p->set_value(res);
-        co_return;
-    }
-
-    std::optional<engine_parallel::EvalResult> evaluateFullBlocking(const chess::Board &b) {
-        if (stop_requested_.load(std::memory_order_acquire)) return std::nullopt;
-        auto tokens = engine_tokenizer::tokenizeBoard(b);
-        std::promise<engine_parallel::EvalResult> prom;
-        std::future<engine_parallel::EvalResult> fut = prom.get_future();
-        LksTaskVoid t = evalTask(tokens, &prom);
-        auto h = t.coro;
-        t.coro = {};
-        h.resume();
-        engine_parallel::EvalResult res = fut.get();
-        if (res.canceled || stop_requested_.load(std::memory_order_acquire)) {
-            return std::nullopt;
+    std::optional<NodeBuildResult> try_load_from_cache(const std::string &fen) {
+        EvalCacheMap::const_accessor acc;
+        if (!eval_cache_.find(acc, fen)) return std::nullopt;
+        const CachedNodeData &c = acc->second;
+        std::vector<LKSPolicyEntry> entries;
+        entries.reserve(c.entries.size());
+        for (const auto &ce : c.entries) {
+            LKSPolicyEntry e;
+            e.move = ce.move;
+            e.policy = ce.policy;
+            e.U = ce.U;
+            e.Q = ce.Q;
+            e.child = nullptr;
+            entries.push_back(std::move(e));
         }
-        stat_gpu_evaluations_.fetch_add(1, std::memory_order_relaxed);
-        return res;
+        return NodeBuildResult{c.value, std::move(entries), c.node_U};
     }
 
-    std::optional<float> evaluateBlocking(const chess::Board &b) {
-        if (stop_requested_.load(std::memory_order_acquire)) return std::nullopt;
-        auto tokens = engine_tokenizer::tokenizeBoard(b);
-        std::promise<engine_parallel::EvalResult> prom;
-        std::future<engine_parallel::EvalResult> fut = prom.get_future();
-        LksTaskVoid t = evalTask(tokens, &prom);
-        auto h = t.coro;
-        t.coro = {};
-        h.resume();
-        engine_parallel::EvalResult res = fut.get();
-        if (res.canceled || stop_requested_.load(std::memory_order_acquire)) {
-            return std::nullopt;
-        }
-        stat_gpu_evaluations_.fetch_add(1, std::memory_order_relaxed);
-        return res.value;
-    }
-
-    void sort_and_normalize(LKSNode &node) {
-        std::sort(node.policy.begin(), node.policy.end(), [](const LKSPolicyEntry &a, const LKSPolicyEntry &b){ return a.policy > b.policy; });
-        float sum = 0.0f;
-        for (const auto &e : node.policy) sum += e.policy;
-        if (sum > 0.0f) {
-            for (auto &e : node.policy) e.policy = e.policy / sum;
-        }
-    }
-
-    void backpropagate_policy_updates(LKSNode &parent, const LKSNode &child, const chess::Move &move) {
-        // Find entry for move in parent
-        for (auto &entry : parent.policy) {
-            if (entry.move == move) {
-                const float parent_to_node_policy = entry.policy;
-                const float parent_Q_for_child = entry.Q;
-                // Child value is from child's perspective; flip to parent's
-                const float child_from_parent_perspective = -child.value;
-                const float backup = (child_from_parent_perspective - parent_Q_for_child) / (parent.value + 1.01f);
-                const float new_policy_prob = parent_to_node_policy * std::exp(backup);
-                entry.policy = new_policy_prob;
-                // TODO: sanity check this backprop
-                return;
-            }
-        }
-    }
-
-    static inline int fileCharToIndex(char f) { return static_cast<int>(f - 'a'); }
-    static inline int rankCharToIndex(char r) { return static_cast<int>(r - '1'); }
-    static inline int squareIndexFromFileRank(char file_c, char rank_c) {
-        int file = fileCharToIndex(file_c);
-        int rank = rankCharToIndex(rank_c);
-        return rank * 8 + file;
-    }
-    static inline int mirrorSquareIndex(int sq) {
-        int file = sq % 8;
-        int rank = sq / 8;
-        int mirroredRank = 7 - rank;
-        return mirroredRank * 8 + file;
-    }
-    static inline int parseSquareOriented(const std::string &sq, bool flip) {
-        // sq like "e2". If flip == false, mirror across horizontal axis; else normal
-        int idx = squareIndexFromFileRank(sq[0], sq[1]);
-        return flip ? idx : mirrorSquareIndex(idx);
-    }
-    static inline std::pair<int,int> move_to_indices(const chess::Move &mv, bool flip) {
-        std::string uci = chess::uci::moveToUci(mv);
-        int s1 = parseSquareOriented(uci.substr(0,2), flip);
-        // promotion handling for r, b, n
-        int s2;
-        if (uci.size() == 5 && (uci[4] == 'r' || uci[4] == 'b' || uci[4] == 'n')) {
-            char prom = uci[4];
-            char src_file = uci[0];
-            char dst_file = uci[2];
-            int left_idx = -1, fwd_idx = -1, right_idx = -1;
-            if (prom == 'r') { left_idx = mirrorSquareIndex(0); fwd_idx = 64; right_idx = mirrorSquareIndex(5); }
-            else if (prom == 'b') { left_idx = mirrorSquareIndex(1); fwd_idx = 65; right_idx = mirrorSquareIndex(6); }
-            else { left_idx = mirrorSquareIndex(2); fwd_idx = 66; right_idx = mirrorSquareIndex(7); }
-            if (src_file == dst_file) s2 = fwd_idx;
-            else if (src_file > dst_file) s2 = left_idx;
-            else s2 = right_idx;
-        } else {
-            s2 = parseSquareOriented(uci.substr(2,2), flip);
-        }
-        return {s1, s2};
-    }
-
-public:
-    // Create an LKS node from a board by evaluating model outputs
-    LKSNode create_node(const chess::Board &board) {
-        // Track node creation
-        stat_nodes_created_.fetch_add(1, std::memory_order_relaxed);
-        // Terminal detection (ignore syzygy and TT)
-        const auto game_over = board.isGameOver();
-        if (game_over.first != chess::GameResultReason::NONE) {
-            float terminal_value = 0.0f;
-            if (game_over.first == chess::GameResultReason::CHECKMATE) {
-                // Side to move has no moves and is in check => current player loses
-                terminal_value = -1.0f;
-            } else {
-                terminal_value = 0.0f; // stalemate, repetition, fifty-move, insufficient material
-            }
-            return LKSNode(board, terminal_value, {}, 0.0f, true);
-        }
-
-        // Evaluate network fully
-        auto eval_opt = evaluateFullBlocking(board);
-        if (!eval_opt.has_value()) {
-            return LKSNode(board, 0.0f, {}, 0.0f, false);
-        }
-        engine_parallel::EvalResult eval = *eval_opt;
-
+    NodeBuildResult build_from_eval_and_cache(const chess::Board &board,
+                                              const engine_parallel::EvalResult &eval) {
         // Convert scalar value to [-1, 1]
         float value = 2.0f * eval.value - 1.0f;
 
@@ -634,7 +633,383 @@ public:
             node_U = static_cast<float>(std::sqrt(variance * 4.0));
         }
 
-        return LKSNode(board, value, std::move(entries), node_U, false);
+        // Insert into cache as a flat copy (no child pointers)
+        {
+            std::vector<CachedPolicyEntry> cached_entries;
+            cached_entries.reserve(entries.size());
+            for (const auto &e : entries) {
+                cached_entries.push_back(CachedPolicyEntry{e.move, e.policy, e.U, e.Q});
+            }
+            EvalCacheMap::accessor acc;
+            const std::string fen = board.getFen(false);
+            eval_cache_.insert(acc, fen);
+            acc->second = CachedNodeData{value, std::move(cached_entries), node_U};
+        }
+
+        return NodeBuildResult{value, std::move(entries), node_U};
+    }
+
+    // --- Transposition Table (TT) ---
+public:
+    enum class TTBoundType { EXACT = 0, LOWER_BOUND = 1, UPPER_BOUND = 2 };
+
+    struct TTBoundRec {
+        bool has{false};
+        float score{0.0f};
+        float depth{0.0f};
+    };
+
+    struct TTEntry {
+        TTBoundRec exact;
+        TTBoundRec lower;
+        TTBoundRec upper;
+    };
+
+    // Query the transposition table for a given board state.
+    // Returns a score if the TT can establish an exact value or a cutoff with the given alpha/beta and depth.
+    std::optional<float> query_tt(const chess::Board &board, float alpha, float beta, float depth) {
+        const std::string key = board.getFen(false);
+        TTMap::const_accessor acc;
+        if (!tt_.find(acc, key)) return std::nullopt;
+        const TTEntry &e = acc->second;
+        // Prefer exact value if at sufficient depth
+        if (e.exact.has && e.exact.depth >= depth) return e.exact.score;
+        // Lower bound can trigger beta cutoff
+        if (e.lower.has && e.lower.depth >= depth && e.lower.score >= beta) return e.lower.score;
+        // Upper bound can trigger alpha cutoff
+        if (e.upper.has && e.upper.depth >= depth && e.upper.score <= alpha) return e.upper.score;
+        return std::nullopt;
+    }
+
+    // Update the transposition table entry for this board with a result at the given window and depth.
+    void update_tt(const chess::Board &board, float alpha, float beta, float depth, float score) {
+        const std::string key = board.getFen(false);
+        TTMap::accessor acc;
+        tt_.insert(acc, key);
+        TTEntry &e = acc->second;
+        if (score <= alpha) {
+            if (!e.upper.has || e.upper.depth <= depth) {
+                e.upper.has = true;
+                e.upper.score = score;
+                e.upper.depth = depth;
+            }
+        } else if (score >= beta) {
+            if (!e.lower.has || e.lower.depth <= depth) {
+                e.lower.has = true;
+                e.lower.score = score;
+                e.lower.depth = depth;
+            }
+        } else {
+            if (!e.exact.has || e.exact.depth <= depth) {
+                e.exact.has = true;
+                e.exact.score = score;
+                e.exact.depth = depth;
+            }
+        }
+    }
+
+private:
+    using TTMap = tbb::concurrent_hash_map<std::string, TTEntry>;
+    TTMap tt_;
+    cppcoro::task<Phase2ChildResult> process_phase2_child(
+        LKSNode &node,
+        const chess::Board &board,
+        std::size_t i,
+        float new_depth,
+        float alpha,
+        float beta,
+        NodeType node_type,
+        int rec_depth,
+        int pv_depth
+    ) {
+        const float NULL_EPS = 1e-4f;
+        auto &pe = node.policy[i];
+
+        // Ensure child exists and backpropagate policy updates
+        if (!pe.child) {
+            chess::Board child_board = board;
+            child_board.makeMove(pe.move);
+            auto created = co_await create_node(child_board);
+            if (!created) {
+                co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
+            }
+            pe.child = std::make_unique<LKSNode>(std::move(*created));
+            backpropagate_policy_updates(node, *pe.child, pe.move);
+        }
+
+        float search_alpha = (i == 0) ? -beta : -alpha - NULL_EPS;
+        float search_beta = -alpha;
+        NodeType next_type;
+        if (i == 0 && node_type == NodeType::PV) next_type = NodeType::PV;
+        else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
+        else next_type = NodeType::CUT;
+
+        chess::Board child_board = board;
+        child_board.makeMove(pe.move);
+        int child_pv_depth = pv_depth + ((next_type != NodeType::PV) ? 1 : 0);
+        auto child_out = co_await lks_search(*pe.child, child_board, new_depth, search_alpha, search_beta, next_type, rec_depth + 1, child_pv_depth);
+        if (child_out.aborted) {
+            co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
+        }
+        float score = -child_out.score;
+
+        if (i == 0) {
+            float alpha_out = alpha;
+            if (score > alpha_out) alpha_out = score;
+            bool cutoff = score >= beta;
+            co_return Phase2ChildResult{false, cutoff, alpha_out, score, pe.move, false};
+        } else {
+            bool is_improver = score > alpha;
+            co_return Phase2ChildResult{false, false, alpha, score, pe.move, is_improver};
+        }
+    }
+
+    chess::Board board_;
+    std::atomic<bool> stop_requested_{false};
+    engine_parallel::NNEvaluator evaluator_;
+    std::unique_ptr<cppcoro::static_thread_pool> pool_;
+    std::size_t pool_threads_{8};
+    int force_all_children_on_pv_depth_{2};
+
+    std::size_t desired_thread_count_from_options() const {
+        const std::string val = options_.get("threads", "");
+        unsigned int hc = std::thread::hardware_concurrency();
+        if (hc == 0u) hc = 8u;
+        unsigned int t = hc;
+        if (!val.empty()) {
+            try {
+                unsigned long parsed = std::stoul(val);
+                if (parsed > 0ul) t = static_cast<unsigned int>(parsed);
+            } catch (...) {
+                // ignore parse errors, keep default
+            }
+        }
+        if (t < 1u) t = 1u;
+        if (t > 512u) t = 512u;
+        return static_cast<std::size_t>(t);
+    }
+
+    void ensure_pool_built() {
+        const std::size_t desired = desired_thread_count_from_options();
+        if (!pool_ || pool_threads_ != desired) {
+            pool_threads_ = desired;
+            pool_ = std::make_unique<cppcoro::static_thread_pool>(desired);
+        }
+    }
+    
+    std::unique_ptr<LKSNode> root_;
+    std::atomic<std::uint64_t> stat_gpu_evaluations_{0};
+    std::atomic<std::uint64_t> stat_nodes_created_{0};
+    std::atomic<std::uint64_t> stat_parent_nodes_{0};
+    std::atomic<int> stat_seldepth_{0};
+    std::atomic<std::uint64_t> stat_tbhits_{0};
+    std::atomic<std::uint64_t> stat_tthits_{0};
+    std::atomic<std::int64_t> stat_search_start_ns_{0};
+
+    // --- Helpers for UCI info output ---
+    void print_info_line(float depth, float bestScore) {
+        std::ostringstream oss;
+        {
+            const std::string showfrac = options_.get("fractionaldepth", "");
+            if (!showfrac.empty() && showfrac != "0") {
+                // depth with fractional display
+                oss << "info depth " << std::fixed << std::setprecision(1) << depth;
+            } else {
+                float classic_depth = std::lround((depth + 0.01f) / IT_DEPTH_STEP);
+                oss << "info depth " << classic_depth;
+            }
+        }
+        // seldepth
+        oss << " seldepth " << getSelDepth();
+        // multipv always 1
+        oss << " multipv 1";
+        // score in centipawns using expected reward -> cp mapping
+        int score_cp = static_cast<int>(std::lround(std::tan(static_cast<double>(bestScore) * 1.563754) * 90.0));
+        oss << " score cp " << score_cp;
+        // nodes and nps
+        std::uint64_t nodes = getGpuEvaluationsCount();
+        oss << " nodes " << nodes;
+        std::uint64_t ms = getElapsedTimeMs();
+        std::uint64_t nps = (ms == 0) ? nodes : (nodes * 1000ULL) / ms;
+        oss << " nps " << nps;
+        // tbhits and time
+        oss << " tbhits " << getTBHitsCount();
+        oss << " time " << ms;
+        // optional branching factor (gpu evaluations to parent nodes)
+        {
+            const std::string showbf = options_.get("showbf", "");
+            if (!showbf.empty() && showbf != "0") {
+                const std::uint64_t evals = getGpuEvaluationsCount();
+                const std::uint64_t parents = getParentNodesCount();
+                double bf = (parents == 0ULL) ? 0.0 : static_cast<double>(evals) / static_cast<double>(parents);
+                oss << " bf " << std::fixed << std::setprecision(2) << bf;
+            }
+        }
+        // pv line
+        std::string pv_line = build_pv_line();
+        if (!pv_line.empty()) {
+            oss << " pv " << pv_line;
+        }
+        std::cout << oss.str() << '\n';
+    }
+
+    std::string build_pv_line() const {
+        if (!root_) return {};
+        const LKSNode *node = root_.get();
+        std::ostringstream pv;
+        bool first = true;
+        while (node && !node->policy.empty()) {
+            chess::Move mv = node->bestMove;
+            if (mv == chess::Move::NO_MOVE) {
+                break;
+            }
+            if (!first) pv << ' ';
+            pv << chess::uci::moveToUci(mv);
+            first = false;
+            // Follow the child corresponding to mv
+            const LKSNode *next = nullptr;
+            for (const auto &pe : node->policy) {
+                if (pe.move == mv && pe.child) { next = pe.child.get(); break; }
+            }
+            if (!next) break;
+            node = next;
+        }
+        return pv.str();
+    }
+
+    // Check node/evaluation limits for early termination
+    bool node_limit_check(const Limits &limits) const {
+        if (limits.nodes == 0ULL) return true; // no explicit node limit set
+        const std::uint64_t evals = stat_gpu_evaluations_.load(std::memory_order_relaxed);
+        // Continue while GPU evals remain under 95% of the node limit
+        return evals * 100ULL < limits.nodes * 95ULL;
+    }
+
+    // Wrapper that ensures continuation resumes on our thread pool and tracks stats
+    cppcoro::task<engine_parallel::EvalResult> evaluate_on_pool(const chess::Board &b) {
+        // Count this evaluation request
+        stat_gpu_evaluations_.fetch_add(1, std::memory_order_relaxed);
+        // Await GPU evaluation via callback + event
+        auto tokens = engine_tokenizer::tokenizeBoard(b);
+        struct Shared { cppcoro::async_manual_reset_event done; engine_parallel::EvalResult res; };
+        auto shared = std::shared_ptr<Shared>(new Shared());
+        evaluator_.enqueue(tokens, [shared](engine_parallel::EvalResult r){ shared->res = std::move(r); shared->done.set(); });
+        co_await shared->done;
+        // Bounce back to the search thread pool to continue the coroutine on the desired executor
+        co_await pool_->schedule();
+        co_return std::move(shared->res);
+    }
+
+    void sort_and_normalize(LKSNode &node) {
+        std::sort(node.policy.begin(), node.policy.end(), [](const LKSPolicyEntry &a, const LKSPolicyEntry &b){ return a.policy > b.policy; });
+        float sum = 0.0f;
+        for (const auto &e : node.policy) sum += e.policy;
+        if (sum > 0.0f) {
+            for (auto &e : node.policy) e.policy = e.policy / sum;
+        }
+    }
+
+    void backpropagate_policy_updates(LKSNode &parent, const LKSNode &child, const chess::Move &move) {
+        return; // Turning off backproagation due to segfaults
+        // Find entry for move in parent
+        for (auto &entry : parent.policy) {
+            if (entry.move == move) {
+                const float parent_to_node_policy = entry.policy;
+                const float parent_Q_for_child = entry.Q;
+                // Child value is from child's perspective; flip to parent's
+                const float child_from_parent_perspective = -child.value;
+                const float backup = (child_from_parent_perspective - parent_Q_for_child) / (parent.value + 1.01f);
+                const float new_policy_prob = parent_to_node_policy * std::exp(backup);
+                entry.policy = new_policy_prob;
+                // TODO: sanity check this backprop
+                return;
+            }
+        }
+    }
+
+    static inline int fileCharToIndex(char f) { return static_cast<int>(f - 'a'); }
+    static inline int rankCharToIndex(char r) { return static_cast<int>(r - '1'); }
+    static inline int squareIndexFromFileRank(char file_c, char rank_c) {
+        int file = fileCharToIndex(file_c);
+        int rank = rankCharToIndex(rank_c);
+        return rank * 8 + file;
+    }
+    static inline int mirrorSquareIndex(int sq) {
+        int file = sq % 8;
+        int rank = sq / 8;
+        int mirroredRank = 7 - rank;
+        return mirroredRank * 8 + file;
+    }
+    static inline int parseSquareOriented(const std::string &sq, bool flip) {
+        // sq like "e2". If flip == false, mirror across horizontal axis; else normal
+        int idx = squareIndexFromFileRank(sq[0], sq[1]);
+        return flip ? idx : mirrorSquareIndex(idx);
+    }
+    static inline std::pair<int,int> move_to_indices(const chess::Move &mv, bool flip) {
+        std::string uci = chess::uci::moveToUci(mv);
+        int s1 = parseSquareOriented(uci.substr(0,2), flip);
+        // promotion handling for r, b, n
+        int s2;
+        if (uci.size() == 5 && (uci[4] == 'r' || uci[4] == 'b' || uci[4] == 'n')) {
+            char prom = uci[4];
+            char src_file = uci[0];
+            char dst_file = uci[2];
+            int left_idx = -1, fwd_idx = -1, right_idx = -1;
+            if (prom == 'r') { left_idx = mirrorSquareIndex(0); fwd_idx = 64; right_idx = mirrorSquareIndex(5); }
+            else if (prom == 'b') { left_idx = mirrorSquareIndex(1); fwd_idx = 65; right_idx = mirrorSquareIndex(6); }
+            else { left_idx = mirrorSquareIndex(2); fwd_idx = 66; right_idx = mirrorSquareIndex(7); }
+            if (src_file == dst_file) s2 = fwd_idx;
+            else if (src_file > dst_file) s2 = left_idx;
+            else s2 = right_idx;
+        } else {
+            s2 = parseSquareOriented(uci.substr(2,2), flip);
+        }
+        return {s1, s2};
+    }
+
+public:
+    // Create an LKS node from a board by evaluating model outputs
+    cppcoro::task<std::optional<LKSNode>> create_node(const chess::Board &board) {
+        // Track node creation
+        stat_nodes_created_.fetch_add(1, std::memory_order_relaxed);
+        // Terminal detection (ignore syzygy and TT)
+        const auto game_over = board.isGameOver();
+        if (game_over.first != chess::GameResultReason::NONE) {
+            float terminal_value = 0.0f;
+            if (game_over.first == chess::GameResultReason::CHECKMATE) {
+                // Side to move has no moves and is in check => current player loses
+                terminal_value = -1.0f;
+            } else {
+                terminal_value = 0.0f; // stalemate, repetition, fifty-move, insufficient material
+            }
+            co_return std::optional<LKSNode>(std::in_place, terminal_value, std::vector<LKSPolicyEntry>{}, 0.0f, true);
+        }
+
+        // Syzygy: if <= 5 pieces, use TB WDL to set terminal value (cursed/blessed treated as draw)
+        {
+            const int piece_count = static_cast<int>(board.occ().count());
+            if (piece_count <= 5) {
+                if (auto wdl_v = engine::syzygy::probe_wdl_value(board)) {
+                    co_return std::optional<LKSNode>(std::in_place, *wdl_v, std::vector<LKSPolicyEntry>{}, 0.0f, true);
+                }
+            }
+        }
+
+        // Cache lookup by FEN board key
+        const std::string fen = board.getFen(false);
+        if (auto cached = try_load_from_cache(fen)) {
+            co_return std::optional<LKSNode>(std::in_place, cached->value, std::move(cached->entries), cached->node_U, false);
+        }
+
+        // Evaluate network fully (suspend until ready)
+        engine_parallel::EvalResult eval = co_await evaluate_on_pool(board);
+        if (eval.canceled || stop_requested_.load(std::memory_order_acquire)) {
+            co_return std::nullopt;
+        }
+
+        // Build node data from eval and store in cache
+        auto built = build_from_eval_and_cache(board, eval);
+        co_return std::optional<LKSNode>(std::in_place, built.value, std::move(built.entries), built.node_U, false);
     }
 };
 

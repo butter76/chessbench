@@ -20,20 +20,19 @@ struct LKSPolicyEntry {
 
 // Light-weight search node for LKS
 struct LKSNode {
-    chess::Board board{};                 // position state
     float value{0.0f};                    // scalar evaluation in [-1, 1]
     std::vector<LKSPolicyEntry> policy;   // ordered list of policy moves and heads
     float U{0.0f};                        // node-level uncertainty (e.g., stddev)
     bool terminal{false};                 // terminal position flag
+    chess::Move bestMove{chess::Move::NO_MOVE}; // cached best move from search
 
     LKSNode() = default;
 
-    LKSNode(const chess::Board &b,
-            float v,
+    LKSNode(float v,
             std::vector<LKSPolicyEntry> pol,
             float u,
             bool t)
-        : board(b), value(v), policy(std::move(pol)), U(u), terminal(t) {}
+        : value(v), policy(std::move(pol)), U(u), terminal(t) {}
 };
 
 } // namespace engine

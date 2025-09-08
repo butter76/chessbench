@@ -17,7 +17,6 @@
 #include <vector>
 
 #include "tokenizer.hpp"
-#include "parallel/thread_pool.hpp"
 #include "parallel/nn_evaluator.hpp"
 
 // Minimal coroutine Task type
@@ -49,17 +48,14 @@ struct Task {
     }
 };
 
-// removed local ThreadPool; using engine_parallel::ThreadPool
 
 using engine_parallel::NNEvaluator;
-using engine_parallel::EvalAwaitable;
-using engine_parallel::ThreadPool;
 
 // PoC SearchAlgo that spawns multiple coroutines exploring a fake tree
 class SearchAlgoPoC {
 public:
-    SearchAlgoPoC(ThreadPool& pool, NNEvaluator& eval)
-        : pool(pool), evaluator(eval) {}
+    SearchAlgoPoC(NNEvaluator& eval)
+        : evaluator(eval) {}
 
     void start() {
         stopped.store(false);
@@ -75,7 +71,6 @@ public:
     }
 
 private:
-    ThreadPool& pool;
     NNEvaluator& evaluator;
     std::atomic<bool> stopped{false};
     std::jthread thread;
@@ -92,7 +87,21 @@ private:
                 chess::Board board;
                 (void)feature; // in real code, mutate board per feature
                 auto tokens = engine_tokenizer::tokenizeBoard(board);
-                EvalAwaitable awaiter{&evaluator, &pool, tokens};
+                struct Awaiter {
+                    NNEvaluator* eval;
+                    std::array<std::uint8_t,68> tokens;
+                    engine_parallel::EvalResult result;
+                    std::atomic<bool> ready{false};
+                    bool await_ready() const noexcept { return ready.load(std::memory_order_acquire); }
+                    void await_suspend(std::coroutine_handle<> h) {
+                        eval->enqueue(tokens, [this, h](engine_parallel::EvalResult r) mutable {
+                            result = std::move(r);
+                            ready.store(true, std::memory_order_release);
+                            h.resume();
+                        });
+                    }
+                    engine_parallel::EvalResult await_resume() noexcept { return std::move(result); }
+                } awaiter{&evaluator, tokens};
                 auto res = co_await awaiter;
                 if (res.canceled || stopped.load()) { std::cout << "task " << taskId << " canceled at depth " << depth << '\n'; break; }
                 std::cout << "task " << taskId
@@ -108,10 +117,13 @@ private:
     }
 
     void run() {
-        // Spawn multiple coroutines onto the pool
-        const int numTasks = 8;
+        // Sequentially run a few tasks for PoC
+        const int numTasks = 4;
         for (int i = 0; i < numTasks; ++i) {
-            pool.start(workerTask(i));
+            auto t = workerTask(i);
+            auto h = t.coro;
+            t.coro = {};
+            h.resume();
         }
         // Keep the search thread alive while tasks run
         while (!stopped.load()) {
@@ -122,12 +134,10 @@ private:
 
 int main() {
     std::cout << "PoC: ThreadPool + Coroutines + NNEvaluator" << std::endl;
-    unsigned int n = std::max(2u, std::thread::hardware_concurrency());
-    ThreadPool pool(n - 1); // leave one for evaluator
     NNEvaluator evaluator;
     evaluator.start();
 
-    SearchAlgoPoC search(pool, evaluator);
+    SearchAlgoPoC search(evaluator);
     search.start();
 
     // Let it run briefly, then signal stop
@@ -136,7 +146,6 @@ int main() {
     search.join();
 
     evaluator.stop_and_join();
-    pool.shutdown();
 
     std::cout << "PoC complete" << std::endl;
     return 0;

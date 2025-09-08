@@ -5,16 +5,42 @@ if(NOT CMAKE_CXX_COMPILER AND EXISTS "/usr/bin/clang++-18")
     set(CMAKE_CXX_COMPILER "/usr/bin/clang++-18" CACHE FILEPATH "" FORCE)
 endif()
 
-# Ensure CMake's compiler check uses libc++ with Clang to avoid -lstdc++
-set(CMAKE_CXX_FLAGS_INIT "-stdlib=libc++")
-set(CMAKE_EXE_LINKER_FLAGS_INIT "-stdlib=libc++ -lc++abi")
-set(CMAKE_SHARED_LINKER_FLAGS_INIT "-stdlib=libc++ -lc++abi")
+## Configure C++ to use libc++ for compiler checks and default builds
+set(CMAKE_CXX_FLAGS "-stdlib=libc++ ${CMAKE_CXX_FLAGS}" CACHE STRING "" FORCE)
+set(CMAKE_CXX_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES} -lc++ -lc++abi" CACHE STRING "" FORCE)
+## Note: Avoid setting global non-language-specific linker flags; keep C++-only above
 
-project(chess_sample LANGUAGES CXX)
+project(chess_sample LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# cppcoro header-only library vendored under third_party
+add_library(cppcoro INTERFACE)
+# Put compat shim first so it overrides system include lookup for experimental/coroutine
+target_include_directories(cppcoro INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include"
+)
+target_compile_definitions(cppcoro INTERFACE _LIBCPP_ENABLE_EXPERIMENTAL)
+add_library(cppcoro_objects STATIC
+    third_party/cppcoro/lib/lightweight_manual_reset_event.cpp
+    third_party/cppcoro/lib/static_thread_pool.cpp
+    third_party/cppcoro/lib/auto_reset_event.cpp
+    third_party/cppcoro/lib/async_manual_reset_event.cpp
+    third_party/cppcoro/lib/spin_wait.cpp
+    third_party/cppcoro/lib/spin_mutex.cpp
+)
+target_include_directories(cppcoro_objects PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat"
+)
+target_compile_definitions(cppcoro_objects PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(cppcoro_objects PRIVATE -stdlib=libc++)
+    target_link_options(cppcoro_objects PRIVATE -stdlib=libc++ -lc++abi)
+endif()
 
 # Download single-header chess library during configure
 set(CHESS_URL "https://raw.githubusercontent.com/Disservin/chess-library/master/include/chess.hpp")
@@ -27,13 +53,27 @@ if(NOT EXISTS "${CHESS_HEADER}")
     file(DOWNLOAD "${CHESS_URL}" "${CHESS_HEADER}" SHOW_PROGRESS TLS_VERIFY ON)
 endif()
 
+# Fathom Syzygy tablebases (third_party/fathom)
+# Build only tbprobe.c which includes tbchess.c internally
+add_library(fathom STATIC
+    third_party/fathom/src/tbprobe.c
+)
+set_target_properties(fathom PROPERTIES C_STANDARD 99)
+target_include_directories(fathom PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fathom/src")
+set_property(TARGET fathom PROPERTY POSITION_INDEPENDENT_CODE ON)
+
 add_executable(chess_sample src/main.cpp)
 target_include_directories(chess_sample PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(chess_sample PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
+target_include_directories(chess_sample PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include")
+target_include_directories(chess_sample PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat")
+target_include_directories(chess_sample PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fathom/src")
 
 # Link pthreads for threading support (required for std::jthread and friends)
 find_package(Threads REQUIRED)
-target_link_libraries(chess_sample PRIVATE Threads::Threads)
+find_package(TBB REQUIRED)
+target_link_libraries(chess_sample PRIVATE Threads::Threads cppcoro cppcoro_objects fathom)
+target_link_libraries(chess_sample PRIVATE TBB::tbb)
 
 # Build and link against libc++ when using Clang
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -55,7 +95,10 @@ add_executable(poc_parallel
 )
 target_include_directories(poc_parallel PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(poc_parallel PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL)
-target_link_libraries(poc_parallel PRIVATE Threads::Threads)
+target_include_directories(poc_parallel PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include")
+target_include_directories(poc_parallel PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat")
+target_link_libraries(poc_parallel PRIVATE Threads::Threads cppcoro cppcoro_objects)
+target_link_libraries(poc_parallel PRIVATE TBB::tbb)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(poc_parallel PRIVATE -stdlib=libc++)
     target_link_options(poc_parallel PRIVATE -stdlib=libc++ -lc++abi)
@@ -109,7 +152,12 @@ if (CUDAToolkit_FOUND AND TENSORRT_NVINFER AND TENSORRT_INCLUDE)
     add_executable(print_lks_node src/tools/print_lks_node.cpp)
     target_include_directories(print_lks_node PRIVATE "${THIRD_PARTY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(print_lks_node PRIVATE _LIBCPP_ENABLE_EXPERIMENTAL USE_TENSORRT)
-    target_link_libraries(print_lks_node PRIVATE Threads::Threads ${TENSORRT_NVINFER})
+    target_include_directories(print_lks_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro/include")
+    target_include_directories(print_lks_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro_compat")
+    target_include_directories(print_lks_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fathom/src")
+    target_link_libraries(print_lks_node PRIVATE Threads::Threads cppcoro cppcoro_objects ${TENSORRT_NVINFER})
+    target_link_libraries(print_lks_node PRIVATE fathom)
+    target_link_libraries(print_lks_node PRIVATE TBB::tbb)
     if (CUDAToolkit_FOUND)
         target_link_libraries(print_lks_node PRIVATE CUDA::cudart)
     endif()

@@ -21,6 +21,7 @@ import os
 import multiprocessing as mp
 import time
 import signal
+import math
 
 from absl import app
 from absl import flags
@@ -85,6 +86,8 @@ _TYPE = flags.DEFINE_enum(
     enum_values=[
         'positional',
         'tactical',
+        'blunderbase',
+        'fortressbase',
     ],
     help='The type of puzzles to evaluate.',
 )
@@ -104,7 +107,7 @@ _NUM_NODES = flags.DEFINE_integer(
 _NETWORK = flags.DEFINE_enum(
     name='network',
     default=None,
-    enum_values=['t1d', 't1s', 't3d', 't82', 'bt4', 'bt3', 'ls15'],
+    enum_values=['t1d', 't1s', 't3d', 't82', 'bt4', 'bt3', 'ls15', 'bt5'],
     help='The network to use for Lc0Engine.',
 )
 
@@ -135,10 +138,13 @@ _NAME = flags.DEFINE_string(
 
 # Global variable to store the engine in each worker process
 worker_engine = None
+worker_num_nodes = None
 
 def init_worker(strategy, network, depth, num_nodes, checkpoint_path, uci_engine_bin):
     """Initialize worker process with an engine instance."""
     global worker_engine
+    global worker_num_nodes
+    worker_num_nodes = num_nodes
     if network is not None:
         if strategy == 'value':
             # DEPTH 1 SEARCH
@@ -278,6 +284,154 @@ def worker_evaluate_position(position_data):
         signal.signal(signal.SIGALRM, old_handler)
     
     return result
+
+
+def _ucinewgame_if_possible(raw_engine):
+    """Sends 'ucinewgame' to the engine if supported to avoid tree reuse."""
+    try:
+        # python-chess exposes the low-level protocol for SimpleEngine
+        raw_engine.protocol.send_line('ucinewgame')
+    except Exception:
+        pass
+
+
+def _track_last_bestmove_change_nodes(board: chess.Board) -> tuple[chess.Move | None, int]:
+    """Run a fixed-nodes analysis and return (final_best_move, last_change_nodes).
+
+    Tracks the first move of the PV and records the node count at the last time
+    that first PV move changed during the search.
+    """
+    global worker_engine, worker_num_nodes
+    if worker_engine is None:
+        raise RuntimeError('Worker engine not initialized')
+
+    # Access underlying SimpleEngine to stream info
+    if not hasattr(worker_engine, '_raw_engine'):
+        raise RuntimeError('Blunderbase requires a UCI engine (Lc0/Stockfish/generic UCI).')
+    raw_engine = getattr(worker_engine, '_raw_engine')
+
+    # Avoid tree reuse between positions
+    _ucinewgame_if_possible(raw_engine)
+
+    best_move_so_far: chess.Move | None = None
+    last_change_nodes: int = 0
+
+    limit = chess.engine.Limit(nodes=worker_num_nodes or 0)
+    try:
+        with raw_engine.analysis(board, limit=limit, info=chess.engine.INFO_ALL) as analysis:
+            for info in analysis:
+                pv = info.get('pv')
+                if pv:
+                    current = pv[0]
+                    if best_move_so_far is None or current != best_move_so_far:
+                        best_move_so_far = current
+                        # Some engines might not report nodes every tick
+                        nodes_val = info.get('nodes')
+                        if isinstance(nodes_val, int):
+                            last_change_nodes = nodes_val
+    except Exception:
+        # Fallback: try a non-streaming best move if streaming failed
+        try:
+            result_move = raw_engine.play(board, limit=limit).move
+            best_move_so_far = result_move
+        except Exception:
+            best_move_so_far = None
+
+    return best_move_so_far, last_change_nodes
+
+
+def worker_evaluate_blunderbase(entry: tuple[str, str]) -> dict:
+    """Evaluate a single Blunderbase entry.
+
+    Args:
+        entry: Tuple of (fen, expected_move_san)
+
+    Returns:
+        dict with fields: 'fen', 'result' ('FAILED' or int nodes), 'bestmove_uci'
+    """
+    fen, expected_san = entry
+    board = chess.Board(fen)
+
+    # Parse expected move from SAN into UCI for comparison
+    try:
+        expected_move = board.parse_san(expected_san)
+    except Exception:
+        # If SAN parsing fails, mark as failed
+        return {'fen': fen, 'result': 'FAILED', 'bestmove_uci': None}
+
+    best_move, last_change_nodes = _track_last_bestmove_change_nodes(board)
+
+    if best_move is not None and best_move == expected_move:
+        return {
+            'fen': fen,
+            'result': last_change_nodes,
+            'bestmove_uci': best_move.uci(),
+        }
+    else:
+        return {
+            'fen': fen,
+            'result': 'FAILED',
+            'bestmove_uci': best_move.uci() if best_move is not None else None,
+        }
+
+
+def _final_centipawns_at_nodes(board: chess.Board) -> int | None:
+    """Run fixed-nodes analysis and return final CP score from the engine's POV.
+
+    Returns None if score is unavailable.
+    """
+    global worker_engine, worker_num_nodes
+    if worker_engine is None:
+        raise RuntimeError('Worker engine not initialized')
+    if not hasattr(worker_engine, '_raw_engine'):
+        raise RuntimeError('Fortressbase requires a UCI engine (Lc0/Stockfish/generic UCI).')
+    raw_engine = getattr(worker_engine, '_raw_engine')
+    _ucinewgame_if_possible(raw_engine)
+
+    limit = chess.engine.Limit(nodes=worker_num_nodes or 0)
+    try:
+        # Non-streaming final analysis; python-chess returns final info including 'score'
+        result = raw_engine.analyse(board, limit=limit)
+        score = result.get('score')
+        if score is None:
+            return None
+        # Convert to centipawns from the side to move perspective
+        rel = score.relative
+        if rel.is_mate():
+            # Map mates to large CP magnitude keeping sign
+            sign = 1 if rel.mate() and rel.mate() > 0 else -1
+            return 100000 * sign
+        return int(rel.cp)
+    except Exception:
+        return None
+
+
+def worker_evaluate_fortressbase(entry: tuple[str, str]) -> dict:
+    """Evaluate a single Fortressbase entry.
+
+    Args:
+        entry: (fen, result_label) where result_label is 'Win' or 'Draw'
+
+    Returns:
+        dict with fields: 'fen', 'result' (float), 'cp'
+    """
+    fen, result_label = entry
+    board = chess.Board(fen)
+    cp = _final_centipawns_at_nodes(board)
+    if cp is None:
+        return {'fen': fen, 'result': float('nan'), 'cp': None}
+
+    # decisive probability
+    dp = math.atan(abs(cp) / 90.0) / 1.5637541897
+
+    # If fortress is a win, return 1 - dp; if draw, return 0
+    label = (result_label or '').strip().lower()
+    if label == 'win':
+        value = 1.0 - dp
+    else:
+        value = dp
+
+    return {'fen': fen, 'result': float(value), 'cp': int(cp)}
 
 def validate_chessbench(engine: engine_lib.Engine):
     """Sample positions from validation set and compare MyEngine policy with dataset policy."""
@@ -504,6 +658,137 @@ def main(argv: Sequence[str]) -> None:
                 pbar.set_postfix(stats)
 
         print(f"Lichess Top-1 move match rate: {total_top1_match/total_positions:.4f}")
+
+    elif _TYPE.value == 'blunderbase':
+        # Evaluate on the Blunderbase dataset, computing the node count at the
+        # last time the PV's first move changed, and reporting it only if the
+        # final best move matches the provided correct move; otherwise FAILED.
+
+        # Load dataset
+        blunderbase_path = os.path.join(
+            os.getcwd(),
+            '../data/Blunderbase.csv',
+        )
+        df = pd.read_csv(blunderbase_path)
+
+        # Column names as in the CSV header
+        fen_col = 'FEN of the position'
+        correct_san_col = 'Correct move that Lc0 should have played'
+
+        # Filter valid rows
+        valid = df[[fen_col, correct_san_col]].dropna()
+
+        # Prepare entries for multiprocessing
+        entries: list[tuple[str, str]] = []
+        for _, row in valid.iterrows():
+            fen = str(row[fen_col]).strip()
+            san = str(row[correct_san_col]).strip()
+            if fen and san and fen != 'nan' and san != 'nan':
+                entries.append((fen, san))
+
+        print(f"Evaluating {len(entries)} Blunderbase positions...")
+
+        # Run with multiprocessing and initialized engines
+        with mp.Pool(
+            processes=num_processes,
+            initializer=init_worker,
+            initargs=(strategy, network, depth, num_nodes, checkpoint_path, _UCI_ENGINE_BIN.value)
+        ) as pool:
+            pbar = tqdm(
+                pool.imap(worker_evaluate_blunderbase, entries),
+                total=len(entries),
+                desc=f"Evaluating Blunderbase ({name})"
+            )
+
+            out_path = f'blunderbase-{name}.txt'
+            correct_count = 0
+            sum_log_nodes = 0.0
+            with open(out_path, 'w') as f:
+                for res in pbar:
+                    # res['result'] is either int nodes or 'FAILED'
+                    is_ok = isinstance(res['result'], int)
+                    if is_ok:
+                        correct_count += 1
+                    # Accumulate avg log(nodes): use last-change nodes if OK, else max nodes
+                    nodes_for_avg = res['result'] if is_ok else num_nodes * math.e
+                    try:
+                        nodes_int = int(nodes_for_avg)
+                    except Exception:
+                        nodes_int = num_nodes
+                    if nodes_int <= 0:
+                        nodes_int = 1
+                    sum_log_nodes += np.log(nodes_int)
+
+                    f.write(str(res) + '\n')
+                    f.flush()
+                    pbar.set_postfix({
+                        'ok': f"{correct_count} / {len(entries)}",
+                    })
+
+        print(f"Results written to {out_path}")
+        # Report final metrics
+        total_examples = len(entries)
+        avg_log_nodes = (sum_log_nodes / total_examples) if total_examples > 0 else float('nan')
+        success_pct = (correct_count / total_examples) if total_examples > 0 else 0.0
+        print(f"Average log(nodes): {avg_log_nodes:.6f}")
+        print(f"Success (not FAILED): {success_pct:.2%}")
+
+    elif _TYPE.value == 'fortressbase':
+        # Evaluate on the Fortressbase dataset. For each entry, run fixed-nodes
+        # analysis, convert final CP to decisive probability via
+        # atan(|cp|/90)/1.5637541897, then return (1 - dp) if the fortress is a
+        # win, or 0 if it's a draw.
+
+        fortress_path = os.path.join(
+            os.getcwd(),
+            '../data/Fortressbase.csv',
+        )
+        df = pd.read_csv(fortress_path)
+
+        fen_col = 'FEN of the position'
+        result_col = 'Result'
+        valid = df[[fen_col, result_col]].dropna()
+
+        entries: list[tuple[str, str]] = []
+        for _, row in valid.iterrows():
+            fen = str(row[fen_col]).strip()
+            label = str(row[result_col]).strip()
+            if fen and label and fen != 'nan' and label != 'nan':
+                entries.append((fen, label))
+
+        print(f"Evaluating {len(entries)} Fortressbase positions...")
+
+        with mp.Pool(
+            processes=num_processes,
+            initializer=init_worker,
+            initargs=(strategy, network, depth, num_nodes, checkpoint_path, _UCI_ENGINE_BIN.value)
+        ) as pool:
+            pbar = tqdm(
+                pool.imap(worker_evaluate_fortressbase, entries),
+                total=len(entries),
+                desc=f"Evaluating Fortressbase ({name})"
+            )
+
+            out_path = f'fortressbase-{name}.txt'
+            sum_values = 0.0
+            count_values = 0
+            with open(out_path, 'w') as f:
+                for res in pbar:
+                    f.write(str(res) + '\n')
+                    f.flush()
+                    val = res['result']
+                    if isinstance(val, float) and not math.isnan(val):
+                        sum_values += val
+                        count_values += 1
+                    pbar.set_postfix({
+                        'avg': f"{(sum_values / max(1, count_values)):.4f}",
+                    })
+
+        print(f"Results written to {out_path}")
+        if count_values > 0:
+            print(f"Average fortress score: {sum_values / count_values:.6f}")
+        else:
+            print("Average fortress score: NaN (no valid results)")
 
 
 if __name__ == '__main__':

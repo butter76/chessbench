@@ -38,6 +38,8 @@ void send_id() {
     std::cout << "option name Threads type spin default " << hc << " min 1 max 512" << '\n';
     // Syzygy tablebase root path
     std::cout << "option name SyzygyPath type string default ../syzygy_tables/3-4-5/" << '\n';
+    // ForceAllChildrenOnPVDepth: force expanding all children while pv_depth < N
+    std::cout << "option name ForceAllChildrenOnPVDepth type spin default 2 min 0 max 16" << '\n';
 }
 
 std::vector<std::string> split(const std::string &line) {

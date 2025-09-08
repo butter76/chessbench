@@ -104,6 +104,19 @@ public:
     void initialize() {
         evaluator_.initialize_trt();
         ensure_pool_built();
+        // Read configurable PV depth threshold for forcing all children expansion
+        {
+            int parsed = 2;
+            try {
+                const std::string opt = options_.get("forceallchildrenonpvdepth", "2");
+                parsed = std::stoi(opt);
+            } catch (...) {
+                parsed = 2;
+            }
+            if (parsed < 0) parsed = 0;
+            if (parsed > 16) parsed = 16;
+            force_all_children_on_pv_depth_ = parsed;
+        }
         // Initialize Syzygy tablebases once using configured path
         static std::once_flag tb_once_flag;
         std::call_once(tb_once_flag, [this]() {
@@ -349,7 +362,7 @@ public:
                 const float local_reduction = -2.0f * std::log(pe.U + 1e-6f);
                 if (new_depth <= local_reduction) {
                     if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
-                        should_filter = !(pv_depth < 2);
+                        should_filter = !(pv_depth < force_all_children_on_pv_depth_) && !root;
                     }
                 }
             }
@@ -756,6 +769,7 @@ private:
     engine_parallel::NNEvaluator evaluator_;
     std::unique_ptr<cppcoro::static_thread_pool> pool_;
     std::size_t pool_threads_{8};
+    int force_all_children_on_pv_depth_{2};
 
     std::size_t desired_thread_count_from_options() const {
         const std::string val = options_.get("threads", "");

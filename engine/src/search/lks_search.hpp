@@ -106,12 +106,12 @@ public:
         ensure_pool_built();
         // Read configurable PV depth threshold for forcing all children expansion
         {
-            int parsed = 2;
+            int parsed = 0;
             try {
-                const std::string opt = options_.get("forceallchildrenonpvdepth", "2");
+                const std::string opt = options_.get("forceallchildrenonpvdepth", "0");
                 parsed = std::stoi(opt);
             } catch (...) {
-                parsed = 2;
+                parsed = 0;
             }
             if (parsed < 0) parsed = 0;
             if (parsed > 16) parsed = 16;
@@ -734,7 +734,7 @@ private:
                 co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
             }
             pe.child = std::make_unique<LKSNode>(std::move(*created));
-            backpropagate_policy_updates(node, *pe.child, pe.move);
+            backpropagate_policy_updates(node, *pe.child, pe);
         }
 
         float search_alpha = (i == 0) ? -beta : -alpha - NULL_EPS;
@@ -769,7 +769,7 @@ private:
     engine_parallel::NNEvaluator evaluator_;
     std::unique_ptr<cppcoro::static_thread_pool> pool_;
     std::size_t pool_threads_{8};
-    int force_all_children_on_pv_depth_{2};
+    int force_all_children_on_pv_depth_{0};
 
     std::size_t desired_thread_count_from_options() const {
         const std::string val = options_.get("threads", "");
@@ -909,22 +909,14 @@ private:
         }
     }
 
-    void backpropagate_policy_updates(LKSNode &parent, const LKSNode &child, const chess::Move &move) {
-        return; // Turning off backproagation due to segfaults
-        // Find entry for move in parent
-        for (auto &entry : parent.policy) {
-            if (entry.move == move) {
-                const float parent_to_node_policy = entry.policy;
-                const float parent_Q_for_child = entry.Q;
-                // Child value is from child's perspective; flip to parent's
-                const float child_from_parent_perspective = -child.value;
-                const float backup = (child_from_parent_perspective - parent_Q_for_child) / (parent.value + 1.01f);
-                const float new_policy_prob = parent_to_node_policy * std::exp(backup);
-                entry.policy = new_policy_prob;
-                // TODO: sanity check this backprop
-                return;
-            }
-        }
+    void backpropagate_policy_updates(LKSNode &parent, const LKSNode &child, LKSPolicyEntry &entry) {
+        const float parent_to_node_policy = entry.policy;
+        const float parent_Q_for_child = entry.Q;
+        const float child_from_parent_perspective = -child.value;
+        float backup = (child_from_parent_perspective - parent_Q_for_child) / (parent.value + 1.01f);
+        backup = std::clamp(backup, -2.0f, 4.0f);
+        const float new_policy_prob = parent_to_node_policy * std::exp(backup);
+        entry.policy = new_policy_prob;
     }
 
     static inline int fileCharToIndex(char f) { return static_cast<int>(f - 'a'); }

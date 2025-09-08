@@ -22,17 +22,37 @@ public:
 		unsigned long long inc_ms    = (side_to_move == chess::Color::WHITE) ? limits.winc_ms  : limits.binc_ms;
 		if (time_left == 0ULL) return TimeBudget{0ULL, 0ULL};
 
-		int moves_to_go = limits.movestogo > 0 ? limits.movestogo : 30; // default horizon
-		unsigned long long base_alloc = time_left / static_cast<unsigned long long>(moves_to_go);
-		unsigned long long bonus = inc_ms / 2ULL;
-		unsigned long long alloc = base_alloc + bonus;
-
-		// Keep a reserve buffer
-		unsigned long long reserve = std::max(50ULL, time_left / 20ULL); // at least 50ms or 5%
-		if (alloc + reserve > time_left) alloc = (time_left > reserve) ? (time_left - reserve) : (time_left / 2ULL);
-
-		unsigned long long hard = alloc;
-		unsigned long long soft = (hard >= 10ULL) ? (hard - 5ULL) : hard;
+		// Move overhead (communication delay)
+		const unsigned long long overhead = 50ULL; // 50ms overhead
+		
+		// Default moves to go if not specified
+		int moves_to_go = limits.movestogo > 0 ? limits.movestogo : 40;
+		
+		// Calculate total time including future increments
+		unsigned long long total_time_with_increments = time_left + (moves_to_go * inc_ms);
+		
+		// Calculate time after overhead
+		unsigned long long time_after_overhead = (time_left > overhead) ? (time_left - overhead) : 0ULL;
+		unsigned long long total_time_after_overhead = (total_time_with_increments > overhead) ? 
+			(total_time_with_increments - overhead) : 0ULL;
+		
+		// Hard limit: minimum of 80% of (time_left - overhead) and 25% of (total_time_with_increments - overhead)
+		unsigned long long hard_option1 = (time_after_overhead * 80ULL) / 100ULL; // 80% of (time_left - overhead)
+		unsigned long long hard_option2 = (total_time_after_overhead * 25ULL) / 100ULL; // 25% of (total_time_with_increments - overhead)
+		unsigned long long hard = std::min(hard_option1, hard_option2);
+		
+		// Soft limit: minimum of 5% of (time_left - overhead) and 1% of (total_time_with_increments - overhead)
+		unsigned long long soft_option1 = (time_after_overhead * 5ULL) / 100ULL; // 5% of (time_left - overhead)
+		unsigned long long soft_option2 = (total_time_after_overhead * 1ULL) / 100ULL; // 1% of (total_time_with_increments - overhead)
+		unsigned long long soft = std::min(soft_option1, soft_option2);
+		
+		// Ensure soft doesn't exceed hard
+		soft = std::min(soft, hard);
+		
+		// Ensure minimum values
+		hard = std::max(hard, 1ULL);
+		soft = std::max(soft, 1ULL);
+		
 		return TimeBudget{soft, hard};
 	}
 };

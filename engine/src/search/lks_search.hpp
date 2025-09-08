@@ -196,6 +196,10 @@ public:
             root_ = std::make_unique<LKSNode>(std::move(rootNode));
         }
         
+        float opt_time_scalar = 1.0f;
+        chess::Move previous_best_move = chess::Move::NO_MOVE;
+        float previous_best_eval = -std::numeric_limits<float>::infinity();
+        
         while (currentDepth <= maxDepth + 1e-2f) {
             if (clock::now() >= hard_deadline) { stop(); break; }
             if (stop_requested_.load(std::memory_order_acquire)) break;
@@ -205,12 +209,39 @@ public:
                 co_return co_await lks_root(*root_, board_, currentDepth, -1.0f, 1.0f);
             }());
             if (aborted) break;
+            
+            // Check for score decrease and adjust time scalar
+            if (score < previous_best_eval) {
+                float score_difference = previous_best_eval - score;
+                opt_time_scalar += 0.02f * score_difference;
+            }
+            
+            // Check for best move change and adjust time scalar
+            if (move != previous_best_move && previous_best_move != chess::Move::NO_MOVE) {
+                opt_time_scalar += 0.2f;
+            }
+            
+            // Update previous values
+            previous_best_move = move;
+            previous_best_eval = score;
             bestScore = score;
+            
             // Emit UCI info line for this iteration
             print_info_line(currentDepth, bestScore);
             currentDepth += IT_DEPTH_STEP;
-            // Respect soft deadline: finish current iteration then exit
-            if (clock::now() >= soft_deadline) break;
+            
+            // Calculate adjusted soft deadline based on time scalar
+            clock::time_point adjusted_soft_deadline;
+            if (budget.soft_ms > 0ULL) {
+                // Calculate the adjusted soft time limit
+                unsigned long long adjusted_soft_ms = static_cast<unsigned long long>(budget.soft_ms * opt_time_scalar);
+                adjusted_soft_deadline = start_tp + std::chrono::milliseconds(adjusted_soft_ms);
+            } else {
+                adjusted_soft_deadline = clock::time_point::max();
+            }
+            
+            // Respect adjusted soft deadline: finish current iteration then exit
+            if (clock::now() >= adjusted_soft_deadline) break;
         }
 
         if (root_->bestMove == chess::Move::NO_MOVE) {

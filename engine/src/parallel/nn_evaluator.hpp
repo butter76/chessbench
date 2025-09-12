@@ -339,7 +339,7 @@ private:
                 if (!path.empty()) break;
             }
         }
-        if (path.empty()) path = "./p2.plan";
+        if (path.empty()) path = "./r0.plan";
         return path;
     }
 

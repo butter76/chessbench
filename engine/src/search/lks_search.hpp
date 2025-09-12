@@ -299,7 +299,7 @@ public:
         // Ensure policy is sorted and normalized before expansion
         sort_and_normalize(node);
 
-        const float NULL_EPS = 1e-4f;
+        const float NULL_EPS = 1e-5f;
         const float node_depth_reduction = -2.0f * std::log(node.U + 1e-6f);
 
         auto is_leaf_node = [&](const LKSNode &n) {

@@ -432,6 +432,7 @@ public:
         }
 
         // Phase 3: re-search improvers (non-first moves)
+        bool improver = true;
         for (std::size_t k = 0; k < improver_indices.size(); ++k) {
             std::size_t i = improver_indices[k];
             auto &pe = node.policy[i];
@@ -459,6 +460,10 @@ public:
                 score = -child_out.score;
                 new_depth += RE_SEARCH_DEPTH;
                 re_search_count += 1;
+
+                if (score > alpha) {
+                    improver = true;
+                }
             }
 
             // If still improving alpha, do full-window re-search
@@ -473,25 +478,36 @@ public:
                 score = -child_out.score;
             }
 
-            // Update policy
-            float new_policy = pe.policy;
-            if (node_type == NodeType::CUT && score > alpha) {
-                new_policy = pe.policy * std::exp(re_search_count * RE_SEARCH_DEPTH);
-            } else {
-                new_policy = pe.policy + IMPROVER_POLICY_INCREASE;
-                if (!(score > alpha)) {
-                    float clip = std::max(node.policy[0].policy * 0.98f, pe.policy);
-                    new_policy = std::min(new_policy, clip);
-                }
-            }
             if (score > alpha) {
+                improver = true;
+            }
+
+            // Update policy
+            if (improver) {
                 if (root) {
                     std::ostringstream oss;
-                    oss << "info string successfully re-searched improver " << chess::uci::moveToUci(pe.move) << " at nodes " << getGpuEvaluationsCount();
+                    oss << "info string upweighting improver " << chess::uci::moveToUci(pe.move);
                     std::cout << oss.str() << '\n' << std::flush;
                 }
+                float new_policy = pe.policy;
+                if (node_type == NodeType::CUT && score > alpha) {
+                    new_policy = pe.policy * std::exp(re_search_count * RE_SEARCH_DEPTH);
+                } else {
+                    new_policy = pe.policy + IMPROVER_POLICY_INCREASE;
+                    if (!(score > alpha)) {
+                        float clip = std::max(node.policy[0].policy * 0.98f, pe.policy);
+                        new_policy = std::min(new_policy, clip);
+                    }
+                }
+                if (score > alpha) {
+                    if (root) {
+                        std::ostringstream oss;
+                        oss << "info string successfully re-searched improver " << chess::uci::moveToUci(pe.move) << " at nodes " << getGpuEvaluationsCount();
+                        std::cout << oss.str() << '\n' << std::flush;
+                    }
+                }
+                pe.policy = new_policy;
             }
-            pe.policy = new_policy;
 
             // After finishing this child's re-searches, update global alpha
             if (score > alpha) alpha = score;

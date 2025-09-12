@@ -521,6 +521,7 @@ public:
                 node.bestMove = bestMove;
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
+            improver = false;
         }
 
         update_tt(board, alpha0, beta0, depth, bestScore);

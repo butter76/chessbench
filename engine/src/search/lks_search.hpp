@@ -40,6 +40,8 @@ constexpr float IT_DEPTH_STEP = 0.2f;
 constexpr float RE_SEARCH_DEPTH = IT_DEPTH_STEP;
 constexpr float IMPROVER_POLICY_INCREASE = RE_SEARCH_DEPTH / 2;
 
+constexpr float NULL_EPS = 1e-6f;
+
 // Using cppcoro::task for async operations
 
 class LksSearch : public SearchAlgo {
@@ -299,7 +301,6 @@ public:
         // Ensure policy is sorted and normalized before expansion
         sort_and_normalize(node);
 
-        const float NULL_EPS = 1e-5f;
         const float node_depth_reduction = -2.0f * std::log(node.U + 1e-6f);
 
         auto is_leaf_node = [&](const LKSNode &n) {
@@ -739,7 +740,6 @@ private:
         int rec_depth,
         int pv_depth
     ) {
-        const float NULL_EPS = 1e-4f;
         auto &pe = node.policy[i];
 
         // Ensure child exists and backpropagate policy updates

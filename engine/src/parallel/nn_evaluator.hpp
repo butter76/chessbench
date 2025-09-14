@@ -114,8 +114,9 @@ private:
     nvinfer1::IRuntime* trt_runtime{nullptr};
     nvinfer1::ICudaEngine* trt_engine{nullptr};
     nvinfer1::IExecutionContext* trt_context{nullptr};
-    // One context per optimization profile (dedicated to a fixed batch size)
-    std::vector<nvinfer1::IExecutionContext*> contexts_{};
+    // One engine/context per allowed batch size (r0_{B}.plan)
+    std::vector<nvinfer1::ICudaEngine*> engines_{}; // index by B
+    std::vector<nvinfer1::IExecutionContext*> contexts_{}; // index by B
     cudaStream_t trt_stream{};
 
     // CUDA Graph caching per batch size 1..max_batch_size_
@@ -124,6 +125,8 @@ private:
         bool valid{false};
         int profileIndex{-1};
         nvinfer1::IExecutionContext* context{nullptr};
+        nvinfer1::ICudaEngine* engine{nullptr};
+        nvinfer1::DataType dt_tokens{nvinfer1::DataType::kINT32};
         // Graph handles
         cudaGraph_t graph{nullptr};
         cudaGraphExec_t graphExec{nullptr};
@@ -190,7 +193,7 @@ private:
         return -1;
     }
 
-    bool build_graph_for_batch(int B, int profileIndex, nvinfer1::IExecutionContext* ctx) {
+    bool build_graph_for_batch(int B, int profileIndex, nvinfer1::IExecutionContext* ctx, nvinfer1::ICudaEngine* engine) {
         if (B < 0) return false;
         if (static_cast<size_t>(B) >= graphs_.size()) return false;
         BatchGraph& G = graphs_[static_cast<size_t>(B)];
@@ -199,11 +202,7 @@ private:
 
         // Configure input shape for this batch
         nvinfer1::Dims inputDims; inputDims.nbDims = 2; inputDims.d[0] = B; inputDims.d[1] = 68;
-        // Activate the intended optimization profile for this context
-        if (!ctx->setOptimizationProfileAsync(profileIndex, trt_stream)) {
-            std::cerr << "[NNEvaluator] setOptimizationProfileAsync failed for profile=" << profileIndex << "\n";
-            return false;
-        }
+        // For multi-engine fixed-shape plans, no profile switch needed; profileIndex kept for completeness
         if (!ctx->setInputShape("tokens", inputDims)) {
             std::cerr << "[NNEvaluator] setInputShape failed for B=" << B << "\n";
             return false;
@@ -213,8 +212,11 @@ private:
         G.batchSize = B;
         G.profileIndex = profileIndex;
         G.context = ctx;
+        G.engine = engine;
+        // Determine tokens dtype for packing
+        G.dt_tokens = engine ? engine->getTensorDataType("tokens") : nvinfer1::DataType::kINT32;
         G.tokensCount = static_cast<size_t>(B) * 68;
-        G.tokensBytes = G.tokensCount * (tokens_dtype == nvinfer1::DataType::kINT32 ? sizeof(int32_t) : sizeof(int64_t));
+        G.tokensBytes = G.tokensCount * (G.dt_tokens == nvinfer1::DataType::kINT32 ? sizeof(int32_t) : sizeof(int64_t));
         if (cudaHostAlloc(&G.h_tokens, G.tokensBytes, cudaHostAllocPortable) != cudaSuccess) {
             std::cerr << "[NNEvaluator] cudaHostAlloc h_tokens failed\n";
             return false;
@@ -230,7 +232,7 @@ private:
             if (bindingIndex < 0) return;
             nvinfer1::Dims d = ctx->getTensorShape(name);
             n_elem = volume(d);
-            dt = trt_engine->getTensorDataType(name);
+            dt = engine->getTensorDataType(name);
             n_bytes = n_elem * elementSize(dt);
             if (n_bytes == 0) return;
             if (cudaMalloc(d_ptr, n_bytes) != cudaSuccess) {
@@ -244,12 +246,20 @@ private:
             ctx->setTensorAddress(name, *d_ptr);
         };
 
-        // Outputs
-        prep_out("value", binding_idx_value, &G.d_value, &G.h_value, G.n_value, G.bytes_value, G.dt_value);
-        if (binding_idx_hl >= 0)    prep_out("hl", binding_idx_hl, &G.d_hl, &G.h_hl, G.n_hl, G.bytes_hl, G.dt_hl);
-        if (binding_idx_hardest >= 0) prep_out("hardest_policy", binding_idx_hardest, &G.d_hard, &G.h_hard, G.n_hard, G.bytes_hard, G.dt_hard);
-        if (binding_idx_U >= 0)     prep_out("U", binding_idx_U, &G.d_U, &G.h_U, G.n_U, G.bytes_U, G.dt_U);
-        if (binding_idx_Q >= 0)     prep_out("Q", binding_idx_Q, &G.d_Q, &G.h_Q, G.n_Q, G.bytes_Q, G.dt_Q);
+        // Outputs: prepare if present in this engine
+        auto has_tensor = [&](const char* tname) -> bool {
+            int nb = engine->getNbIOTensors();
+            for (int i = 0; i < nb; ++i) {
+                const char* nm = engine->getIOTensorName(i);
+                if (nm && std::string(nm) == std::string(tname)) return true;
+            }
+            return false;
+        };
+        if (has_tensor("value")) prep_out("value", 0, &G.d_value, &G.h_value, G.n_value, G.bytes_value, G.dt_value);
+        if (has_tensor("hl"))    prep_out("hl", 0, &G.d_hl, &G.h_hl, G.n_hl, G.bytes_hl, G.dt_hl);
+        if (has_tensor("hardest_policy")) prep_out("hardest_policy", 0, &G.d_hard, &G.h_hard, G.n_hard, G.bytes_hard, G.dt_hard);
+        if (has_tensor("U"))     prep_out("U", 0, &G.d_U, &G.h_U, G.n_U, G.bytes_U, G.dt_U);
+        if (has_tensor("Q"))     prep_out("Q", 0, &G.d_Q, &G.h_Q, G.n_Q, G.bytes_Q, G.dt_Q);
 
         // Begin capture
         if (cudaStreamBeginCapture(trt_stream, cudaStreamCaptureModeGlobal) != cudaSuccess) {
@@ -289,33 +299,23 @@ private:
     }
 
     void initialize_graphs() {
-        // Ensure stream and engine available
-        if (!trt_engine || !trt_stream) return;
-        // Create one context per optimization profile
-        int numProfiles = trt_engine->getNbOptimizationProfiles();
-        contexts_.assign(static_cast<size_t>(numProfiles), nullptr);
-        for (int p = 0; p < numProfiles; ++p) {
-            contexts_[static_cast<size_t>(p)] = trt_engine->createExecutionContext();
-            if (!contexts_[static_cast<size_t>(p)]) {
-                std::cerr << "[NNEvaluator] Failed to create execution context for profile " << p << "\n";
-            }
-        }
+        // Ensure stream available
+        if (!trt_stream) return;
         // Prepare graphs_ storage for indices [0..max_batch_size_]
         graphs_.assign(max_batch_size_ + 1, BatchGraph{});
 
-        // Allowed batch sizes mapping (must match engine profiles)
+        // Allowed batch sizes mapping
         static constexpr int allowed_sizes[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,24,32,48};
         for (int B : allowed_sizes) {
             if (B > static_cast<int>(max_batch_size_)) continue;
-            int p = profile_index_for_batch(B);
-            if (p < 0 || p >= numProfiles) {
+            nvinfer1::IExecutionContext* ctx = (static_cast<size_t>(B) < contexts_.size()) ? contexts_[static_cast<size_t>(B)] : nullptr;
+            nvinfer1::ICudaEngine* engine = (static_cast<size_t>(B) < engines_.size()) ? engines_[static_cast<size_t>(B)] : nullptr;
+            if (!ctx || !engine) {
                 graphs_[static_cast<size_t>(B)].valid = false;
                 continue;
             }
-            nvinfer1::IExecutionContext* ctx = contexts_[static_cast<size_t>(p)];
-            bool ok = build_graph_for_batch(B, p, ctx);
+            bool ok = build_graph_for_batch(B, /*profileIndex*/0, ctx, engine);
             if (!ok) {
-                // Keep going; some batch sizes may be unsupported if outputs depend on B
                 graphs_[static_cast<size_t>(B)].valid = false;
             }
         }
@@ -385,71 +385,52 @@ private:
 
     void initialize_trt(const char* plan_path) {
         release_trt();
-        // Read plan file
-        FILE* f = fopen(plan_path, "rb");
-        if (!f) {
-            std::cerr << "[NNEvaluator] Could not open plan file: " << plan_path << "\n";
-            return;
-        }
-        fseek(f, 0, SEEK_END);
-        long len = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        std::vector<unsigned char> blob(static_cast<size_t>(len));
-        if (fread(blob.data(), 1, blob.size(), f) != blob.size()) {
-            std::cerr << "[NNEvaluator] Failed to read plan file: " << plan_path << "\n";
-            fclose(f);
-            return;
-        }
-        fclose(f);
-
         trt_runtime = nvinfer1::createInferRuntime(trt_logger);
         if (!trt_runtime) {
             std::cerr << "[NNEvaluator] Failed to create TensorRT runtime\n";
             return;
         }
-        trt_engine = trt_runtime->deserializeCudaEngine(blob.data(), blob.size());
-        if (!trt_engine) {
-            std::cerr << "[NNEvaluator] Failed to deserialize engine\n";
-            release_trt();
-            return;
-        }
-        trt_context = trt_engine->createExecutionContext();
-        if (!trt_context) {
-            std::cerr << "[NNEvaluator] Failed to create execution context\n";
-            release_trt();
-            return;
+        // Load per-batch engines r0_{B}.plan and create contexts
+        static constexpr int allowed_sizes[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,24,32,48};
+        engines_.assign(max_batch_size_ + 1, nullptr);
+        contexts_.assign(max_batch_size_ + 1, nullptr);
+
+        for (int B : allowed_sizes) {
+            if (B > static_cast<int>(max_batch_size_)) continue;
+            char pathbuf[512];
+            std::snprintf(pathbuf, sizeof(pathbuf), "/home/shadeform/searchless_chess/engine/r0_%d.plan", B);
+            FILE* fB = fopen(pathbuf, "rb");
+            if (!fB) {
+                // Mark missing; continue
+                continue;
+            }
+            fseek(fB, 0, SEEK_END);
+            long lenB = ftell(fB);
+            fseek(fB, 0, SEEK_SET);
+            std::vector<unsigned char> blobB(static_cast<size_t>(lenB));
+            if (fread(blobB.data(), 1, blobB.size(), fB) != blobB.size()) {
+                fclose(fB);
+                continue;
+            }
+            fclose(fB);
+            nvinfer1::ICudaEngine* eng = trt_runtime->deserializeCudaEngine(blobB.data(), blobB.size());
+            if (!eng) {
+                continue;
+            }
+            nvinfer1::IExecutionContext* ctx = eng->createExecutionContext();
+            if (!ctx) {
+                delete eng;
+                continue;
+            }
+            engines_[static_cast<size_t>(B)] = eng;
+            contexts_[static_cast<size_t>(B)] = ctx;
         }
         if (cudaStreamCreate(&trt_stream) != cudaSuccess) {
             std::cerr << "[NNEvaluator] Failed to create CUDA stream\n";
             release_trt();
             return;
         }
-
-        // Resolve bindings by name
-        int nb = trt_engine->getNbIOTensors();
-        for (int i = 0; i < nb; ++i) {
-            const char* name = trt_engine->getIOTensorName(i);
-            auto mode = trt_engine->getTensorIOMode(name);
-            std::string n{name ? name : ""};
-            if (mode == nvinfer1::TensorIOMode::kINPUT) {
-                if (n == "tokens") {
-                    binding_idx_tokens = i;
-                    tokens_dtype = trt_engine->getTensorDataType(name);
-                }
-            } else {
-                if (n == "value") binding_idx_value = i;
-                if (n == "hl") binding_idx_hl = i;
-                if (n == "hardest_policy") binding_idx_hardest = i;
-                if (n == "U") binding_idx_U = i;
-                if (n == "Q") binding_idx_Q = i;
-            }
-        }
-        if (binding_idx_tokens < 0 || binding_idx_value < 0) {
-            std::cerr << "[NNEvaluator] Required tensors not found (tokens/value)\n";
-            release_trt();
-            return;
-        }
-        std::cerr << "[NNEvaluator] TensorRT engine loaded from " << plan_path << "\n";
+        std::cerr << "[NNEvaluator] TensorRT engines loaded (per-batch)\n";
 
         // Determine max batch size from options (only once)
         if (options_) {
@@ -467,7 +448,7 @@ private:
             }
         }
 
-        // Initialize CUDA Graphs for batch sizes 1..max_batch_size_
+        // Initialize CUDA Graphs for allowed batch sizes
         initialize_graphs();
     }
 
@@ -528,19 +509,19 @@ private:
             }
 
             // Ensure TensorRT is initialized lazily using configured plan path
-            if (!trt_context) {
+            if (contexts_.empty()) {
                 const std::string plan_path = resolve_plan_path();
                 initialize_trt(plan_path.c_str());
             }
 
-            // If TensorRT is initialized, run inference; otherwise fallback
-            if (trt_context && binding_idx_tokens >= 0 && binding_idx_value >= 0) {
+            // If TensorRT per-batch engines are initialized, run inference via CUDA Graphs
+            if (!contexts_.empty()) {
                 const int B = static_cast<int>(batch.size());
                 // Use CUDA Graph if available for this batch size
                 if (B > 0 && B <= static_cast<int>(max_batch_size_) && static_cast<size_t>(B) < graphs_.size() && graphs_[static_cast<size_t>(B)].valid) {
                     BatchGraph& G = graphs_[static_cast<size_t>(B)];
                     // Pack tokens into pinned host input buffer
-                    if (tokens_dtype == nvinfer1::DataType::kINT32) {
+                    if (G.dt_tokens == nvinfer1::DataType::kINT32) {
                         int32_t* ht = reinterpret_cast<int32_t*>(G.h_tokens);
                         for (int i = 0; i < B; ++i) {
                             const auto& arr = batch[static_cast<size_t>(i)].tokens;
@@ -603,136 +584,11 @@ private:
                         batch[static_cast<size_t>(i)].on_ready(std::move(er));
                     }
                 } else {
-                    // Fallback: dynamic path as before
-                    // Set input shape [B, 68]
-                    nvinfer1::Dims inputDims; inputDims.nbDims = 2; inputDims.d[0] = B; inputDims.d[1] = 68;
-                    if (!trt_context->setInputShape("tokens", inputDims)) {
-                        std::cerr << "[NNEvaluator] Failed to set input shape" << std::endl;
+                    // No graph for this B; cancel tasks gracefully
+                    for (auto& r : batch) {
+                        EvalResult er; er.value = 0.0f; er.canceled = true; r.on_ready(std::move(er));
                     }
-
-                    // Host staging for tokens cast
-                    size_t tokensCount = static_cast<size_t>(B) * 68;
-                    std::vector<int32_t> tokens_i32;
-                    std::vector<int64_t> tokens_i64;
-                    void* d_tokens = nullptr;
-                    size_t tokensBytes = 0;
-                    if (tokens_dtype == nvinfer1::DataType::kINT32) {
-                        tokens_i32.resize(tokensCount);
-                        for (size_t i = 0; i < batch.size(); ++i) {
-                            const auto& arr = batch[i].tokens;
-                            for (int j = 0; j < 68; ++j) tokens_i32[i * 68 + j] = static_cast<int32_t>(arr[j]);
-                        }
-                        tokensBytes = tokens_i32.size() * sizeof(int32_t);
-                        cudaMalloc(&d_tokens, tokensBytes);
-                        cudaMemcpyAsync(d_tokens, tokens_i32.data(), tokensBytes, cudaMemcpyHostToDevice, trt_stream);
-                    } else {
-                        tokens_i64.resize(tokensCount);
-                        for (size_t i = 0; i < batch.size(); ++i) {
-                            const auto& arr = batch[i].tokens;
-                            for (int j = 0; j < 68; ++j) tokens_i64[i * 68 + j] = static_cast<int64_t>(arr[j]);
-                        }
-                        tokensBytes = tokens_i64.size() * sizeof(int64_t);
-                        cudaMalloc(&d_tokens, tokensBytes);
-                        cudaMemcpyAsync(d_tokens, tokens_i64.data(), tokensBytes, cudaMemcpyHostToDevice, trt_stream);
-                    }
-                    trt_context->setTensorAddress("tokens", d_tokens);
-
-                    // Prepare outputs; we need at least 'value', but provide all if present
-                    auto prepare_output = [&](const char* name, int bindingIndex, void** d_ptr, nvinfer1::DataType& dtype_out, size_t& elems) {
-                        if (bindingIndex < 0) return;
-                        nvinfer1::Dims d = trt_context->getTensorShape(name);
-                        elems = volume(d);
-                        dtype_out = trt_engine->getTensorDataType(name);
-                        size_t bytes = elems * elementSize(dtype_out);
-                        cudaMalloc(d_ptr, bytes);
-                        trt_context->setTensorAddress(name, *d_ptr);
-                    };
-
-                    void* d_value = nullptr; size_t n_value = 0; nvinfer1::DataType dt_value = nvinfer1::DataType::kFLOAT;
-                    void* d_hl = nullptr; size_t n_hl = 0; nvinfer1::DataType dt_hl = nvinfer1::DataType::kFLOAT;
-                    void* d_hard = nullptr; size_t n_hard = 0; nvinfer1::DataType dt_hard = nvinfer1::DataType::kFLOAT;
-                    void* d_U = nullptr; size_t n_U = 0; nvinfer1::DataType dt_U = nvinfer1::DataType::kFLOAT;
-                    void* d_Q = nullptr; size_t n_Q = 0; nvinfer1::DataType dt_Q = nvinfer1::DataType::kFLOAT;
-
-                    prepare_output("value", binding_idx_value, &d_value, dt_value, n_value);
-                    if (binding_idx_hl >= 0) prepare_output("hl", binding_idx_hl, &d_hl, dt_hl, n_hl);
-                    if (binding_idx_hardest >= 0) prepare_output("hardest_policy", binding_idx_hardest, &d_hard, dt_hard, n_hard);
-                    if (binding_idx_U >= 0) prepare_output("U", binding_idx_U, &d_U, dt_U, n_U);
-                    if (binding_idx_Q >= 0) prepare_output("Q", binding_idx_Q, &d_Q, dt_Q, n_Q);
-
-                    // Execute
-                    if (!trt_context->enqueueV3(trt_stream)) {
-                        std::cerr << "[NNEvaluator] enqueueV3 failed" << std::endl;
-                        // Fail the batch safely
-                        for (auto& r : batch) {
-                            EvalResult er; er.value = 0.0f; er.canceled = true; r.on_ready(std::move(er));
-                        }
-                        // Skip device copies and continue loop
-                        continue;
-                    }
-
-                    // Copy back outputs and distribute results
-                    std::vector<float> host_values(n_value);
-                    if (dt_value == nvinfer1::DataType::kHALF) {
-                        std::vector<__half> tmp(n_value);
-                        cudaMemcpyAsync(tmp.data(), d_value, n_value * sizeof(__half), cudaMemcpyDeviceToHost, trt_stream);
-                        cudaStreamSynchronize(trt_stream);
-                        for (size_t i = 0; i < n_value; ++i) host_values[i] = __half2float(tmp[i]);
-                    } else {
-                        cudaMemcpyAsync(host_values.data(), d_value, n_value * sizeof(float), cudaMemcpyDeviceToHost, trt_stream);
-                    }
-                    cudaStreamSynchronize(trt_stream);
-
-                    auto copy_out_float = [&](void* d_ptr, size_t n_elem, nvinfer1::DataType dt) -> std::vector<float> {
-                        std::vector<float> host;
-                        if (!d_ptr || n_elem == 0) return host;
-                        host.resize(n_elem);
-                        if (dt == nvinfer1::DataType::kHALF) {
-                            std::vector<__half> tmp(n_elem);
-                            cudaMemcpyAsync(tmp.data(), d_ptr, n_elem * sizeof(__half), cudaMemcpyDeviceToHost, trt_stream);
-                            cudaStreamSynchronize(trt_stream);
-                            for (size_t i = 0; i < n_elem; ++i) host[i] = __half2float(tmp[i]);
-                        } else {
-                            cudaMemcpyAsync(host.data(), d_ptr, n_elem * sizeof(float), cudaMemcpyDeviceToHost, trt_stream);
-                            cudaStreamSynchronize(trt_stream);
-                        }
-                        return host;
-                    };
-
-                    std::vector<float> host_hl = copy_out_float(d_hl, n_hl, dt_hl);
-                    std::vector<float> host_hard = copy_out_float(d_hard, n_hard, dt_hard);
-                    std::vector<float> host_U = copy_out_float(d_U, n_U, dt_U);
-                    std::vector<float> host_Q = copy_out_float(d_Q, n_Q, dt_Q);
-
-                    // Determine per-sample sizes (assume leading batch dim)
-                    auto per_or_zero2 = [&](size_t total) -> size_t { return (B > 0 && total % static_cast<size_t>(B) == 0) ? (total / static_cast<size_t>(B)) : 0; };
-                    const size_t per_hl = per_or_zero2(n_hl);
-                    const size_t per_hard = per_or_zero2(n_hard);
-                    const size_t per_U = per_or_zero2(n_U);
-                    const size_t per_Q = per_or_zero2(n_Q);
-
-                    for (int i = 0; i < B; ++i) {
-                        float score = (n_value >= static_cast<size_t>((i + 1))) ? host_values[static_cast<size_t>(i)] : 0.0f;
-                        if (is_batch_verbose()) {
-                            std::cerr << tokensToString(batch[static_cast<size_t>(i)].tokens) << " => " << score << std::endl;
-                        }
-                        EvalResult er;
-                        er.value = score;
-                        er.canceled = false;
-                        if (per_hl > 0) er.hl = std::vector<float>(host_hl.begin() + static_cast<std::ptrdiff_t>(i * per_hl), host_hl.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hl));
-                        if (per_hard > 0) er.policy = std::vector<float>(host_hard.begin() + static_cast<std::ptrdiff_t>(i * per_hard), host_hard.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_hard));
-                        if (per_U > 0) er.U = std::vector<float>(host_U.begin() + static_cast<std::ptrdiff_t>(i * per_U), host_U.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_U));
-                        if (per_Q > 0) er.Q = std::vector<float>(host_Q.begin() + static_cast<std::ptrdiff_t>(i * per_Q), host_Q.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_Q));
-                        batch[static_cast<size_t>(i)].on_ready(std::move(er));
-                    }
-
-                    // Cleanup device buffers
-                    if (d_tokens) cudaFree(d_tokens);
-                    if (d_value) cudaFree(d_value);
-                    if (d_hl) cudaFree(d_hl);
-                    if (d_hard) cudaFree(d_hard);
-                    if (d_U) cudaFree(d_U);
-                    if (d_Q) cudaFree(d_Q);
+                    continue;
                 }
             } else {
                 // No TensorRT available: cancel all requests and continue without throwing

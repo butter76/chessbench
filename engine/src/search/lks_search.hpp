@@ -353,7 +353,7 @@ public:
         for (std::size_t i = 0; i < policy_size; ++i) {
             auto &pe = node.policy[i];
             const float move_weight = pe.policy;
-            float new_depth = depth + std::log(move_weight + 1e-6f) - std::log(weight_divisor + 1e-6f);
+            float new_depth = depth + std::log(move_weight + 1e-6f);
             if (i == 0) best_move_depth = new_depth;
 
             new_depths[i] = new_depth;

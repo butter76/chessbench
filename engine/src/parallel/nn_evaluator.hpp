@@ -44,8 +44,8 @@ struct EvalResult {
 class NNEvaluator {
 public:
     // Runtime-configurable maximum batch size, set during initialize_trt()
-    // Defaults to 25 if no option provided.
-    std::size_t max_batch_size_{25};
+    // Defaults to 48 if no option provided.
+    std::size_t max_batch_size_{48};
 
     NNEvaluator() = default;
 
@@ -114,12 +114,16 @@ private:
     nvinfer1::IRuntime* trt_runtime{nullptr};
     nvinfer1::ICudaEngine* trt_engine{nullptr};
     nvinfer1::IExecutionContext* trt_context{nullptr};
+    // One context per optimization profile (dedicated to a fixed batch size)
+    std::vector<nvinfer1::IExecutionContext*> contexts_{};
     cudaStream_t trt_stream{};
 
     // CUDA Graph caching per batch size 1..max_batch_size_
     struct BatchGraph {
         int batchSize{0};
         bool valid{false};
+        int profileIndex{-1};
+        nvinfer1::IExecutionContext* context{nullptr};
         // Graph handles
         cudaGraph_t graph{nullptr};
         cudaGraphExec_t graphExec{nullptr};
@@ -178,22 +182,37 @@ private:
         for (auto& g : graphs_) release_one_graph(g);
     }
 
-    bool build_graph_for_batch(int B) {
+    static inline int profile_index_for_batch(int B) {
+        if (B >= 1 && B <= 16) return B - 1; // profiles 0..15
+        if (B == 24) return 16;
+        if (B == 32) return 17;
+        if (B == 48) return 18;
+        return -1;
+    }
+
+    bool build_graph_for_batch(int B, int profileIndex, nvinfer1::IExecutionContext* ctx) {
         if (B < 0) return false;
         if (static_cast<size_t>(B) >= graphs_.size()) return false;
         BatchGraph& G = graphs_[static_cast<size_t>(B)];
         release_one_graph(G);
-        if (!trt_context) return false;
+        if (!ctx) return false;
 
         // Configure input shape for this batch
         nvinfer1::Dims inputDims; inputDims.nbDims = 2; inputDims.d[0] = B; inputDims.d[1] = 68;
-        if (!trt_context->setInputShape("tokens", inputDims)) {
+        // Activate the intended optimization profile for this context
+        if (!ctx->setOptimizationProfileAsync(profileIndex, trt_stream)) {
+            std::cerr << "[NNEvaluator] setOptimizationProfileAsync failed for profile=" << profileIndex << "\n";
+            return false;
+        }
+        if (!ctx->setInputShape("tokens", inputDims)) {
             std::cerr << "[NNEvaluator] setInputShape failed for B=" << B << "\n";
             return false;
         }
 
         // Allocate tokens buffers
         G.batchSize = B;
+        G.profileIndex = profileIndex;
+        G.context = ctx;
         G.tokensCount = static_cast<size_t>(B) * 68;
         G.tokensBytes = G.tokensCount * (tokens_dtype == nvinfer1::DataType::kINT32 ? sizeof(int32_t) : sizeof(int64_t));
         if (cudaHostAlloc(&G.h_tokens, G.tokensBytes, cudaHostAllocPortable) != cudaSuccess) {
@@ -204,12 +223,12 @@ private:
             std::cerr << "[NNEvaluator] cudaMalloc d_tokens failed\n";
             return false;
         }
-        trt_context->setTensorAddress("tokens", G.d_tokens);
+        ctx->setTensorAddress("tokens", G.d_tokens);
 
         // Helper to prepare an output binding
         auto prep_out = [&](const char* name, int bindingIndex, void** d_ptr, void** h_ptr, size_t& n_elem, size_t& n_bytes, nvinfer1::DataType& dt) {
             if (bindingIndex < 0) return;
-            nvinfer1::Dims d = trt_context->getTensorShape(name);
+            nvinfer1::Dims d = ctx->getTensorShape(name);
             n_elem = volume(d);
             dt = trt_engine->getTensorDataType(name);
             n_bytes = n_elem * elementSize(dt);
@@ -222,7 +241,7 @@ private:
                 std::cerr << "[NNEvaluator] cudaHostAlloc output failed for " << name << "\n";
                 return;
             }
-            trt_context->setTensorAddress(name, *d_ptr);
+            ctx->setTensorAddress(name, *d_ptr);
         };
 
         // Outputs
@@ -240,13 +259,13 @@ private:
         // H2D tokens copy from pinned host
         cudaMemcpyAsync(G.d_tokens, G.h_tokens, G.tokensBytes, cudaMemcpyHostToDevice, trt_stream);
         // Enqueue inference
-        trt_context->setTensorAddress("tokens", G.d_tokens);
-        if (G.d_value) trt_context->setTensorAddress("value", G.d_value);
-        if (G.d_hl) trt_context->setTensorAddress("hl", G.d_hl);
-        if (G.d_hard) trt_context->setTensorAddress("hardest_policy", G.d_hard);
-        if (G.d_U) trt_context->setTensorAddress("U", G.d_U);
-        if (G.d_Q) trt_context->setTensorAddress("Q", G.d_Q);
-        trt_context->enqueueV3(trt_stream);
+        ctx->setTensorAddress("tokens", G.d_tokens);
+        if (G.d_value) ctx->setTensorAddress("value", G.d_value);
+        if (G.d_hl) ctx->setTensorAddress("hl", G.d_hl);
+        if (G.d_hard) ctx->setTensorAddress("hardest_policy", G.d_hard);
+        if (G.d_U) ctx->setTensorAddress("U", G.d_U);
+        if (G.d_Q) ctx->setTensorAddress("Q", G.d_Q);
+        ctx->enqueueV3(trt_stream);
         // D2H copies into pinned host buffers
         if (G.d_value && G.h_value && G.bytes_value) cudaMemcpyAsync(G.h_value, G.d_value, G.bytes_value, cudaMemcpyDeviceToHost, trt_stream);
         if (G.d_hl && G.h_hl && G.bytes_hl) cudaMemcpyAsync(G.h_hl, G.d_hl, G.bytes_hl, cudaMemcpyDeviceToHost, trt_stream);
@@ -270,12 +289,31 @@ private:
     }
 
     void initialize_graphs() {
-        // Ensure stream and context available
-        if (!trt_context || !trt_stream) return;
+        // Ensure stream and engine available
+        if (!trt_engine || !trt_stream) return;
+        // Create one context per optimization profile
+        int numProfiles = trt_engine->getNbOptimizationProfiles();
+        contexts_.assign(static_cast<size_t>(numProfiles), nullptr);
+        for (int p = 0; p < numProfiles; ++p) {
+            contexts_[static_cast<size_t>(p)] = trt_engine->createExecutionContext();
+            if (!contexts_[static_cast<size_t>(p)]) {
+                std::cerr << "[NNEvaluator] Failed to create execution context for profile " << p << "\n";
+            }
+        }
         // Prepare graphs_ storage for indices [0..max_batch_size_]
         graphs_.assign(max_batch_size_ + 1, BatchGraph{});
-        for (int B = 1; B <= static_cast<int>(max_batch_size_); ++B) {
-            bool ok = build_graph_for_batch(B);
+
+        // Allowed batch sizes mapping (must match engine profiles)
+        static constexpr int allowed_sizes[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,24,32,48};
+        for (int B : allowed_sizes) {
+            if (B > static_cast<int>(max_batch_size_)) continue;
+            int p = profile_index_for_batch(B);
+            if (p < 0 || p >= numProfiles) {
+                graphs_[static_cast<size_t>(B)].valid = false;
+                continue;
+            }
+            nvinfer1::IExecutionContext* ctx = contexts_[static_cast<size_t>(p)];
+            bool ok = build_graph_for_batch(B, p, ctx);
             if (!ok) {
                 // Keep going; some batch sizes may be unsupported if outputs depend on B
                 graphs_[static_cast<size_t>(B)].valid = false;
@@ -324,6 +362,8 @@ private:
     void release_trt() {
         release_graphs();
         if (trt_context) { delete trt_context; trt_context = nullptr; }
+        for (auto*& ctx : contexts_) { if (ctx) { delete ctx; ctx = nullptr; } }
+        contexts_.clear();
         if (trt_engine) { delete trt_engine; trt_engine = nullptr; }
         if (trt_runtime) { delete trt_runtime; trt_runtime = nullptr; }
         if (trt_stream) { cudaStreamDestroy(trt_stream); trt_stream = nullptr; }
@@ -458,11 +498,15 @@ private:
                 std::unique_lock<std::mutex> lock(mutex);
                 cv.wait(lock, [&]{ return stop.load() || !queue.empty(); });
                 if (stop.load() && queue.empty()) break;
-                // Prefer odd batch sizes when N>=10 by keeping one item in the queue if N is even
+                // Choose the largest allowed batch size in {1..16,24,32,48} that fits 'available' and max_batch_size_
                 std::size_t available = queue.size();
-                std::size_t to_take = std::min<std::size_t>(available, max_batch_size_);
-                if (to_take >= 10 && (to_take % 2 == 0)) {
-                    to_take -= 1;
+                std::size_t to_take = 0;
+                static constexpr int allowed_sizes[] = {48, 32, 24, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+                for (int s : allowed_sizes) {
+                    if (static_cast<std::size_t>(s) <= max_batch_size_ && available >= static_cast<std::size_t>(s)) {
+                        to_take = static_cast<std::size_t>(s);
+                        break;
+                    }
                 }
                 while (!queue.empty() && batch.size() < to_take) {
                     batch.push_back(std::move(queue.front()));

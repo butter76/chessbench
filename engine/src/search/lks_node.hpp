@@ -23,6 +23,7 @@ struct LKSNode {
     float value{0.0f};                    // scalar evaluation in [-1, 1]
     std::vector<LKSPolicyEntry> policy;   // ordered list of policy moves and heads
     float U{0.0f};                        // node-level uncertainty (e.g., stddev)
+    std::vector<float> cdf;               // CDF over hl bins (suffix sums of softmaxed hl)
     bool terminal{false};                 // terminal position flag
     chess::Move bestMove{chess::Move::NO_MOVE}; // cached best move from search
 
@@ -33,6 +34,13 @@ struct LKSNode {
             float u,
             bool t)
         : value(v), policy(std::move(pol)), U(u), terminal(t) {}
+
+    LKSNode(float v,
+            std::vector<LKSPolicyEntry> pol,
+            float u,
+            std::vector<float> c,
+            bool t)
+        : value(v), policy(std::move(pol)), U(u), cdf(std::move(c)), terminal(t) {}
 };
 
 } // namespace engine

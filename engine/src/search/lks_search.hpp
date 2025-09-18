@@ -301,7 +301,14 @@ public:
         // Ensure policy is sorted and normalized before expansion
         sort_and_normalize(node);
 
-        const float node_depth_reduction = -2.0f * std::log(node.U + 1e-6f);
+        float node_depth_reduction = -2.0f * std::log(node.U + 1e-6f);
+
+        if (node_type != NodeType::PV) {
+            int bin = static_cast<int>(std::floor(81 * (alpha + 1) / 2.0f));
+            bin = std::max(0, std::min(80, bin));
+            float prob_greater_than_alpha = std::max(1e-6f, node.cdf[bin]);
+            node_depth_reduction = std::max(node_depth_reduction, -std::log(prob_greater_than_alpha));
+        }
 
         auto is_leaf_node = [&](const LKSNode &n) {
             for (const auto &pe : n.policy) if (pe.child) return false;
@@ -324,7 +331,7 @@ public:
         }
         if (is_leaf_node(node)) {
             if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + node_depth_reduction) {
-                update_tt(board, alpha0, beta0, depth, node.value);
+                // update_tt(board, alpha0, beta0, depth, node.value);
                 co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
             }
 
@@ -538,8 +545,8 @@ public:
 private:
     // --- GPU evaluation cache ---
     struct CachedPolicyEntry { chess::Move move; float policy; float U; float Q; };
-    struct CachedNodeData { float value; std::vector<CachedPolicyEntry> entries; float node_U; };
-    struct NodeBuildResult { float value; std::vector<LKSPolicyEntry> entries; float node_U; };
+    struct CachedNodeData { float value; std::vector<CachedPolicyEntry> entries; float node_U; std::vector<float> cdf; };
+    struct NodeBuildResult { float value; std::vector<LKSPolicyEntry> entries; float node_U; std::vector<float> cdf; };
 
     struct StringHashCompare {
         std::size_t hash(const std::string &s) const noexcept {
@@ -568,7 +575,7 @@ private:
             e.child = nullptr;
             entries.push_back(std::move(e));
         }
-        return NodeBuildResult{c.value, std::move(entries), c.node_U};
+        return NodeBuildResult{c.value, std::move(entries), c.node_U, c.cdf};
     }
 
     NodeBuildResult build_from_eval_and_cache(const chess::Board &board,
@@ -626,8 +633,9 @@ private:
         }
         std::sort(entries.begin(), entries.end(), [](const LKSPolicyEntry &a, const LKSPolicyEntry &b){ return a.policy > b.policy; });
 
-        // Compute node-level U from hl logits as wdl_variance
+        // Compute node-level U from hl logits as wdl_variance and build CDF over bins
         float node_U = 0.0f;
+        std::vector<float> cdf;
         const int bins = static_cast<int>(eval.hl.size());
         if (bins > 0) {
             // softmax over hl
@@ -638,6 +646,14 @@ private:
             for (std::size_t i = 0; i < eval.hl.size(); ++i) { probs[i] = std::exp(static_cast<double>(eval.hl[i]) - max_hl); sump += probs[i]; }
             if (sump <= 0.0) sump = 1.0;
             for (double &p : probs) p /= sump;
+
+            // Build suffix-sum CDF: [p1+...+pn, p2+...+pn, ..., pn]
+            cdf.resize(static_cast<std::size_t>(bins));
+            double running = 0.0;
+            for (int i = bins - 1; i >= 0; --i) {
+                running += probs[static_cast<std::size_t>(i)];
+                cdf[static_cast<std::size_t>(i)] = static_cast<float>(running);
+            }
 
             // bin centers in [0,1]
             const double N = static_cast<double>(bins);
@@ -661,10 +677,10 @@ private:
             EvalCacheMap::accessor acc;
             const std::string fen = board.getFen(false);
             eval_cache_.insert(acc, fen);
-            acc->second = CachedNodeData{value, std::move(cached_entries), node_U};
+            acc->second = CachedNodeData{value, std::move(cached_entries), node_U, cdf};
         }
 
-        return NodeBuildResult{value, std::move(entries), node_U};
+        return NodeBuildResult{value, std::move(entries), node_U, std::move(cdf)};
     }
 
     // --- Transposition Table (TT) ---
@@ -1007,7 +1023,7 @@ public:
         // Cache lookup by FEN board key
         const std::string fen = board.getFen(false);
         if (auto cached = try_load_from_cache(fen)) {
-            co_return std::optional<LKSNode>(std::in_place, cached->value, std::move(cached->entries), cached->node_U, false);
+            co_return std::optional<LKSNode>(std::in_place, cached->value, std::move(cached->entries), cached->node_U, std::move(cached->cdf), false);
         }
 
         // Evaluate network fully (suspend until ready)
@@ -1018,7 +1034,7 @@ public:
 
         // Build node data from eval and store in cache
         auto built = build_from_eval_and_cache(board, eval);
-        co_return std::optional<LKSNode>(std::in_place, built.value, std::move(built.entries), built.node_U, false);
+        co_return std::optional<LKSNode>(std::in_place, built.value, std::move(built.entries), built.node_U, std::move(built.cdf), false);
     }
 };
 

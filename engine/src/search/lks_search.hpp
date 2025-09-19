@@ -307,7 +307,18 @@ public:
             int bin = static_cast<int>(std::floor(81 * (alpha + 1) / 2.0f));
             bin = std::max(0, std::min(80, bin));
             float prob_greater_than_alpha = std::max(1e-6f, node.cdf[bin]);
-            node_depth_reduction = std::max(node_depth_reduction, -std::log(prob_greater_than_alpha));
+            if (prob_greater_than_alpha < 0.1f && node.value < -1.0f + bin * 2.0f / 81.0f) {
+                // This position is a moonshot, so alt formula
+                float var_above_alpha = 1e-6f;
+                float last_bin_cdf = 0.0f;
+                for (int i = 80; i >= bin; --i) {
+                    float pdf_i = node.cdf[i] - last_bin_cdf;
+                    last_bin_cdf = node.cdf[i];
+                    float bin_center = (i * 2.0f + 1.0f) / 81.0f - 1.0f;
+                    var_above_alpha += pdf_i * (bin_center - alpha) * (bin_center - alpha);
+                }
+                node_depth_reduction = std::max(node_depth_reduction, -std::log(var_above_alpha * 2));
+            }
         }
 
         auto is_leaf_node = [&](const LKSNode &n) {

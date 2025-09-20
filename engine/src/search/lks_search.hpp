@@ -309,7 +309,7 @@ public:
             float prob_greater_than_alpha = std::max(1e-6f, node.cdf[bin]);
             if (prob_greater_than_alpha < 0.1f && node.value < -1.0f + bin * 2.0f / 81.0f) {
                 // This position is a moonshot, so alt formula
-                float var_above_alpha = 1e-6f;
+                float var_above_alpha = 1e-5f;
                 float last_bin_cdf = 0.0f;
                 for (int i = 80; i >= bin; --i) {
                     float pdf_i = node.cdf[i] - last_bin_cdf;

@@ -315,7 +315,7 @@ public:
                     float pdf_i = node.cdf[i] - last_bin_cdf;
                     last_bin_cdf = node.cdf[i];
                     float bin_center = (i * 2.0f + 1.0f) / 81.0f - 1.0f;
-                    var_above_alpha += pdf_i * (bin_center - alpha) * (bin_center - alpha);
+                    var_above_alpha += pdf_i * (bin_center - node.value) * (bin_center - node.value);
                 }
                 node_depth_reduction = std::max(node_depth_reduction, -std::log(var_above_alpha * 2));
             }

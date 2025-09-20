@@ -292,9 +292,10 @@ public:
 
         const float alpha0 = alpha;
         const float beta0 = beta;
+        const int alpha_bin0 = alpha_to_bin(alpha0);
 
         // Transposition Table probe (after recursion depth guard)
-        if (auto tt_score = query_tt(board, alpha0, beta0, depth)) {
+        if (auto tt_score = query_tt(board, alpha0, beta0, depth, alpha_bin0)) {
             co_return SearchOutcome{*tt_score, chess::Move::NO_MOVE, false};
         }
 
@@ -304,8 +305,7 @@ public:
         float node_depth_reduction = -2.0f * std::log(node.U + 1e-6f);
 
         if (node_type != NodeType::PV) {
-            int bin = static_cast<int>(std::floor(81 * (alpha + 1) / 2.0f));
-            bin = std::max(0, std::min(80, bin));
+            auto bin = alpha_bin0;
             float prob_greater_than_alpha = std::max(1e-6f, node.cdf[bin]);
             if (prob_greater_than_alpha < 0.1f && node.value < -1.0f + bin * 2.0f / 81.0f) {
                 // This position is a moonshot, so alt formula
@@ -403,7 +403,7 @@ public:
             bestScore = r0.score;
             bestMove = r0.move;
             if (r0.cutoff) {
-                update_tt(board, alpha0, beta0, depth, bestScore);
+                update_tt(board, alpha0, beta0, depth, bestScore, alpha_bin0);
                 node.bestMove = bestMove;
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
@@ -536,14 +536,14 @@ public:
                 node.bestMove = bestMove; // update bestMove immediately in case of an abort
             }
             if (score >= beta) {
-                update_tt(board, alpha0, beta0, depth, bestScore);
+                update_tt(board, alpha0, beta0, depth, bestScore, alpha_bin0);
                 node.bestMove = bestMove;
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
             improver = false;
         }
 
-        update_tt(board, alpha0, beta0, depth, bestScore);
+        update_tt(board, alpha0, beta0, depth, bestScore, alpha_bin0);
         node.bestMove = bestMove;
         co_return SearchOutcome{bestScore, bestMove, false};
     }
@@ -702,6 +702,7 @@ public:
         bool has{false};
         float score{0.0f};
         float depth{0.0f};
+        int min_bin{0}; // minimum alpha-bin (0..80) required to use this record
     };
 
     struct TTEntry {
@@ -712,22 +713,22 @@ public:
 
     // Query the transposition table for a given board state.
     // Returns a score if the TT can establish an exact value or a cutoff with the given alpha/beta and depth.
-    std::optional<float> query_tt(const chess::Board &board, float alpha, float beta, float depth) {
+    std::optional<float> query_tt(const chess::Board &board, float alpha, float beta, float depth, int alpha_bin) {
         const std::string key = board.getFen(false);
         TTMap::const_accessor acc;
         if (!tt_.find(acc, key)) return std::nullopt;
         const TTEntry &e = acc->second;
         // Prefer exact value if at sufficient depth
-        if (e.exact.has && e.exact.depth >= depth) return e.exact.score;
+        if (e.exact.has && e.exact.depth >= depth && alpha_bin >= e.exact.min_bin) return e.exact.score;
         // Lower bound can trigger beta cutoff
-        if (e.lower.has && e.lower.depth >= depth && e.lower.score >= beta) return e.lower.score;
+        if (e.lower.has && e.lower.depth >= depth && alpha_bin >= e.lower.min_bin && e.lower.score >= beta) return e.lower.score;
         // Upper bound can trigger alpha cutoff
-        if (e.upper.has && e.upper.depth >= depth && e.upper.score <= alpha) return e.upper.score;
+        if (e.upper.has && e.upper.depth >= depth && alpha_bin >= e.upper.min_bin && e.upper.score <= alpha) return e.upper.score;
         return std::nullopt;
     }
 
     // Update the transposition table entry for this board with a result at the given window and depth.
-    void update_tt(const chess::Board &board, float alpha, float beta, float depth, float score) {
+    void update_tt(const chess::Board &board, float alpha, float beta, float depth, float score, int alpha_bin) {
         const std::string key = board.getFen(false);
         TTMap::accessor acc;
         tt_.insert(acc, key);
@@ -737,18 +738,21 @@ public:
                 e.upper.has = true;
                 e.upper.score = score;
                 e.upper.depth = depth;
+                e.upper.min_bin = alpha_bin;
             }
         } else if (score >= beta) {
             if (!e.lower.has || e.lower.depth <= depth) {
                 e.lower.has = true;
                 e.lower.score = score;
                 e.lower.depth = depth;
+                e.lower.min_bin = alpha_bin;
             }
         } else {
             if (!e.exact.has || e.exact.depth <= depth) {
                 e.exact.has = true;
                 e.exact.score = score;
                 e.exact.depth = depth;
+                e.exact.min_bin = alpha_bin;
             }
         }
     }
@@ -756,6 +760,13 @@ public:
 private:
     using TTMap = tbb::concurrent_hash_map<std::string, TTEntry>;
     TTMap tt_;
+    // Map alpha in [-1,1] to integer bin [0,80]
+    static inline int alpha_to_bin(float alpha) {
+        int bin = static_cast<int>(std::floor(81.0f * (alpha + 1.0f) / 2.0f));
+        if (bin < 0) bin = 0;
+        if (bin > 80) bin = 80;
+        return bin;
+    }
     cppcoro::task<Phase2ChildResult> process_phase2_child(
         LKSNode &node,
         const chess::Board &board,

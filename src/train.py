@@ -181,14 +181,30 @@ def train(
 
     scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=55 * 24,
+        T_max=50 * 24,
         eta_min=0.01,
+    )
+
+    scheduler3 = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=0.23,
+        end_factor=0.14,
+        total_iters=105,
+        last_epoch=-1,
+    )
+
+    scheduler4 = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=0.14,
+        end_factor=0.05,
+        total_iters=105,
+        last_epoch=-1,
     )
 
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer,
-        schedulers=[scheduler1, scheduler2],
-        milestones=[warmup_epochs],
+        schedulers=[scheduler1, scheduler2, scheduler3, scheduler4],
+        milestones=[warmup_epochs, 2325, 2325 + 105],
     )
 
     if checkpoint is not None:
@@ -455,11 +471,11 @@ def main():
         ),
         compile=True,
         max_grad_norm=1.0,
-        num_steps=110 * 1000 * 2,
+        num_steps=105 * 1000 * 2,
         steps_per_epoch=1000 * 2,
         save_frequency=5,
         save_checkpoint_path='./checkpoints/r1/',
-        checkpoint_path=f'./checkpoints/r1/checkpoint_{ti * 110 * 1000 * 2}.pt',
+        checkpoint_path=f'./checkpoints/r1/checkpoint_{(ti * 105 + 15) * 1000 * 2}.pt',
     )
     
     # Train model

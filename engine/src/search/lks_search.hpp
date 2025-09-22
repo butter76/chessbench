@@ -1032,13 +1032,10 @@ public:
             co_return std::optional<LKSNode>(std::in_place, terminal_value, std::vector<LKSPolicyEntry>{}, 0.0f, true);
         }
 
-        // Syzygy: if <= 5 pieces, use TB WDL to set terminal value (cursed/blessed treated as draw)
+        // Syzygy: Use TB WDL to set terminal value (cursed/blessed treated as draw)
         {
-            const int piece_count = static_cast<int>(board.occ().count());
-            if (piece_count <= 5) {
-                if (auto wdl_v = engine::syzygy::probe_wdl_value(board)) {
-                    co_return std::optional<LKSNode>(std::in_place, *wdl_v, std::vector<LKSPolicyEntry>{}, 0.0f, true);
-                }
+            if (auto wdl_v = engine::syzygy::probe_wdl_value(board)) {
+                co_return std::optional<LKSNode>(std::in_place, *wdl_v, std::vector<LKSPolicyEntry>{}, 0.0f, true);
             }
         }
 

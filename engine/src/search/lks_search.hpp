@@ -25,6 +25,8 @@
 #include <string>
 #include <algorithm>
 #include <tbb/concurrent_hash_map.h>
+#include <memory_resource>
+#include <xxhash.h>
 
 // Syzygy helpers
 #include "../syzygy_helpers.hpp"
@@ -59,10 +61,10 @@ public:
     void reset() override {
         board_ = chess::Board();
         root_.reset();
-        // Clear eval cache
-        eval_cache_.clear();
-        // Clear transposition table
-        tt_.clear();
+        // Release per-search arena memory then rebuild maps with fresh allocator state
+        search_arena_.release();
+        eval_cache_ = EvalCacheMap(EvalCacheAlloc(&search_arena_));
+        tt_ = TTMap(TTAlloc(&search_arena_));
     }
 
     void makemove(const std::string &uci) override {
@@ -195,7 +197,10 @@ public:
                 return chess::uci::moveToUci(rootMoves[0]);
             }
             LKSNode rootNode = std::move(*rootMaybe);
-            root_ = std::make_unique<LKSNode>(std::move(rootNode));
+            std::pmr::polymorphic_allocator<LKSNode> nodeAlloc(&search_arena_);
+            LKSNode *ptr = nodeAlloc.allocate(1);
+            std::allocator_traits<decltype(nodeAlloc)>::construct(nodeAlloc, ptr, std::move(rootNode));
+            root_ = NodePtr(ptr);
         }
         
         while (currentDepth <= maxDepth + 1e-2f) {
@@ -554,28 +559,66 @@ public:
     }
 
 private:
+    // Resource must be constructed before (and destroyed after) PMR containers using it
+    std::pmr::synchronized_pool_resource search_arena_{};
     // --- GPU evaluation cache ---
     struct CachedPolicyEntry { chess::Move move; float policy; float U; float Q; };
-    struct CachedNodeData { float value; std::vector<CachedPolicyEntry> entries; float node_U; std::vector<float> cdf; };
-    struct NodeBuildResult { float value; std::vector<LKSPolicyEntry> entries; float node_U; std::vector<float> cdf; };
+    struct CachedNodeData { float value; std::pmr::vector<CachedPolicyEntry> entries; float node_U; std::pmr::vector<float> cdf; };
+    struct NodeBuildResult { float value; std::pmr::vector<LKSPolicyEntry> entries; float node_U; std::pmr::vector<float> cdf; };
 
-    struct StringHashCompare {
-        std::size_t hash(const std::string &s) const noexcept {
-            return std::hash<std::string>{}(s);
+    struct Key128 { std::uint64_t hi; std::uint64_t lo; };
+    struct Key128HashCompare {
+        std::size_t hash(const Key128 &k) const noexcept {
+            std::uint64_t x = k.hi ^ (k.lo + 0x9e3779b97f4a7c15ULL + (k.hi << 6) + (k.hi >> 2));
+            return static_cast<std::size_t>(x);
         }
-        bool equal(const std::string &lhs, const std::string &rhs) const noexcept {
-            return lhs == rhs;
+        bool equal(const Key128 &a, const Key128 &b) const noexcept {
+            return a.hi == b.hi && a.lo == b.lo;
         }
     };
 
-    using EvalCacheMap = tbb::concurrent_hash_map<std::string, CachedNodeData, StringHashCompare>;
-    EvalCacheMap eval_cache_;
+    using EvalCacheAlloc = std::pmr::polymorphic_allocator<std::pair<const Key128, CachedNodeData>>;
+    using EvalCacheMap = tbb::concurrent_hash_map<Key128, CachedNodeData, Key128HashCompare, EvalCacheAlloc>;
+    EvalCacheMap eval_cache_{EvalCacheAlloc(&search_arena_)};
 
-    std::optional<NodeBuildResult> try_load_from_cache(const std::string &fen) {
+    struct CompactState {
+        std::uint64_t bb[12];
+        std::uint64_t castling_ep_stm; // pack: castling(0..15), ep_file(0..7 or 0xFF), stm(0/1)
+    };
+
+    static inline CompactState build_compact_state(const chess::Board &b) {
+        CompactState s{};
+        int idx = 0;
+        for (int color = 0; color < 2; ++color) {
+            auto c = color == 0 ? chess::Color::WHITE : chess::Color::BLACK;
+            s.bb[idx++] = b.pieces(chess::PieceType::PAWN, c).getBits();
+            s.bb[idx++] = b.pieces(chess::PieceType::KNIGHT, c).getBits();
+            s.bb[idx++] = b.pieces(chess::PieceType::BISHOP, c).getBits();
+            s.bb[idx++] = b.pieces(chess::PieceType::ROOK, c).getBits();
+            s.bb[idx++] = b.pieces(chess::PieceType::QUEEN, c).getBits();
+            s.bb[idx++] = b.pieces(chess::PieceType::KING, c).getBits();
+        }
+        std::uint64_t castling = static_cast<std::uint64_t>(b.castlingRights().hashIndex() & 0xF);
+        std::uint64_t ep_file = 0xFFu;
+        auto ep = b.enpassantSq();
+        if (ep != chess::Square::NO_SQ) ep_file = static_cast<std::uint64_t>(ep.file());
+        std::uint64_t stm = (b.sideToMove() == chess::Color::WHITE) ? 0ULL : 1ULL;
+        s.castling_ep_stm = (castling & 0xF) | ((ep_file & 0xFF) << 8) | ((stm & 0x1) << 16);
+        return s;
+    }
+
+    static inline Key128 make_key128(const chess::Board &board) {
+        std::uint64_t lo = static_cast<std::uint64_t>(board.hash());
+        CompactState st = build_compact_state(board);
+        std::uint64_t hi = XXH3_64bits(&st, sizeof(st));
+        return Key128{hi, lo};
+    }
+
+    std::optional<NodeBuildResult> try_load_from_cache(const Key128 &key) {
         EvalCacheMap::const_accessor acc;
-        if (!eval_cache_.find(acc, fen)) return std::nullopt;
+        if (!eval_cache_.find(acc, key)) return std::nullopt;
         const CachedNodeData &c = acc->second;
-        std::vector<LKSPolicyEntry> entries;
+        std::pmr::vector<LKSPolicyEntry> entries{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
         entries.reserve(c.entries.size());
         for (const auto &ce : c.entries) {
             LKSPolicyEntry e;
@@ -586,7 +629,9 @@ private:
             e.child = nullptr;
             entries.push_back(std::move(e));
         }
-        return NodeBuildResult{c.value, std::move(entries), c.node_U, c.cdf};
+        std::pmr::vector<float> cdf{std::pmr::polymorphic_allocator<float>(&search_arena_)};
+        cdf = c.cdf; // copy; both are pmr vectors
+        return NodeBuildResult{c.value, std::move(entries), c.node_U, std::move(cdf)};
     }
 
     NodeBuildResult build_from_eval_and_cache(const chess::Board &board,
@@ -600,7 +645,7 @@ private:
         const bool flip = (board.sideToMove() == chess::Color::BLACK);
 
         struct Gathered { chess::Move mv; float logit; float U; float Q; int idx; int s1; int s2; };
-        std::vector<Gathered> gathered;
+        std::pmr::vector<Gathered> gathered{std::pmr::polymorphic_allocator<Gathered>(&search_arena_)};
         gathered.reserve(legal.size());
 
         const int stride = 68;
@@ -626,7 +671,7 @@ private:
         if (sum_exp <= 0.0) sum_exp = 1.0;
 
         // Build policy entries, transform U/Q with sigmoid and Q from parent's perspective
-        std::vector<LKSPolicyEntry> entries;
+        std::pmr::vector<LKSPolicyEntry> entries{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
         entries.reserve(gathered.size());
         auto sigmoid = [](float x) { return 1.0f / (1.0f + std::exp(-x)); };
         for (const auto &g : gathered) {
@@ -646,7 +691,7 @@ private:
 
         // Compute node-level U from hl logits as wdl_variance and build CDF over bins
         float node_U = 0.0f;
-        std::vector<float> cdf;
+        std::pmr::vector<float> cdf{std::pmr::polymorphic_allocator<float>(&search_arena_)};
         const int bins = static_cast<int>(eval.hl.size());
         if (bins > 0) {
             // softmax over hl
@@ -680,14 +725,14 @@ private:
 
         // Insert into cache as a flat copy (no child pointers)
         {
-            std::vector<CachedPolicyEntry> cached_entries;
+            std::pmr::vector<CachedPolicyEntry> cached_entries{std::pmr::polymorphic_allocator<CachedPolicyEntry>(&search_arena_)};
             cached_entries.reserve(entries.size());
             for (const auto &e : entries) {
                 cached_entries.push_back(CachedPolicyEntry{e.move, e.policy, e.U, e.Q});
             }
             EvalCacheMap::accessor acc;
-            const std::string fen = board.getFen(false);
-            eval_cache_.insert(acc, fen);
+            const Key128 key = make_key128(board);
+            eval_cache_.insert(acc, key);
             acc->second = CachedNodeData{value, std::move(cached_entries), node_U, cdf};
         }
 
@@ -714,7 +759,7 @@ public:
     // Query the transposition table for a given board state.
     // Returns a score if the TT can establish an exact value or a cutoff with the given alpha/beta and depth.
     std::optional<float> query_tt(const chess::Board &board, float alpha, float beta, float depth, int alpha_bin) {
-        const std::string key = board.getFen(false);
+        const Key128 key = make_key128(board);
         TTMap::const_accessor acc;
         if (!tt_.find(acc, key)) return std::nullopt;
         const TTEntry &e = acc->second;
@@ -729,7 +774,7 @@ public:
 
     // Update the transposition table entry for this board with a result at the given window and depth.
     void update_tt(const chess::Board &board, float alpha, float beta, float depth, float score, int alpha_bin) {
-        const std::string key = board.getFen(false);
+        const Key128 key = make_key128(board);
         TTMap::accessor acc;
         tt_.insert(acc, key);
         TTEntry &e = acc->second;
@@ -758,8 +803,9 @@ public:
     }
 
 private:
-    using TTMap = tbb::concurrent_hash_map<std::string, TTEntry>;
-    TTMap tt_;
+    using TTAlloc = std::pmr::polymorphic_allocator<std::pair<const Key128, TTEntry>>;
+    using TTMap = tbb::concurrent_hash_map<Key128, TTEntry, Key128HashCompare, TTAlloc>;
+    TTMap tt_{TTAlloc(&search_arena_)};
     // Map alpha in [-1,1] to integer bin [0,80]
     static inline int alpha_to_bin(float alpha) {
         int bin = static_cast<int>(std::floor(81.0f * (alpha + 1.0f) / 2.0f));
@@ -788,7 +834,10 @@ private:
             if (!created) {
                 co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
             }
-            pe.child = std::make_unique<LKSNode>(std::move(*created));
+            std::pmr::polymorphic_allocator<LKSNode> nodeAlloc(&search_arena_);
+            LKSNode *ptr = nodeAlloc.allocate(1);
+            std::allocator_traits<decltype(nodeAlloc)>::construct(nodeAlloc, ptr, std::move(*created));
+            pe.child = NodePtr(ptr);
             backpropagate_policy_updates(node, *pe.child, pe);
         }
 
@@ -852,7 +901,7 @@ private:
         }
     }
     
-    std::unique_ptr<LKSNode> root_;
+    NodePtr root_;
     std::atomic<std::uint64_t> stat_gpu_evaluations_{0};
     std::atomic<std::uint64_t> stat_nodes_created_{0};
     std::atomic<std::uint64_t> stat_parent_nodes_{0};
@@ -1029,19 +1078,20 @@ public:
             } else {
                 terminal_value = 0.0f; // stalemate, repetition, fifty-move, insufficient material
             }
-            co_return std::optional<LKSNode>(std::in_place, terminal_value, std::vector<LKSPolicyEntry>{}, 0.0f, true);
+            std::pmr::vector<LKSPolicyEntry> empty_pol{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
+            co_return std::optional<LKSNode>(std::in_place, terminal_value, std::move(empty_pol), 0.0f, true);
         }
 
         // Syzygy: Use TB WDL to set terminal value (cursed/blessed treated as draw)
         {
             if (auto wdl_v = engine::syzygy::probe_wdl_value(board)) {
-                co_return std::optional<LKSNode>(std::in_place, *wdl_v, std::vector<LKSPolicyEntry>{}, 0.0f, true);
+                co_return std::optional<LKSNode>(std::in_place, *wdl_v, std::move(empty_pol), 0.0f, true);
             }
         }
 
-        // Cache lookup by FEN board key
-        const std::string fen = board.getFen(false);
-        if (auto cached = try_load_from_cache(fen)) {
+        // Cache lookup by 128-bit key
+        const Key128 key = make_key128(board);
+        if (auto cached = try_load_from_cache(key)) {
             co_return std::optional<LKSNode>(std::in_place, cached->value, std::move(cached->entries), cached->node_U, std::move(cached->cdf), false);
         }
 

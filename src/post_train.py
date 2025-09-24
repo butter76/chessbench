@@ -90,7 +90,7 @@ def post_train(
         optimizer,
         start_factor=1.0,
         end_factor=0.25,
-        total_iters=train_config.num_steps // train_config.ckpt_frequency,
+        total_iters=train_config.num_steps // train_config.steps_per_epoch,
         last_epoch=-1
     )
     
@@ -99,7 +99,7 @@ def post_train(
     train_iter = train_dataloader.__iter__()
     
     # Training loop
-    num_epochs = train_config.num_steps // train_config.ckpt_frequency
+    num_epochs = train_config.num_steps // train_config.steps_per_epoch
     step = 0
     weights_unfrozen = False
     
@@ -112,9 +112,9 @@ def post_train(
         total_d_loss = 0
         total_l2_loss = 0
         
-        pbar = tqdm(total=train_config.ckpt_frequency, desc=f'Post-train Epoch {epoch+1}/{num_epochs}')
+        pbar = tqdm(total=train_config.steps_per_epoch, desc=f'Post-train Epoch {epoch+1}/{num_epochs}')
         
-        for step_in_epoch in range(train_config.ckpt_frequency):
+        for step_in_epoch in range(train_config.steps_per_epoch):
             step += 1
 
             # Check if we should unfreeze weights
@@ -130,7 +130,7 @@ def post_train(
                 # Recreate optimizer with all parameters
                 optimizer = SPlus(
                     model.parameters(),
-                    lr=train_config.learning_rate,  # Use lower LR for pre-trained weights
+                    lr=train_config.learning_rate * 0.1,  # Use lower LR for pre-trained weights
                     weight_decay=train_config.weight_decay,
                 )
                 
@@ -262,10 +262,11 @@ def post_train(
             train_config.save_checkpoint_path
         )
         os.makedirs(checkpoint_dir, exist_ok=True)
-        torch.save(
-            post_train_checkpoint,
-            os.path.join(checkpoint_dir, f'post_train_checkpoint_{step}.pt')
-        )
+        if step == 1500 * 7:
+            torch.save(
+                post_train_checkpoint,
+                os.path.join(checkpoint_dir, f'checkpoint_{step}.pt')
+            )
     
     return model
 
@@ -302,7 +303,7 @@ def main():
     
     # Configuration for post-training
     train_config = config_lib.TrainConfig(
-        learning_rate=0.05,  # Lower learning rate for post-training
+        learning_rate=0.1,  # Lower learning rate for post-training
         data=config_lib.DataConfig(
             batch_size=512,  # Smaller batch size
             shuffle=True,
@@ -311,7 +312,7 @@ def main():
             num_return_buckets=128,
             policy='lc0_data_with_U',
             split='train',
-            dataset_path='../data/child_data/child_data.bag',
+            dataset_path='/ephemeral/child_data/child_data.bag',
         ),
         eval_data=config_lib.DataConfig(
             batch_size=1024,
@@ -321,24 +322,25 @@ def main():
             num_return_buckets=128,
             policy='lc0_data_with_U',
             split='test',
-            dataset_path='../data/child_data/child_data.bag',
+            dataset_path='/ephemeral/child_data/child_data.bag',
         ),
         compile=True,
         max_grad_norm=1.0,
         num_steps=100_000,
-        ckpt_frequency=1_500,
-        save_checkpoint_path='../checkpoints/p2-dhl-2x-post-train-u/',
+        steps_per_epoch=1_500,
+        save_frequency=1,
+        save_checkpoint_path='../checkpoints/r1/',
     )
     
     # Path to the original trained checkpoint
-    checkpoint_path = '../checkpoints/p2-dhl-2x/checkpoint_300000.pt'  # Adjust as needed
+    checkpoint_path = '../checkpoints/r1/checkpoint_5190000.pt'  # Adjust as needed
     
     # Post-train the model
     model = post_train(
         checkpoint_path=checkpoint_path,
         train_config=train_config,
         l2_lambda=0.001,
-        unfreeze_step=1500,
+        unfreeze_step=60000,
     )
     
     print("Post-training completed!")

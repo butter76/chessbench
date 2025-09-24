@@ -105,7 +105,7 @@ def main():
     if len(sys.argv) > 1:
         checkpoint_path = sys.argv[1]
     else:
-        checkpoint_path = "../checkpoints/p2-dhl-2x/checkpoint_300000.pt"
+        checkpoint_path = "../checkpoints/r1/checkpoint_5190000.pt"
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -115,7 +115,7 @@ def main():
     print("Loading model...")
     model = load_checkpoint(checkpoint_path, device)
     
-    bag_source = bagz.BagDataSource('../processed_data/processed_lc0_data_202308*.bag')
+    bag_source = bagz.BagDataSource('/ephemeral/training_data/*0017.bag')
     
     # Process data
     print("Processing positions and generating child data...")
@@ -126,9 +126,9 @@ def main():
     # Create output directory
     output_dir = "../data/child_data"
     os.makedirs(output_dir, exist_ok=True)
-    MAX_POSITIONS = 200_000_000
+    MAX_POSITIONS = 10_000_000
 
-    with bagz.BagWriter('../data/child_data/child_data.bag') as writer:
+    with bagz.BagWriter('/ephemeral/child_data/child_data.bag') as writer:
 
         fens = []
     

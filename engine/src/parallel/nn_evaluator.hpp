@@ -379,7 +379,7 @@ private:
                 if (!path.empty()) break;
             }
         }
-        if (path.empty()) path = "./r0.plan";
+        if (path.empty()) path = "./r1.plan";
         return path;
     }
 
@@ -395,11 +395,27 @@ private:
         engines_.assign(max_batch_size_ + 1, nullptr);
         contexts_.assign(max_batch_size_ + 1, nullptr);
 
+        // Derive directory and base filename from provided plan_path
+        std::string provided_path = plan_path ? std::string(plan_path) : std::string();
+        std::string dir;
+        std::string base;
+        {
+            const std::string& path = provided_path;
+            std::size_t last_slash = path.find_last_of("/\\");
+            dir = (last_slash == std::string::npos) ? "." : path.substr(0, last_slash);
+            std::string filename = (last_slash == std::string::npos) ? path : path.substr(last_slash + 1);
+            if (filename.size() >= 5 && filename.substr(filename.size() - 5) == ".plan") {
+                base = filename.substr(0, filename.size() - 5);
+            } else {
+                base = filename;
+            }
+            if (base.empty()) base = "r1"; // sensible fallback
+        }
+
         for (int B : allowed_sizes) {
             if (B > static_cast<int>(max_batch_size_)) continue;
-            char pathbuf[512];
-            std::snprintf(pathbuf, sizeof(pathbuf), "/home/shadeform/searchless_chess/engine/r0_%d.plan", B);
-            FILE* fB = fopen(pathbuf, "rb");
+            std::string bpath = dir + "/" + base + "_" + std::to_string(B) + ".plan";
+            FILE* fB = fopen(bpath.c_str(), "rb");
             if (!fB) {
                 // Mark missing; continue
                 continue;

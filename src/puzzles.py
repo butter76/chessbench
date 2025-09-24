@@ -515,7 +515,7 @@ def main(argv: Sequence[str]) -> None:
     name = _NAME.value if _NAME.value is not None else strategy
     
     MY_ENGINE = (network is None)
-    checkpoint_path = '../checkpoints/r0/checkpoint_6000.pt' if _CHECKPOINT.value is None else _CHECKPOINT.value
+    checkpoint_path = '../checkpoints/r1/r1.pt' if _CHECKPOINT.value is None else _CHECKPOINT.value
 
     print(f"Using {num_processes} processes for evaluation")
 

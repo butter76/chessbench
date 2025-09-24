@@ -150,7 +150,7 @@ def analyze_underpromotions(fen: str, checkpoint_path: str, device: str = None):
 def main():
     parser = argparse.ArgumentParser(description="Analyze policy probabilities")
     parser.add_argument("fen", help="FEN string of the position to analyze")
-    parser.add_argument("--checkpoint", default="../checkpoints/r0/checkpoint_6000.pt",
+    parser.add_argument("--checkpoint", default="../checkpoints/r1/r1.pt",
                        help="Path to model checkpoint")
     parser.add_argument("--device", default=None, 
                        help="Device to use (cuda/cpu, default: auto)")

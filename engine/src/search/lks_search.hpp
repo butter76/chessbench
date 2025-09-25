@@ -1085,6 +1085,7 @@ public:
         // Syzygy: Use TB WDL to set terminal value (cursed/blessed treated as draw)
         {
             if (auto wdl_v = engine::syzygy::probe_wdl_value(board)) {
+                std::pmr::vector<LKSPolicyEntry> empty_pol{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
                 co_return std::optional<LKSNode>(std::in_place, *wdl_v, std::move(empty_pol), 0.0f, true);
             }
         }

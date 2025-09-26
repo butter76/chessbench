@@ -63,6 +63,9 @@ public:
         eval_cache_.clear();
         // Clear transposition table
         tt_.clear();
+        // Reset time-management flags
+        surprise_since_last_search_.store(false, std::memory_order_relaxed);
+        first_move_search_.store(true, std::memory_order_relaxed);
     }
 
     void makemove(const std::string &uci) override {
@@ -71,6 +74,14 @@ public:
             root_.reset();
             tt_.clear();
             return;
+        }
+
+        // Mark surprise if this played move differs from our expected best from this position
+        if (root_) {
+            chess::Move expected = root_->bestMove;
+            if (expected != chess::Move::NO_MOVE && expected != move) {
+                surprise_since_last_search_.store(true, std::memory_order_relaxed);
+            }
         }
 
         // Always update the board state
@@ -156,16 +167,56 @@ public:
             return chess::uci::moveToUci(*tb_move);
         }
         
-        // Establish time budgets (only if time controls are provided)
-        engine::TimeHandler::TimeBudget budget{};
-        const bool has_time_limits = (limits.movetime_ms > 0ULL) || (limits.wtime_ms > 0ULL) || (limits.btime_ms > 0ULL);
-        if (time_handler_ != nullptr && has_time_limits && !limits.infinite) {
-            budget = time_handler_->selectTimeBudget(limits, board_.sideToMove());
-        }
+        // Establish time budgets: use custom TC logic when in wtime/btime with inc
         using clock = std::chrono::steady_clock;
         const clock::time_point start_tp = clock::now();
-        const clock::time_point soft_deadline = (budget.soft_ms > 0ULL) ? (start_tp + std::chrono::milliseconds(budget.soft_ms)) : clock::time_point::max();
-        const clock::time_point hard_deadline = (budget.hard_ms > 0ULL) ? (start_tp + std::chrono::milliseconds(budget.hard_ms)) : clock::time_point::max();
+        clock::time_point soft_deadline = clock::time_point::max();
+        clock::time_point hard_deadline = clock::time_point::max();
+        bool applied_change_bonus = false;
+        bool applied_worsen_bonus = false;
+
+        const bool tc_mode = (limits.wtime_ms > 0ULL || limits.btime_ms > 0ULL) && !limits.infinite && limits.movetime_ms == 0ULL;
+        if (tc_mode) {
+            unsigned long long time_left = (board_.sideToMove() == chess::Color::WHITE) ? limits.wtime_ms : limits.btime_ms;
+            unsigned long long inc_ms    = (board_.sideToMove() == chess::Color::WHITE) ? limits.winc_ms  : limits.binc_ms;
+            const unsigned long long reserve_ms = 100ULL; // never touch this reserve
+            unsigned long long effective_bank = (time_left > reserve_ms) ? (time_left - reserve_ms) : 0ULL;
+
+            auto pct = [](long double p, unsigned long long bank) -> unsigned long long {
+                long double v = p * static_cast<long double>(bank);
+                if (v < 0.0L) v = 0.0L;
+                return static_cast<unsigned long long>(v);
+            };
+
+            unsigned long long soft_ms = pct(0.01L, effective_bank) + inc_ms;
+            unsigned long long hard_ms = pct(0.50L, effective_bank) + inc_ms;
+
+            // Boost soft deadline for surprise and first search
+            const bool surprise = surprise_since_last_search_.exchange(false, std::memory_order_acq_rel);
+            if (surprise) {
+                unsigned long long surprise_soft = pct(0.05L, effective_bank) + inc_ms;
+                if (surprise_soft > soft_ms) soft_ms = surprise_soft;
+                applied_change_bonus = true;
+            }
+            if (first_move_search_.load(std::memory_order_relaxed)) {
+                unsigned long long first_soft = pct(0.10L, effective_bank);
+                if (first_soft > soft_ms) soft_ms = first_soft;
+                applied_change_bonus = true;
+                applied_worsen_bonus = true;
+            }
+
+            if (soft_ms > 0ULL) soft_deadline = start_tp + std::chrono::milliseconds(soft_ms);
+            if (hard_ms > 0ULL) hard_deadline = start_tp + std::chrono::milliseconds(hard_ms);
+        } else {
+            // Fallback to existing handler for non-TC cases
+            engine::TimeHandler::TimeBudget budget{};
+            const bool has_time_limits = (limits.movetime_ms > 0ULL) || (limits.wtime_ms > 0ULL) || (limits.btime_ms > 0ULL);
+            if (time_handler_ != nullptr && has_time_limits && !limits.infinite) {
+                budget = time_handler_->selectTimeBudget(limits, board_.sideToMove());
+            }
+            if (budget.soft_ms > 0ULL) soft_deadline = start_tp + std::chrono::milliseconds(budget.soft_ms);
+            if (budget.hard_ms > 0ULL) hard_deadline = start_tp + std::chrono::milliseconds(budget.hard_ms);
+        }
         // Watchdog to enforce hard deadline by triggering stop()
         std::jthread watchdog([this, hard_deadline](std::stop_token st){
             if (hard_deadline == std::chrono::steady_clock::time_point::max()) return;
@@ -188,6 +239,8 @@ public:
         if (rootMoves.empty()) return "0000";
 
         float bestScore = -std::numeric_limits<float>::infinity();
+        chess::Move prev_iter_best_move = chess::Move::NO_MOVE;
+        float prev_iter_best_score = std::numeric_limits<float>::infinity();
         if (!root_) {
             auto rootMaybe = cppcoro::sync_wait(create_node(board_));
             if (!rootMaybe) {
@@ -210,6 +263,37 @@ public:
             bestScore = score;
             // Emit UCI info line for this iteration
             print_info_line(currentDepth, bestScore);
+            // Dynamic soft-deadline extension: if best move changes or score drops > 0.05 (not first search)
+            if (tc_mode && soft_deadline != clock::time_point::max() && hard_deadline != clock::time_point::max()) {
+                const bool not_first = !first_move_search_.load(std::memory_order_relaxed);
+                bool changed = (prev_iter_best_move != chess::Move::NO_MOVE) && (move != prev_iter_best_move);
+                bool worsened = (prev_iter_best_score != std::numeric_limits<float>::infinity()) && ((prev_iter_best_score - bestScore) > 0.05f);
+                if (not_first && (changed || worsened)) {
+                    unsigned long long time_left = (board_.sideToMove() == chess::Color::WHITE) ? limits.wtime_ms : limits.btime_ms;
+                    const unsigned long long reserve_ms = 100ULL;
+                    unsigned long long effective_bank = (time_left > reserve_ms) ? (time_left - reserve_ms) : 0ULL;
+                    unsigned long long extra_ms = 0ULL;
+                    if (changed && !applied_change_bonus) {
+                        extra_ms += static_cast<unsigned long long>(0.02L * static_cast<long double>(effective_bank));
+                        applied_change_bonus = true;
+                    }
+                    if (worsened && !applied_worsen_bonus) {
+                        extra_ms += static_cast<unsigned long long>(0.04L * static_cast<long double>(effective_bank));
+                        applied_worsen_bonus = true;
+                    }
+                    if (extra_ms > 0ULL) {
+                        auto new_soft = soft_deadline + std::chrono::milliseconds(extra_ms);
+                        if (new_soft > hard_deadline) new_soft = hard_deadline;
+                        soft_deadline = new_soft;
+                    }
+                }
+            }
+            if (prev_iter_best_move == chess::Move::NO_MOVE) {
+                prev_iter_best_move = move;
+            }
+            if (prev_iter_best_score == std::numeric_limits<float>::infinity()) {
+                prev_iter_best_score = bestScore;
+            }
             currentDepth += IT_DEPTH_STEP;
             // Respect soft deadline: finish current iteration then exit
             if (clock::now() >= soft_deadline) break;
@@ -221,6 +305,8 @@ public:
             }
             return "0000";
         }
+        // Clear first-move flag after completing a search
+        first_move_search_.store(false, std::memory_order_relaxed);
         return chess::uci::moveToUci(root_->bestMove);
     }
 
@@ -860,6 +946,10 @@ private:
     std::atomic<std::uint64_t> stat_tbhits_{0};
     std::atomic<std::uint64_t> stat_tthits_{0};
     std::atomic<std::int64_t> stat_search_start_ns_{0};
+
+    // --- Time management state ---
+    std::atomic<bool> surprise_since_last_search_{false};
+    std::atomic<bool> first_move_search_{true};
 
     // --- Helpers for UCI info output ---
     void print_info_line(float depth, float bestScore) {

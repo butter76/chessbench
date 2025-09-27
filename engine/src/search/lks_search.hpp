@@ -190,6 +190,8 @@ public:
 
             unsigned long long soft_ms = pct(0.01L, effective_bank) + inc_ms;
             unsigned long long hard_ms = pct(0.50L, effective_bank) + inc_ms;
+            unsigned long long max_hard_ms = (effective_bank > reserve_ms) ? (effective_bank - reserve_ms) : 0ULL;
+            if (hard_ms > max_hard_ms) hard_ms = max_hard_ms;
 
             // Boost soft deadline for surprise and first search
             const bool surprise = surprise_since_last_search_.exchange(false, std::memory_order_acq_rel);

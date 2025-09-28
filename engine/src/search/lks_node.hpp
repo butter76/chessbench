@@ -4,17 +4,21 @@
 
 #include <vector>
 #include <memory_resource>
-#include <memory>
+#include <cstdint>
+#include <limits>
 
 namespace engine {
 
-struct LKSNode; // forward declaration for child pointer
+struct LKSNode; // forward declaration
 
-// No-op deleter for arena-allocated nodes
-struct NoopDeleter {
-    void operator()(LKSNode*) const noexcept {}
+// Lightweight per-node TT bound record
+struct TTBoundRec {
+    bool has{false};
+    float score{0.0f};
+    float depth{0.0f};
+    int min_bin{0}; // minimum alpha-bin (0..80) required to use this record
+    std::uint64_t gen{0}; // generation to validate freshness
 };
-using NodePtr = std::unique_ptr<LKSNode, NoopDeleter>;
 
 // Represents one policy entry: (move, policy, U, Q)
 struct LKSPolicyEntry {
@@ -22,7 +26,6 @@ struct LKSPolicyEntry {
     float policy{0.0f};
     float U{0.0f};
     float Q{0.0f};
-    NodePtr child; // optional expanded child node
 };
 
 // Light-weight search node for LKS
@@ -33,6 +36,12 @@ struct LKSNode {
     std::pmr::vector<float> cdf;               // CDF over hl bins (suffix sums of softmaxed hl)
     bool terminal{false};                 // terminal position flag
     chess::Move bestMove{chess::Move::NO_MOVE}; // cached best move from search
+    // Embedded TT info for this node
+    TTBoundRec tt_exact{};
+    TTBoundRec tt_lower{};
+    TTBoundRec tt_upper{};
+    // Depth at which this node snapshot was last persisted
+    float depth_record{ -std::numeric_limits<float>::infinity() };
 
     LKSNode() = default;
 

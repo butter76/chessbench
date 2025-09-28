@@ -60,18 +60,18 @@ public:
 
     void reset() override {
         board_ = chess::Board();
-        root_.reset();
+        root_key_ = std::nullopt;
         // Release per-search arena memory then rebuild maps with fresh allocator state
         search_arena_.release();
-        eval_cache_ = EvalCacheMap(EvalCacheAlloc(&search_arena_));
-        tt_ = TTMap(TTAlloc(&search_arena_));
+        node_map_ = NodeMap(NodeAlloc(&search_arena_));
+        tt_generation_.fetch_add(1, std::memory_order_relaxed);
     }
 
     void makemove(const std::string &uci) override {
         const chess::Move move = chess::uci::uciToMove(board_, uci);
         if (move == chess::Move::NO_MOVE) {
-            root_.reset();
-            tt_.clear();
+            root_key_ = std::nullopt;
+            tt_generation_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
 
@@ -80,26 +80,11 @@ public:
 
         // Clear the TT if the board has repeated as we have 2-fold repetition on
         if (board_.isRepetition(1)) {
-            tt_.clear();
+            tt_generation_.fetch_add(1, std::memory_order_relaxed);
         }
 
-        // If we have a search tree, try to advance the root to the played move
-        if (root_) {
-            for (auto &entry : root_->policy) {
-                if (entry.move == move) {
-                    if (entry.child) {
-                        // Re-root the tree by taking ownership of the child's subtree
-                        root_ = std::move(entry.child);
-                    } else {
-                        // No existing subtree for this move; cannot reuse
-                        root_.reset();
-                    }
-                    return;
-                }
-            }
-            // Move not found among root's known policy entries; drop the old tree
-            root_.reset();
-        }
+        // With key-based map, simply advance root key; map retains reused children implicitly
+        root_key_ = make_key128(board_);
     }
 
     chess::Board &getBoard() override { return board_; }
@@ -190,26 +175,28 @@ public:
         if (rootMoves.empty()) return "0000";
 
         float bestScore = -std::numeric_limits<float>::infinity();
-        if (!root_) {
+        if (!root_key_.has_value()) root_key_ = make_key128(board_);
+        {
             auto rootMaybe = cppcoro::sync_wait(create_node(board_));
             if (!rootMaybe) {
-                // Fallback: return the first legal move
                 return chess::uci::moveToUci(rootMoves[0]);
             }
-            LKSNode rootNode = std::move(*rootMaybe);
-            std::pmr::polymorphic_allocator<LKSNode> nodeAlloc(&search_arena_);
-            LKSNode *ptr = nodeAlloc.allocate(1);
-            std::allocator_traits<decltype(nodeAlloc)>::construct(nodeAlloc, ptr, std::move(rootNode));
-            root_ = NodePtr(ptr);
+            // ensure root stored in map (create_node does) and get a local copy
+            // local copy used for this iteration
+            // Note: lks_root will persist updates back to map
         }
         
         while (currentDepth <= maxDepth + 1e-2f) {
             if (clock::now() >= hard_deadline) { stop(); break; }
             if (stop_requested_.load(std::memory_order_acquire)) break;
             if (!node_limit_check(limits)) break;
+            // Load a fresh working copy of the root node from the map
+            auto rootCopyOpt = cppcoro::sync_wait(load_or_create_node_copy(board_));
+            if (!rootCopyOpt) break;
+            LKSNode rootCopy = std::move(*rootCopyOpt);
             auto [score, move, aborted] = cppcoro::sync_wait([&]() -> cppcoro::task<RootResult> {
                 co_await pool_->schedule();
-                co_return co_await lks_root(*root_, board_, currentDepth, -1.0f, 1.0f);
+                co_return co_await lks_root(rootCopy, board_, currentDepth, -1.0f, 1.0f);
             }());
             if (aborted) break;
             bestScore = score;
@@ -220,13 +207,16 @@ public:
             if (clock::now() >= soft_deadline) break;
         }
 
-        if (root_->bestMove == chess::Move::NO_MOVE) {
-            if (root_ && !root_->policy.empty()) {
-                return chess::uci::moveToUci(root_->policy[0].move);
+        // Return best move from the latest root record in the map
+        {
+            auto rootRec = try_load_node(make_key128(board_));
+            if (rootRec && rootRec->bestMove != chess::Move::NO_MOVE) {
+                return chess::uci::moveToUci(rootRec->bestMove);
             }
+            // Fallback: pick top policy move if available
+            if (rootRec && !rootRec->policy.empty()) return chess::uci::moveToUci(rootRec->policy[0].move);
             return "0000";
         }
-        return chess::uci::moveToUci(root_->bestMove);
     }
 
     // Statistics API (thread-safe)
@@ -286,13 +276,13 @@ public:
             co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
         }
 
-        if (rec_depth > 100) {
-            co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
-        }
-
         // During search, use 2-fold repetition, but don't allow it for the root node
         if (board.isRepetition(1) && !root) {
             co_return SearchOutcome{0.0f, chess::Move::NO_MOVE, false};
+        }
+
+        if (rec_depth > 100) {
+            co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
         }
 
         const float alpha0 = alpha;
@@ -300,8 +290,13 @@ public:
         const int alpha_bin0 = alpha_to_bin(alpha0);
 
         // Transposition Table probe (after recursion depth guard)
-        if (auto tt_score = query_tt(board, alpha0, beta0, depth, alpha_bin0)) {
+        if (auto tt_score = query_tt(node, alpha0, beta0, depth, alpha_bin0)) {
             co_return SearchOutcome{*tt_score, chess::Move::NO_MOVE, false};
+        }
+
+        if (depth <= -2.0f) {
+            // Avoid infinite loops with this
+            co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
         }
 
         // Ensure policy is sorted and normalized before expansion
@@ -326,8 +321,14 @@ public:
             }
         }
 
+        auto child_exists = [&](const chess::Move &mv) -> bool {
+            chess::Board cb = board;
+            cb.makeMove(mv);
+            NodeMap::const_accessor acc;
+            return node_map_.find(acc, make_key128(cb));
+        };
         auto is_leaf_node = [&](const LKSNode &n) {
-            for (const auto &pe : n.policy) if (pe.child) return false;
+            for (const auto &pe : n.policy) if (child_exists(pe.move)) return false;
             return true;
         };
 
@@ -336,7 +337,7 @@ public:
         float total_weight_scan = 0.0f;
         for (std::size_t i = 0; i < node.policy.size(); ++i) {
             const auto &pe = node.policy[i];
-            if (pe.child == nullptr) {
+            if (!child_exists(pe.move)) {
                 if ((total_weight_scan > 0.80f && i >= 2) || (total_weight_scan > 0.95f && i >= 1)) {
                     weight_divisor -= pe.policy;
                 } else {
@@ -382,7 +383,7 @@ public:
             new_depths[i] = new_depth;
 
             bool should_filter = false;
-            if (!pe.child) {
+            if (!child_exists(pe.move)) {
                 const float local_reduction = -2.0f * std::log(pe.U + 1e-6f);
                 if (new_depth <= local_reduction) {
                     if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
@@ -408,8 +409,9 @@ public:
             bestScore = r0.score;
             bestMove = r0.move;
             if (r0.cutoff) {
-                update_tt(board, alpha0, beta0, depth, bestScore, alpha_bin0);
+                update_tt(node, alpha0, beta0, depth, bestScore, alpha_bin0);
                 node.bestMove = bestMove;
+                persist_node_copy(board, node, depth);
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
 
@@ -479,7 +481,8 @@ public:
                 chess::Board child_board = board;
                 child_board.makeMove(pe.move);
                 int child_pv_depth = pv_depth + ((next_type != NodeType::PV) ? 1 : 0);
-                auto child_out = co_await lks_search(*pe.child, child_board, new_depth, -alpha - NULL_EPS, -alpha, next_type, rec_depth + 1, child_pv_depth);
+                LKSNode child_node = try_load_node(make_key128(child_board)).value();
+                auto child_out = co_await lks_search(child_node, child_board, new_depth, -alpha - NULL_EPS, -alpha, next_type, rec_depth + 1, child_pv_depth);
                 if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
                 new_depth += RE_SEARCH_DEPTH;
@@ -497,7 +500,8 @@ public:
                 int fw_pv_depth = pv_depth + ((fw_type != NodeType::PV) ? 1 : 0);
                 chess::Board child_board = board;
                 child_board.makeMove(pe.move);
-                auto child_out = co_await lks_search(*pe.child, child_board, new_depth, -beta, -alpha, fw_type, rec_depth + 1, fw_pv_depth);
+                LKSNode child_node = try_load_node(make_key128(child_board)).value();
+                auto child_out = co_await lks_search(child_node, child_board, new_depth, -beta, -alpha, fw_type, rec_depth + 1, fw_pv_depth);
                 if (child_out.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                 score = -child_out.score;
             }
@@ -541,15 +545,17 @@ public:
                 node.bestMove = bestMove; // update bestMove immediately in case of an abort
             }
             if (score >= beta) {
-                update_tt(board, alpha0, beta0, depth, bestScore, alpha_bin0);
+                update_tt(node, alpha0, beta0, depth, bestScore, alpha_bin0);
                 node.bestMove = bestMove;
+                persist_node_copy(board, node, depth);
                 co_return SearchOutcome{bestScore, bestMove, false};
             }
             improver = false;
         }
 
-        update_tt(board, alpha0, beta0, depth, bestScore, alpha_bin0);
+        update_tt(node, alpha0, beta0, depth, bestScore, alpha_bin0);
         node.bestMove = bestMove;
+        persist_node_copy(board, node, depth);
         co_return SearchOutcome{bestScore, bestMove, false};
     }
 
@@ -560,11 +566,8 @@ public:
 
 private:
     // Resource must be constructed before (and destroyed after) PMR containers using it
-    std::pmr::synchronized_pool_resource search_arena_{};
-    // --- GPU evaluation cache ---
-    struct CachedPolicyEntry { chess::Move move; float policy; float U; float Q; };
-    struct CachedNodeData { float value; std::pmr::vector<CachedPolicyEntry> entries; float node_U; std::pmr::vector<float> cdf; };
-    struct NodeBuildResult { float value; std::pmr::vector<LKSPolicyEntry> entries; float node_U; std::pmr::vector<float> cdf; };
+    mutable std::pmr::synchronized_pool_resource search_arena_{};
+    // --- Unified node storage in TBB map using LKSNode directly ---
 
     struct Key128 { std::uint64_t hi; std::uint64_t lo; };
     struct Key128HashCompare {
@@ -577,9 +580,9 @@ private:
         }
     };
 
-    using EvalCacheAlloc = std::pmr::polymorphic_allocator<std::pair<const Key128, CachedNodeData>>;
-    using EvalCacheMap = tbb::concurrent_hash_map<Key128, CachedNodeData, Key128HashCompare, EvalCacheAlloc>;
-    EvalCacheMap eval_cache_{EvalCacheAlloc(&search_arena_)};
+    using NodeAlloc = std::pmr::polymorphic_allocator<std::pair<const Key128, LKSNode>>;
+    using NodeMap = tbb::concurrent_hash_map<Key128, LKSNode, Key128HashCompare, NodeAlloc>;
+    mutable NodeMap node_map_{NodeAlloc(&search_arena_)};
 
     struct CompactState {
         std::uint64_t bb[12];
@@ -614,28 +617,22 @@ private:
         return Key128{hi, lo};
     }
 
-    std::optional<NodeBuildResult> try_load_from_cache(const Key128 &key) {
-        EvalCacheMap::const_accessor acc;
-        if (!eval_cache_.find(acc, key)) return std::nullopt;
-        const CachedNodeData &c = acc->second;
-        std::pmr::vector<LKSPolicyEntry> entries{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
-        entries.reserve(c.entries.size());
-        for (const auto &ce : c.entries) {
-            LKSPolicyEntry e;
-            e.move = ce.move;
-            e.policy = ce.policy;
-            e.U = ce.U;
-            e.Q = ce.Q;
-            e.child = nullptr;
-            entries.push_back(std::move(e));
-        }
-        std::pmr::vector<float> cdf{std::pmr::polymorphic_allocator<float>(&search_arena_)};
-        cdf = c.cdf; // copy; both are pmr vectors
-        return NodeBuildResult{c.value, std::move(entries), c.node_U, std::move(cdf)};
+    std::optional<LKSNode> try_load_node(const Key128 &key) const {
+        NodeMap::const_accessor acc;
+        if (!node_map_.find(acc, key)) return std::nullopt;
+        // Return a copy so callers can mutate safely
+        return acc->second;
     }
 
-    NodeBuildResult build_from_eval_and_cache(const chess::Board &board,
-                                              const engine_parallel::EvalResult &eval) {
+    cppcoro::task<std::optional<LKSNode>> load_or_create_node_copy(const chess::Board &board) {
+        const Key128 key = make_key128(board);
+        if (auto n = try_load_node(key)) co_return n;
+        auto created = co_await create_node(board);
+        co_return created; // may be std::nullopt if evaluation was canceled
+    }
+
+    LKSNode build_from_eval_and_insert(const chess::Board &board,
+                                       const engine_parallel::EvalResult &eval) {
         // Convert scalar value to [-1, 1]
         float value = 2.0f * eval.value - 1.0f;
 
@@ -684,7 +681,6 @@ private:
             e.policy = prob;
             e.U = U_val;
             e.Q = Q_val;
-            e.child = nullptr;
             entries.push_back(std::move(e));
         }
         std::sort(entries.begin(), entries.end(), [](const LKSPolicyEntry &a, const LKSPolicyEntry &b){ return a.policy > b.policy; });
@@ -723,89 +719,75 @@ private:
             node_U = static_cast<float>(std::sqrt(variance * 4.0));
         }
 
-        // Insert into cache as a flat copy (no child pointers)
+        // Insert into unified node map
         {
-            std::pmr::vector<CachedPolicyEntry> cached_entries{std::pmr::polymorphic_allocator<CachedPolicyEntry>(&search_arena_)};
-            cached_entries.reserve(entries.size());
-            for (const auto &e : entries) {
-                cached_entries.push_back(CachedPolicyEntry{e.move, e.policy, e.U, e.Q});
-            }
-            EvalCacheMap::accessor acc;
+            NodeMap::accessor acc;
             const Key128 key = make_key128(board);
-            eval_cache_.insert(acc, key);
-            acc->second = CachedNodeData{value, std::move(cached_entries), node_U, cdf};
+            node_map_.insert(acc, key);
+            acc->second = LKSNode{value, std::move(entries), node_U, std::move(cdf), false};
         }
-
-        return NodeBuildResult{value, std::move(entries), node_U, std::move(cdf)};
+        // Return a copy of the stored node
+        auto loaded = try_load_node(make_key128(board));
+        return loaded.value();
     }
 
-    // --- Transposition Table (TT) ---
-public:
-    enum class TTBoundType { EXACT = 0, LOWER_BOUND = 1, UPPER_BOUND = 2 };
-
-    struct TTBoundRec {
-        bool has{false};
-        float score{0.0f};
-        float depth{0.0f};
-        int min_bin{0}; // minimum alpha-bin (0..80) required to use this record
-    };
-
-    struct TTEntry {
-        TTBoundRec exact;
-        TTBoundRec lower;
-        TTBoundRec upper;
-    };
-
-    // Query the transposition table for a given board state.
-    // Returns a score if the TT can establish an exact value or a cutoff with the given alpha/beta and depth.
-    std::optional<float> query_tt(const chess::Board &board, float alpha, float beta, float depth, int alpha_bin) {
+    void persist_node_copy(const chess::Board &board, const LKSNode &node, float at_depth) {
+        NodeMap::accessor acc;
         const Key128 key = make_key128(board);
-        TTMap::const_accessor acc;
-        if (!tt_.find(acc, key)) return std::nullopt;
-        const TTEntry &e = acc->second;
+        node_map_.insert(acc, key);
+        // Only overwrite if this write is at a deeper search depth than stored
+        if (at_depth > acc->second.depth_record) {
+            LKSNode updated = node;
+            updated.depth_record = at_depth;
+            acc->second = std::move(updated);
+        }
+    }
+
+    // --- Transposition Table (embedded in node) ---
+public:
+    // Query the node-embedded TT for this node. Returns a score if usable.
+    std::optional<float> query_tt(const LKSNode &n, float alpha, float beta, float depth, int alpha_bin) {
+        const std::uint64_t cur_gen = tt_generation_.load(std::memory_order_relaxed);
         // Prefer exact value if at sufficient depth
-        if (e.exact.has && e.exact.depth >= depth && alpha_bin >= e.exact.min_bin) return e.exact.score;
+        if (n.tt_exact.has && n.tt_exact.gen == cur_gen && n.tt_exact.depth >= depth && alpha_bin >= n.tt_exact.min_bin) return n.tt_exact.score;
         // Lower bound can trigger beta cutoff
-        if (e.lower.has && e.lower.depth >= depth && alpha_bin >= e.lower.min_bin && e.lower.score >= beta) return e.lower.score;
+        if (n.tt_lower.has && n.tt_lower.gen == cur_gen && n.tt_lower.depth >= depth && alpha_bin >= n.tt_lower.min_bin && n.tt_lower.score >= beta) return n.tt_lower.score;
         // Upper bound can trigger alpha cutoff
-        if (e.upper.has && e.upper.depth >= depth && alpha_bin >= e.upper.min_bin && e.upper.score <= alpha) return e.upper.score;
+        if (n.tt_upper.has && n.tt_upper.gen == cur_gen && n.tt_upper.depth >= depth && alpha_bin >= n.tt_upper.min_bin && n.tt_upper.score <= alpha) return n.tt_upper.score;
         return std::nullopt;
     }
 
-    // Update the transposition table entry for this board with a result at the given window and depth.
-    void update_tt(const chess::Board &board, float alpha, float beta, float depth, float score, int alpha_bin) {
-        const Key128 key = make_key128(board);
-        TTMap::accessor acc;
-        tt_.insert(acc, key);
-        TTEntry &e = acc->second;
+    // Update the node-embedded TT entry for this node with a result at the given window and depth.
+    void update_tt(LKSNode &n, float alpha, float beta, float depth, float score, int alpha_bin) {
+        const std::uint64_t cur_gen = tt_generation_.load(std::memory_order_relaxed);
         if (score <= alpha) {
-            if (!e.upper.has || e.upper.depth <= depth) {
-                e.upper.has = true;
-                e.upper.score = score;
-                e.upper.depth = depth;
-                e.upper.min_bin = alpha_bin;
+            if (!n.tt_upper.has || n.tt_upper.depth <= depth) {
+                n.tt_upper.has = true;
+                n.tt_upper.score = score;
+                n.tt_upper.depth = depth;
+                n.tt_upper.min_bin = alpha_bin;
+                n.tt_upper.gen = cur_gen;
             }
         } else if (score >= beta) {
-            if (!e.lower.has || e.lower.depth <= depth) {
-                e.lower.has = true;
-                e.lower.score = score;
-                e.lower.depth = depth;
-                e.lower.min_bin = alpha_bin;
+            if (!n.tt_lower.has || n.tt_lower.depth <= depth) {
+                n.tt_lower.has = true;
+                n.tt_lower.score = score;
+                n.tt_lower.depth = depth;
+                n.tt_lower.min_bin = alpha_bin;
+                n.tt_lower.gen = cur_gen;
             }
         } else {
-            if (!e.exact.has || e.exact.depth <= depth) {
-                e.exact.has = true;
-                e.exact.score = score;
-                e.exact.depth = depth;
-                e.exact.min_bin = alpha_bin;
+            if (!n.tt_exact.has || n.tt_exact.depth <= depth) {
+                n.tt_exact.has = true;
+                n.tt_exact.score = score;
+                n.tt_exact.depth = depth;
+                n.tt_exact.min_bin = alpha_bin;
+                n.tt_exact.gen = cur_gen;
             }
         }
     }
 
 private:
-    using TTAlloc = std::pmr::polymorphic_allocator<std::pair<const Key128, TTEntry>>;
-    using TTMap = tbb::concurrent_hash_map<Key128, TTEntry, Key128HashCompare, TTAlloc>;
-    TTMap tt_{TTAlloc(&search_arena_)};
     // Map alpha in [-1,1] to integer bin [0,80]
     static inline int alpha_to_bin(float alpha) {
         int bin = static_cast<int>(std::floor(81.0f * (alpha + 1.0f) / 2.0f));
@@ -826,20 +808,16 @@ private:
     ) {
         auto &pe = node.policy[i];
 
-        // Ensure child exists and backpropagate policy updates
-        if (!pe.child) {
-            chess::Board child_board = board;
-            child_board.makeMove(pe.move);
-            auto created = co_await create_node(child_board);
-            if (!created) {
-                co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
-            }
-            std::pmr::polymorphic_allocator<LKSNode> nodeAlloc(&search_arena_);
-            LKSNode *ptr = nodeAlloc.allocate(1);
-            std::allocator_traits<decltype(nodeAlloc)>::construct(nodeAlloc, ptr, std::move(*created));
-            pe.child = NodePtr(ptr);
-            backpropagate_policy_updates(node, *pe.child, pe);
+        // Ensure child exists in map and backpropagate policy updates
+        chess::Board child_board = board;
+        child_board.makeMove(pe.move);
+        // Load fresh copy for recursive search
+        auto child_opt = co_await load_or_create_node_copy(child_board);
+        if (!child_opt) {
+            co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
         }
+        LKSNode child_node = std::move(*child_opt);
+        // backpropagate_policy_updates(node, child_node, pe);
 
         float search_alpha = (i == 0) ? -beta : -alpha - NULL_EPS;
         float search_beta = -alpha;
@@ -848,10 +826,10 @@ private:
         else if (node_type == NodeType::CUT) next_type = NodeType::ALL;
         else next_type = NodeType::CUT;
 
-        chess::Board child_board = board;
-        child_board.makeMove(pe.move);
+        // child_board already set
         int child_pv_depth = pv_depth + ((next_type != NodeType::PV) ? 1 : 0);
-        auto child_out = co_await lks_search(*pe.child, child_board, new_depth, search_alpha, search_beta, next_type, rec_depth + 1, child_pv_depth);
+
+        auto child_out = co_await lks_search(child_node, child_board, new_depth, search_alpha, search_beta, next_type, rec_depth + 1, child_pv_depth);
         if (child_out.aborted) {
             co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
         }
@@ -901,7 +879,7 @@ private:
         }
     }
     
-    NodePtr root_;
+    std::optional<Key128> root_key_;
     std::atomic<std::uint64_t> stat_gpu_evaluations_{0};
     std::atomic<std::uint64_t> stat_nodes_created_{0};
     std::atomic<std::uint64_t> stat_parent_nodes_{0};
@@ -909,6 +887,7 @@ private:
     std::atomic<std::uint64_t> stat_tbhits_{0};
     std::atomic<std::uint64_t> stat_tthits_{0};
     std::atomic<std::int64_t> stat_search_start_ns_{0};
+    std::atomic<std::uint64_t> tt_generation_{1};
 
     // --- Helpers for UCI info output ---
     void print_info_line(float depth, float bestScore) {
@@ -950,33 +929,25 @@ private:
             }
         }
         // pv line
-        std::string pv_line = build_pv_line();
+        std::string pv_line = build_pv_line(board_);
         if (!pv_line.empty()) {
             oss << " pv " << pv_line;
         }
         std::cout << oss.str() << '\n';
     }
 
-    std::string build_pv_line() const {
-        if (!root_) return {};
-        const LKSNode *node = root_.get();
+    std::string build_pv_line(const chess::Board &start_board) const {
         std::ostringstream pv;
         bool first = true;
-        while (node && !node->policy.empty()) {
-            chess::Move mv = node->bestMove;
-            if (mv == chess::Move::NO_MOVE) {
-                break;
-            }
+        chess::Board b = start_board;
+        for (int depth = 0; depth < 128; ++depth) {
+            auto rec = try_load_node(make_key128(b));
+            if (!rec) break;
+            if (rec->bestMove == chess::Move::NO_MOVE) break;
             if (!first) pv << ' ';
-            pv << chess::uci::moveToUci(mv);
+            pv << chess::uci::moveToUci(rec->bestMove);
             first = false;
-            // Follow the child corresponding to mv
-            const LKSNode *next = nullptr;
-            for (const auto &pe : node->policy) {
-                if (pe.move == mv && pe.child) { next = pe.child.get(); break; }
-            }
-            if (!next) break;
-            node = next;
+            b.makeMove(rec->bestMove);
         }
         return pv.str();
     }
@@ -1079,6 +1050,14 @@ public:
                 terminal_value = 0.0f; // stalemate, repetition, fifty-move, insufficient material
             }
             std::pmr::vector<LKSPolicyEntry> empty_pol{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
+            // Store terminal node in map
+            const Key128 key = make_key128(board);
+            {
+                NodeMap::accessor acc;
+                node_map_.insert(acc, key);
+                std::pmr::vector<LKSPolicyEntry> empty_entries{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
+                acc->second = LKSNode{terminal_value, std::move(empty_entries), 0.0f, std::pmr::vector<float>{std::pmr::polymorphic_allocator<float>(&search_arena_)}, true};
+            }
             co_return std::optional<LKSNode>(std::in_place, terminal_value, std::move(empty_pol), 0.0f, true);
         }
 
@@ -1086,14 +1065,21 @@ public:
         {
             if (auto wdl_v = engine::syzygy::probe_wdl_value(board)) {
                 std::pmr::vector<LKSPolicyEntry> empty_pol{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
+                const Key128 key = make_key128(board);
+                {
+                    NodeMap::accessor acc;
+                    node_map_.insert(acc, key);
+                    std::pmr::vector<LKSPolicyEntry> empty_entries{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
+                    acc->second = LKSNode{*wdl_v, std::move(empty_entries), 0.0f, std::pmr::vector<float>{std::pmr::polymorphic_allocator<float>(&search_arena_)}, true};
+                }
                 co_return std::optional<LKSNode>(std::in_place, *wdl_v, std::move(empty_pol), 0.0f, true);
             }
         }
 
-        // Cache lookup by 128-bit key
+        // Node map lookup by 128-bit key
         const Key128 key = make_key128(board);
-        if (auto cached = try_load_from_cache(key)) {
-            co_return std::optional<LKSNode>(std::in_place, cached->value, std::move(cached->entries), cached->node_U, std::move(cached->cdf), false);
+        if (auto loaded = try_load_node(key)) {
+            co_return std::optional<LKSNode>(*loaded);
         }
 
         // Evaluate network fully (suspend until ready)
@@ -1103,8 +1089,8 @@ public:
         }
 
         // Build node data from eval and store in cache
-        auto built = build_from_eval_and_cache(board, eval);
-        co_return std::optional<LKSNode>(std::in_place, built.value, std::move(built.entries), built.node_U, std::move(built.cdf), false);
+        auto built = build_from_eval_and_insert(board, eval);
+        co_return std::optional<LKSNode>(std::in_place, built.value, std::move(built.policy), built.U, std::move(built.cdf), built.terminal);
     }
 };
 

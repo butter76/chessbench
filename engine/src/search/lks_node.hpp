@@ -16,8 +16,7 @@ struct TTBoundRec {
     bool has{false};
     float score{0.0f};
     float depth{0.0f};
-    int min_bin{0}; // minimum alpha-bin (0..80) required to use this record
-    std::uint64_t gen{0}; // generation to validate freshness
+    std::uint8_t min_bin{0}; // minimum alpha-bin (0..80) required to use this record
 };
 
 // Represents one policy entry: (move, policy, U, Q)
@@ -63,6 +62,8 @@ struct LKSNode {
     TTBoundRec tt_exact{};
     TTBoundRec tt_lower{};
     TTBoundRec tt_upper{};
+    // Generation for TT freshness validation (shared for all TT bounds in this node)
+    std::uint8_t tt_gen{0};
     // Depth at which this node snapshot was last persisted
     float depth_record{ -std::numeric_limits<float>::infinity() };
 

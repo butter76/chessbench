@@ -64,14 +64,14 @@ public:
         // Release per-search arena memory then rebuild maps with fresh allocator state
         search_arena_.release();
         node_map_ = NodeMap(NodeAlloc(&search_arena_));
-        tt_generation_.fetch_add(1, std::memory_order_relaxed);
+        tt_generation_ = static_cast<std::uint8_t>(tt_generation_ + 1);
     }
 
     void makemove(const std::string &uci) override {
         const chess::Move move = chess::uci::uciToMove(board_, uci);
         if (move == chess::Move::NO_MOVE) {
             root_key_ = std::nullopt;
-            tt_generation_.fetch_add(1, std::memory_order_relaxed);
+            tt_generation_ = static_cast<std::uint8_t>(tt_generation_ + 1);
             return;
         }
 
@@ -80,7 +80,7 @@ public:
 
         // Clear the TT if the board has repeated as we have 2-fold repetition on
         if (board_.isRepetition(1)) {
-            tt_generation_.fetch_add(1, std::memory_order_relaxed);
+            tt_generation_ = static_cast<std::uint8_t>(tt_generation_ + 1);
         }
 
         // With key-based map, simply advance root key; map retains reused children implicitly
@@ -747,26 +747,26 @@ private:
 public:
     // Query the node-embedded TT for this node. Returns a score if usable.
     std::optional<float> query_tt(const LKSNode &n, float alpha, float beta, float depth, int alpha_bin) {
-        const std::uint64_t cur_gen = tt_generation_.load(std::memory_order_relaxed);
+        const std::uint8_t cur_gen = tt_generation_;
         // Prefer exact value if at sufficient depth
-        if (n.tt_exact.has && n.tt_exact.gen == cur_gen && n.tt_exact.depth >= depth && alpha_bin >= n.tt_exact.min_bin) return n.tt_exact.score;
+        if (n.tt_exact.has && n.tt_gen == cur_gen && n.tt_exact.depth >= depth && alpha_bin >= n.tt_exact.min_bin) return n.tt_exact.score;
         // Lower bound can trigger beta cutoff
-        if (n.tt_lower.has && n.tt_lower.gen == cur_gen && n.tt_lower.depth >= depth && alpha_bin >= n.tt_lower.min_bin && n.tt_lower.score >= beta) return n.tt_lower.score;
+        if (n.tt_lower.has && n.tt_gen == cur_gen && n.tt_lower.depth >= depth && alpha_bin >= n.tt_lower.min_bin && n.tt_lower.score >= beta) return n.tt_lower.score;
         // Upper bound can trigger alpha cutoff
-        if (n.tt_upper.has && n.tt_upper.gen == cur_gen && n.tt_upper.depth >= depth && alpha_bin >= n.tt_upper.min_bin && n.tt_upper.score <= alpha) return n.tt_upper.score;
+        if (n.tt_upper.has && n.tt_gen == cur_gen && n.tt_upper.depth >= depth && alpha_bin >= n.tt_upper.min_bin && n.tt_upper.score <= alpha) return n.tt_upper.score;
         return std::nullopt;
     }
 
     // Update the node-embedded TT entry for this node with a result at the given window and depth.
     void update_tt(LKSNode &n, float alpha, float beta, float depth, float score, int alpha_bin) {
-        const std::uint64_t cur_gen = tt_generation_.load(std::memory_order_relaxed);
+        const std::uint8_t cur_gen = tt_generation_;
+        n.tt_gen = cur_gen;
         if (score <= alpha) {
             if (!n.tt_upper.has || n.tt_upper.depth <= depth) {
                 n.tt_upper.has = true;
                 n.tt_upper.score = score;
                 n.tt_upper.depth = depth;
                 n.tt_upper.min_bin = alpha_bin;
-                n.tt_upper.gen = cur_gen;
             }
         } else if (score >= beta) {
             if (!n.tt_lower.has || n.tt_lower.depth <= depth) {
@@ -774,7 +774,6 @@ public:
                 n.tt_lower.score = score;
                 n.tt_lower.depth = depth;
                 n.tt_lower.min_bin = alpha_bin;
-                n.tt_lower.gen = cur_gen;
             }
         } else {
             if (!n.tt_exact.has || n.tt_exact.depth <= depth) {
@@ -782,7 +781,6 @@ public:
                 n.tt_exact.score = score;
                 n.tt_exact.depth = depth;
                 n.tt_exact.min_bin = alpha_bin;
-                n.tt_exact.gen = cur_gen;
             }
         }
     }
@@ -887,7 +885,7 @@ private:
     std::atomic<std::uint64_t> stat_tbhits_{0};
     std::atomic<std::uint64_t> stat_tthits_{0};
     std::atomic<std::int64_t> stat_search_start_ns_{0};
-    std::atomic<std::uint64_t> tt_generation_{1};
+    std::uint8_t tt_generation_{1};
 
     // --- Helpers for UCI info output ---
     void print_info_line(float depth, float bestScore) {

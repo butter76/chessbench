@@ -306,14 +306,14 @@ public:
 
         if (node_type != NodeType::PV) {
             auto bin = alpha_bin0;
-            float prob_greater_than_alpha = std::max(1e-6f, node.cdf[bin]);
+            float prob_greater_than_alpha = std::max(1e-6f, static_cast<float>(node.cdf[bin]));
             if (prob_greater_than_alpha < 0.1f && node.value < -1.0f + bin * 2.0f / 81.0f) {
                 // This position is a moonshot, so alt formula
                 float var_above_alpha = 1e-5f;
                 float last_bin_cdf = 0.0f;
                 for (int i = 80; i >= bin; --i) {
-                    float pdf_i = node.cdf[i] - last_bin_cdf;
-                    last_bin_cdf = node.cdf[i];
+                    float pdf_i = static_cast<float>(node.cdf[i]) - last_bin_cdf;
+                    last_bin_cdf = static_cast<float>(node.cdf[i]);
                     float bin_center = (i * 2.0f + 1.0f) / 81.0f - 1.0f;
                     var_above_alpha += pdf_i * (bin_center - node.value) * (bin_center - node.value);
                 }
@@ -523,7 +523,7 @@ public:
                 } else {
                     new_policy = pe.policy + IMPROVER_POLICY_INCREASE;
                     if (!(score > alpha)) {
-                        float clip = std::max(node.policy[0].policy * 0.98f, pe.policy);
+                        float clip = std::max(node.policy[0].policy * 0.98f, static_cast<float>(pe.policy));
                         new_policy = std::min(new_policy, clip);
                     }
                 }
@@ -687,7 +687,7 @@ private:
 
         // Compute node-level U from hl logits as wdl_variance and build CDF over bins
         float node_U = 0.0f;
-        std::pmr::vector<float> cdf{std::pmr::polymorphic_allocator<float>(&search_arena_)};
+        std::pmr::vector<f16> cdf{std::pmr::polymorphic_allocator<f16>(&search_arena_)};
         const int bins = static_cast<int>(eval.hl.size());
         if (bins > 0) {
             // softmax over hl
@@ -704,7 +704,7 @@ private:
             double running = 0.0;
             for (int i = bins - 1; i >= 0; --i) {
                 running += probs[static_cast<std::size_t>(i)];
-                cdf[static_cast<std::size_t>(i)] = static_cast<float>(running);
+                cdf[static_cast<std::size_t>(i)] = static_cast<f16>(running);
             }
 
             // bin centers in [0,1]
@@ -1056,7 +1056,7 @@ public:
                 NodeMap::accessor acc;
                 node_map_.insert(acc, key);
                 std::pmr::vector<LKSPolicyEntry> empty_entries{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
-                acc->second = LKSNode{terminal_value, std::move(empty_entries), 0.0f, std::pmr::vector<float>{std::pmr::polymorphic_allocator<float>(&search_arena_)}, true};
+                acc->second = LKSNode{terminal_value, std::move(empty_entries), 0.0f, std::pmr::vector<f16>{std::pmr::polymorphic_allocator<f16>(&search_arena_)}, true};
             }
             co_return std::optional<LKSNode>(std::in_place, terminal_value, std::move(empty_pol), 0.0f, true);
         }
@@ -1070,7 +1070,7 @@ public:
                     NodeMap::accessor acc;
                     node_map_.insert(acc, key);
                     std::pmr::vector<LKSPolicyEntry> empty_entries{std::pmr::polymorphic_allocator<LKSPolicyEntry>(&search_arena_)};
-                    acc->second = LKSNode{*wdl_v, std::move(empty_entries), 0.0f, std::pmr::vector<float>{std::pmr::polymorphic_allocator<float>(&search_arena_)}, true};
+                    acc->second = LKSNode{*wdl_v, std::move(empty_entries), 0.0f, std::pmr::vector<f16>{std::pmr::polymorphic_allocator<f16>(&search_arena_)}, true};
                 }
                 co_return std::optional<LKSNode>(std::in_place, *wdl_v, std::move(empty_pol), 0.0f, true);
             }

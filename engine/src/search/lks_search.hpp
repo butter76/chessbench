@@ -462,20 +462,13 @@ public:
         improver_indices.reserve(filtered_indices.size());
 
         if (!filtered_indices.empty()) {
-            std::size_t i0 = filtered_indices[0];
-            float depth0 = new_depths[i0];
-            auto r0 = co_await process_phase2_child(node, board, i0, depth0, bestScore, 1.0f, node_type, rec_depth, pv_depth);
-            if (r0.aborted) co_return SearchOutcome{0.0f, bestMove, true};
-            bestScore = r0.score;
-            bestMove = r0.move;
-
             // Launch parallel searches for remaining children as coroutine tasks
             std::vector<std::size_t> non_first_indices;
             non_first_indices.reserve(filtered_indices.size() > 0 ? filtered_indices.size() - 1 : 0);
             std::vector<cppcoro::task<Phase2ChildResult>> tasks;
             tasks.reserve(filtered_indices.size() > 0 ? filtered_indices.size() - 1 : 0);
 
-            for (std::size_t idx_pos = 1; idx_pos < filtered_indices.size(); ++idx_pos) {
+            for (std::size_t idx_pos = 0; idx_pos < filtered_indices.size(); ++idx_pos) {
                 std::size_t i = filtered_indices[idx_pos];
                 float nd = new_depths[i];
                 non_first_indices.push_back(i);
@@ -485,10 +478,14 @@ public:
             // Await completion of all non-first children without blocking pool threads
             if (!tasks.empty()) {
                 auto ready = co_await cppcoro::when_all_ready(std::move(tasks));
-                for (std::size_t t = 0; t < ready.size(); ++t) {
+                auto r0 = std::move(ready[0]).result();
+                if (r0.aborted) co_return SearchOutcome{0.0f, bestMove, true};
+                bestScore = r0.score;
+                bestMove = r0.move;
+                for (std::size_t t = 1; t < ready.size(); ++t) {
                     Phase2ChildResult r = std::move(ready[t]).result();
                     if (r.aborted) co_return SearchOutcome{0.0f, bestMove, true};
-                    if (r.is_improver) {
+                    if (r.score > bestScore) {
                         improver_indices.push_back(non_first_indices[t]);
                     }
                 }
@@ -794,7 +791,7 @@ private:
                 co_return Phase2ChildResult{true, false, alpha, 0.0f, chess::Move::NO_MOVE, false};
             }
             pe.child = std::make_unique<LKSNode>(std::move(*created));
-            backpropagate_policy_updates(node, *pe.child, pe);
+            // backpropagate_policy_updates(node, *pe.child, pe);
         }
 
         float search_alpha = (i == 0) ? -beta : -alpha - NULL_EPS;

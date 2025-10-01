@@ -449,9 +449,9 @@ public:
                 child_board.makeMove(pe.move);
                 float child_value = 0.0f;
                 if (auto tt_val = query_tt(child_board, 0.0f)) {
-                    child_value = *tt_val;
+                    child_value = *tt_val * 1.4f;
                 } else {
-                    child_value = pe.child->value;
+                    child_value = pe.child->value * 1.4f;
                 }
                 float Qi = -child_value; // negamax perspective switch
                 tt_child_indices.push_back(i);

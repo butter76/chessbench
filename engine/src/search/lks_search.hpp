@@ -464,10 +464,19 @@ public:
         std::vector<double> Ni_by_index(policy_size, 0.0);
         double N_target = 0.0;
         if (!tt_child_indices.empty()) {
-            // Target total expansions N and bisection to find K > max(Q_i) with sum N_i ~= N
+            // Target total expansions scaled by total move weight of existing TT children:
+            // Find K > max(Q_i) such that sum_i N_i ~= N_target * (sum_i move_weight_i),
+            // where N_i = move_weight_i * sqrt(N_target) / (K - Q_i).
             N_target = std::exp(static_cast<double>(depth) - 5.4);
             if (N_target < 1e-12) N_target = 1e-12;
             const double sqrtN = std::sqrt(N_target);
+            // Sum of policy weights for TT-backed children
+            double weight_sum = 0.0;
+            for (std::size_t j = 0; j < tt_child_indices.size(); ++j) {
+                weight_sum += static_cast<double>(tt_pis[j]);
+            }
+            if (weight_sum < 1e-12) weight_sum = 1e-12;
+            const double target_sum_over = sqrtN * weight_sum;
             const double eps = 1e-6;
             double lo = static_cast<double>(max_Q_for_existing_child) + eps;
             double hi = lo + 1.0;
@@ -479,14 +488,14 @@ public:
                 return s;
             };
             int expand_iters = 0;
-            while (sum_over(hi) > sqrtN && expand_iters < 60) {
+            while (sum_over(hi) > target_sum_over && expand_iters < 60) {
                 hi = (hi - lo) * 2.0 + lo;
                 ++expand_iters;
             }
             for (int it = 0; it < 40; ++it) {
                 double mid = 0.5 * (lo + hi);
                 double s = sum_over(mid);
-                if (s > sqrtN) lo = mid; else hi = mid;
+                if (s > target_sum_over) lo = mid; else hi = mid;
             }
             double K = 0.5 * (lo + hi);
             for (std::size_t j = 0; j < tt_child_indices.size(); ++j) {
@@ -519,8 +528,6 @@ public:
                 new_depth = depth + std::log(move_weight + 1e-6f) - std::log(weight_divisor + 1e-6f);
             }
 
-            if (i == 0) best_move_depth = new_depth;
-
             new_depths[i] = new_depth;
 
             bool should_filter = false;
@@ -541,32 +548,50 @@ public:
         std::vector<std::size_t> improver_indices;
         improver_indices.reserve(filtered_indices.size());
 
+        // Determine anchor index: child with maximum new_depth among filtered children
+        std::size_t anchor_index = static_cast<std::size_t>(-1);
+        if (!filtered_indices.empty()) {
+            anchor_index = filtered_indices[0];
+            best_move_depth = new_depths[anchor_index];
+            for (std::size_t idx_pos = 1; idx_pos < filtered_indices.size(); ++idx_pos) {
+                std::size_t i = filtered_indices[idx_pos];
+                if (new_depths[i] > best_move_depth) {
+                    best_move_depth = new_depths[i];
+                    anchor_index = i;
+                }
+            }
+        }
+
         if (!filtered_indices.empty()) {
             // Launch parallel searches for remaining children as coroutine tasks
-            std::vector<std::size_t> non_first_indices;
-            non_first_indices.reserve(filtered_indices.size() > 0 ? filtered_indices.size() - 1 : 0);
+
             std::vector<cppcoro::task<Phase2ChildResult>> tasks;
-            tasks.reserve(filtered_indices.size() > 0 ? filtered_indices.size() - 1 : 0);
+            tasks.reserve(filtered_indices.size() > 0 ? filtered_indices.size() : 0);
 
             for (std::size_t idx_pos = 0; idx_pos < filtered_indices.size(); ++idx_pos) {
                 std::size_t i = filtered_indices[idx_pos];
                 float nd = new_depths[i];
-                non_first_indices.push_back(i);
                 tasks.push_back(process_phase2_child(node, board, i, nd, bestScore, 1.0f, node_type, rec_depth, pv_depth));
             }
 
             // Await completion of all non-first children without blocking pool threads
             if (!tasks.empty()) {
                 auto ready = co_await cppcoro::when_all_ready(std::move(tasks));
-                auto r0 = std::move(ready[0]).result();
-                if (r0.aborted) co_return SearchOutcome{0.0f, bestMove, true};
-                bestScore = r0.score;
-                bestMove = r0.move;
-                for (std::size_t t = 1; t < ready.size(); ++t) {
+                // Find the position of anchor_index within filtered_indices
+                std::size_t anchor_pos = 0;
+                for (std::size_t p = 0; p < filtered_indices.size(); ++p) {
+                    if (filtered_indices[p] == anchor_index) { anchor_pos = p; break; }
+                }
+                auto r_anchor = std::move(ready[anchor_pos]).result();
+                if (r_anchor.aborted) co_return SearchOutcome{0.0f, bestMove, true};
+                bestScore = r_anchor.score;
+                bestMove = r_anchor.move;
+                for (std::size_t t = 0; t < ready.size(); ++t) {
+                    if (t == anchor_pos) continue;
                     Phase2ChildResult r = std::move(ready[t]).result();
                     if (r.aborted) co_return SearchOutcome{0.0f, bestMove, true};
                     if (r.score > bestScore) {
-                        improver_indices.push_back(non_first_indices[t]);
+                        improver_indices.push_back(filtered_indices[t]);
                     }
                 }
             }

@@ -504,6 +504,44 @@ public:
                 if (Ni < 0.0) Ni = 0.0;
                 Ni_by_index[idx] = Ni;
             }
+
+            // If a current best move exists among these children, enforce it has the largest N_i
+            if (node.bestMove != chess::Move::NO_MOVE) {
+                // Locate the policy index of bestMove
+                std::size_t best_idx = static_cast<std::size_t>(-1);
+                for (std::size_t i = 0; i < policy_size; ++i) {
+                    if (node.policy[i].move == node.bestMove) { best_idx = i; break; }
+                }
+                // Check if best_idx is part of TT-backed children
+                bool best_in_tt = false;
+                for (std::size_t j = 0; j < tt_child_indices.size(); ++j) {
+                    if (tt_child_indices[j] == best_idx) { best_in_tt = true; break; }
+                }
+                if (best_in_tt) {
+                    // Compute current sum and max among others
+                    double sum_all = 0.0;
+                    double max_other = 0.0;
+                    for (std::size_t j = 0; j < tt_child_indices.size(); ++j) {
+                        std::size_t idx = tt_child_indices[j];
+                        double Nij = Ni_by_index[idx];
+                        sum_all += Nij;
+                        if (idx != best_idx && Nij > max_other) max_other = Nij;
+                    }
+                    double &Ni_best = Ni_by_index[best_idx];
+                    if (Ni_best + 1e-12 < max_other) {
+                        double delta = max_other - Ni_best;
+                        double sum_others = sum_all - Ni_best;
+                        double scaled_others_sum = sum_others - delta;
+                        double scale = (sum_others > 1e-12 && scaled_others_sum > 0.0) ? (scaled_others_sum / sum_others) : 0.0;
+                        for (std::size_t j = 0; j < tt_child_indices.size(); ++j) {
+                            std::size_t idx = tt_child_indices[j];
+                            if (idx == best_idx) continue;
+                            Ni_by_index[idx] *= scale;
+                        }
+                        Ni_best = max_other;
+                    }
+                }
+            }
         }
 
         float total_weight = 0.0f; // running total for filtering logic

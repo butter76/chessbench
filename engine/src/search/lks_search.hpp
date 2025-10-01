@@ -434,11 +434,91 @@ public:
         float bestScore = -std::numeric_limits<float>::infinity();
         chess::Move bestMove = chess::Move::NO_MOVE;
 
+        // TT-based redistribution for children that already exist: compute Q_i and solve for K
+        std::vector<std::size_t> tt_child_indices;
+        tt_child_indices.reserve(policy_size);
+        std::vector<float> tt_pis;
+        tt_pis.reserve(policy_size);
+        std::vector<float> tt_Qs;
+        tt_Qs.reserve(policy_size);
+        float max_Q_for_existing_child = -std::numeric_limits<float>::infinity();
+        for (std::size_t i = 0; i < policy_size; ++i) {
+            const auto &pe = node.policy[i];
+            if (pe.child) {
+                chess::Board child_board = board;
+                child_board.makeMove(pe.move);
+                float child_value = 0.0f;
+                if (auto tt_val = query_tt(child_board, 0.0f)) {
+                    child_value = *tt_val;
+                } else {
+                    child_value = pe.child->value;
+                }
+                float Qi = -child_value; // negamax perspective switch
+                tt_child_indices.push_back(i);
+                tt_pis.push_back(pe.policy);
+                tt_Qs.push_back(Qi);
+                if (Qi > max_Q_for_existing_child) max_Q_for_existing_child = Qi;
+            }
+        }
+
+        std::vector<double> Ni_by_index(policy_size, 0.0);
+        double N_target = 0.0;
+        if (!tt_child_indices.empty()) {
+            // Target total expansions N and bisection to find K > max(Q_i) with sum N_i ~= N
+            N_target = std::exp(static_cast<double>(depth) - 5.4);
+            if (N_target < 1e-12) N_target = 1e-12;
+            const double sqrtN = std::sqrt(N_target);
+            const double eps = 1e-6;
+            double lo = static_cast<double>(max_Q_for_existing_child) + eps;
+            double hi = lo + 1.0;
+            auto sum_over = [&](double K) -> double {
+                double s = 0.0;
+                for (std::size_t j = 0; j < tt_child_indices.size(); ++j) {
+                    s += static_cast<double>(tt_pis[j]) / (K - static_cast<double>(tt_Qs[j]));
+                }
+                return s;
+            };
+            int expand_iters = 0;
+            while (sum_over(hi) > sqrtN && expand_iters < 60) {
+                hi = (hi - lo) * 2.0 + lo;
+                ++expand_iters;
+            }
+            for (int it = 0; it < 40; ++it) {
+                double mid = 0.5 * (lo + hi);
+                double s = sum_over(mid);
+                if (s > sqrtN) lo = mid; else hi = mid;
+            }
+            double K = 0.5 * (lo + hi);
+            for (std::size_t j = 0; j < tt_child_indices.size(); ++j) {
+                std::size_t idx = tt_child_indices[j];
+                double Ni = static_cast<double>(tt_pis[j]) * sqrtN / (K - static_cast<double>(tt_Qs[j]));
+                if (Ni < 0.0) Ni = 0.0;
+                Ni_by_index[idx] = Ni;
+            }
+        }
+
         float total_weight = 0.0f; // running total for filtering logic
         for (std::size_t i = 0; i < policy_size; ++i) {
             auto &pe = node.policy[i];
             const float move_weight = pe.policy;
-            float new_depth = depth + std::log(move_weight + 1e-6f) - std::log(weight_divisor + 1e-6f);
+
+            float new_depth;
+            if (pe.child && Ni_by_index[i] > 0.0 && N_target > 0.0) {
+                double frac = Ni_by_index[i] / N_target;
+                // if (root) {
+                //     std::cout << chess::uci::moveToUci(pe.move) << ":"; 
+                //     std::cout << " Ni_by_index[i]: " << Ni_by_index[i] << " N_target: " << N_target;
+                //     std::cout << " depth: " << depth;
+                //     std::cout << " weight_divisor: " << weight_divisor;
+                //     std::cout << " frac: " << frac;
+                //     std::cout << " move_weight: " << move_weight;
+                //     std::cout << std::endl;
+                // }
+                new_depth = depth + std::log(static_cast<float>(frac) + 1e-6f) - std::log(weight_divisor + 1e-6f);
+            } else {
+                new_depth = depth + std::log(move_weight + 1e-6f) - std::log(weight_divisor + 1e-6f);
+            }
+
             if (i == 0) best_move_depth = new_depth;
 
             new_depths[i] = new_depth;

@@ -420,7 +420,7 @@ public:
         for (std::size_t i = 0; i < node.policy.size(); ++i) {
             const auto &pe = node.policy[i];
             if (pe.child == nullptr) {
-                if ((total_weight_scan > 0.80f && i >= 2) || (total_weight_scan > 0.95f && i >= 1)) {
+                if ((total_weight_scan > 0.75f && i >= 2) || (total_weight_scan > 0.90f && i >= 1)) {
                     weight_divisor -= pe.policy;
                 } else {
                     unexpanded_count += 1;
@@ -459,7 +459,7 @@ public:
         for (std::size_t i = 0; i < policy_size; ++i) {
             auto &pe = node.policy[i];
             const float move_weight = pe.policy;
-            float new_depth = depth + std::log(move_weight + 1e-6f) - std::log(weight_divisor + 1e-6f);
+            float new_depth = depth + std::log(move_weight + 1e-6f);
             if (i == 0) best_move_depth = new_depth;
 
             new_depths[i] = new_depth;
@@ -468,7 +468,7 @@ public:
             if (!pe.child) {
                 const float local_reduction = -2.0f * std::log(pe.U + 1e-6f);
                 if (new_depth <= local_reduction) {
-                    if ((total_weight > 0.80f && i >= 2) || (total_weight > 0.95f && i >= 1)) {
+                    if ((total_weight > 0.75f && i >= 2) || (total_weight > 0.90f && i >= 1)) {
                         should_filter = !(pv_depth < force_all_children_on_pv_depth_) && !root;
                     }
                 }

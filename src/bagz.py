@@ -20,7 +20,6 @@ serialised protocol buffers. It supports fast index based look-up.
 """
 
 import bisect
-from collections.abc import Sequence
 import glob
 import itertools
 import mmap
@@ -28,11 +27,11 @@ import os
 import re
 import shutil
 import struct
+from collections.abc import Sequence
 from typing import Any, SupportsIndex
 
-from etils import epath
-from typing_extensions import Self
 import zstandard as zstd
+from etils import epath
 
 
 class BagFileReader(Sequence[bytes]):
@@ -169,8 +168,8 @@ class BagGlobShardReader(Sequence[bytes]):
     """Creates a BagGlobShardReader.
 
     Args:
-      pattern: The glob pattern for sharded Bagz files in format 
-        'path/prefix*|prefix2*|prefix3*.bag' where multiple patterns are 
+      pattern: The glob pattern for sharded Bagz files in format
+        'path/prefix*|prefix2*|prefix3*.bag' where multiple patterns are
         separated by '|'.
       separate_limits: Whether the limits are stored in a separate file.
       decompress: Whether to decompress the records. If None, uses the file
@@ -179,20 +178,20 @@ class BagGlobShardReader(Sequence[bytes]):
     # Parse the pattern to extract individual patterns
     patterns = pattern.split('|')
     all_files = []
-    
+
     prefix = '/'.join(patterns[0].split('/')[:-1])
     for p in patterns:
       pp = prefix + '/' + p.split('/')[-1]
       # Find all files matching this pattern
       matching_files = glob.glob(pp)
       all_files.extend(matching_files)
-    
+
     # Remove duplicates and sort for consistent ordering
     all_files = sorted(set(all_files))
-    
+
     if not all_files:
       raise ValueError(f"No files found matching pattern: {pattern}")
-    
+
     self._bags = tuple(
         BagFileReader(
             filename=filepath,
@@ -231,7 +230,7 @@ class BagReader(Sequence[bytes]):
 
     Args:
       filename: The name of the Bagz file to read. Supports the @N shard syntax
-        (where @0 corresponds to the single file case), or the glob pattern 
+        (where @0 corresponds to the single file case), or the glob pattern
         syntax 'path/prefix*|prefix2*|prefix3*.bag' for multiple patterns.
         If neither syntax is detected, then `filename` is treated as a single file.
       separate_limits: Whether the limits are stored in a separate file.
@@ -314,7 +313,7 @@ class BagWriter:
     self._records.flush()
     self._limits.flush()
 
-  def __enter__(self) -> Self:
+  def __enter__(self):
     return self
 
   def __exit__(self, exc_type, exc_value, traceback) -> None:
@@ -341,9 +340,10 @@ class BagDataSource:
     """Creates a new BagDataSource object.
 
     Args:
-      path: The path to the bag file.
+      path: The path to the bag file. Supports tilde (~) expansion.
     """
-    self._path = os.fspath(path)
+    # Expand tilde and convert to string
+    self._path = os.path.expanduser(os.fspath(path))
     self._reader = BagReader(self._path)
     self._num_records = len(self._reader)
 

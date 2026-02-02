@@ -1,29 +1,32 @@
 """PyTorch implementation of the training algorithm for action-value prediction."""
 
-import torch
 import os
-import grain.python as pygrain
-import bagz
-
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+
+import grain.python as pygrain
+import torch
+
+from searchless_chess.src import bagz
 from searchless_chess.src import config as config_lib
 from searchless_chess.src.data_loader import _TRANSFORMATION_BY_POLICY
-from concurrent.futures import ThreadPoolExecutor
+
 
 class ConvertToTorch(pygrain.MapTransform):
     def map(self, element):
         return tuple(torch.from_numpy(arr) for arr in element)
 
-        
+
 
 def load_datasource(config: config_lib.DataConfig):
-    data_path = os.path.join(
-        os.getcwd(),
-        config.dataset_path,
-    )
+    # Use tilde expansion and glob pattern support
+    data_path = config.dataset_path
     bag_source = bagz.BagDataSource(data_path)
+
+    num_records = config.num_records if config.num_records is not None else len(bag_source)
+
     sampler = pygrain.IndexSampler(
-        num_records=len(bag_source),
+        num_records=num_records,
         shard_options=pygrain.NoSharding(),
         shuffle=config.shuffle,
         seed=config.seed,
@@ -53,14 +56,15 @@ class PrefetchIterator:
     current batch is being used by the training step.
     """
 
-    def __init__(self, loader: Any, device: str) -> None:
+    def __init__(self, loader: Any, device: str, policy: str = 'lc0_data') -> None:
         self._device = device
+        self._policy = policy
         self._it = iter(loader)
         self._executor = ThreadPoolExecutor(max_workers=1)
         # Kick off first fetch+prepare
         self._next_future = self._executor.submit(self._fetch_and_prepare)
 
-    def _prepare_batch(self, batch: Any) -> Any:
+    def _prepare_batch_lc0(self, batch: Any) -> Any:
         # Expected tuple for lc0_data policy
         (
             x,
@@ -120,9 +124,35 @@ class PrefetchIterator:
             plies_left,
         )
 
+    def _prepare_batch_training_bag(self, batch: Any) -> Any:
+        """Prepare batch for training_bag policy format.
+
+        Expected tuple: (state, policy, hard_policy, hl, value_prob)
+        """
+        (x, policy, hard_policy, hl, value_prob) = batch
+
+        # Cast dtypes on CPU first
+        x = x.to(torch.long, copy=False)
+        policy = policy.to(torch.float32, copy=False)
+        hard_policy = hard_policy.to(torch.float32, copy=False)
+        hl = hl.to(torch.float32, copy=False)
+        value_prob = value_prob.to(torch.float32, copy=False)
+
+        # Move to device
+        x = x.to(self._device)
+        policy = policy.to(self._device)
+        hard_policy = hard_policy.to(self._device)
+        hl = hl.to(self._device)
+        value_prob = value_prob.to(self._device)
+
+        return (x, policy, hard_policy, hl, value_prob)
+
     def _fetch_and_prepare(self) -> Any:
         batch = next(self._it)
-        return self._prepare_batch(batch)
+        if self._policy == 'training_bag':
+            return self._prepare_batch_training_bag(batch)
+        else:
+            return self._prepare_batch_lc0(batch)
 
     def __iter__(self):
         return self

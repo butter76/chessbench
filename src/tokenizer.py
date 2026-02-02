@@ -16,8 +16,8 @@
 """Implements tokenization of FEN strings."""
 
 import numpy as np
-from searchless_chess.src.utils import _parse_square
 
+from searchless_chess.src.utils import _parse_square
 
 # pyfmt: disable
 _CHARACTERS = [
@@ -51,7 +51,7 @@ _CHARACTERS = [
 # pyfmt: enable
 _CHARACTERS_INDEX = {letter: index for index, letter in enumerate(_CHARACTERS)}
 _SPACES_CHARACTERS = frozenset({'1', '2', '3', '4', '5', '6', '7', '8'})
-SEQUENCE_LENGTH = 68
+SEQUENCE_LENGTH = 64
 
 
 def tokenize(fen: str, useRule50: bool = False):
@@ -103,27 +103,27 @@ def tokenize(fen: str, useRule50: bool = False):
     board = board[:en_sq] + 'x' + board[en_sq + 1:]
 
 
-  halfmoves_last = halfmoves_last if (useRule50 and int(halfmoves_last) > 50) else '0'
-    
-  board += '.'
+  # halfmoves_last = halfmoves_last if (useRule50 and int(halfmoves_last) > 50) else '0'
+
+  # board += '.'
   indices = list()
 
   for char in board:
     indices.append(_CHARACTERS_INDEX[char])
 
-  # if castling == '-':
-  #   indices.extend(4 * [_CHARACTERS_INDEX['.']])
-  # else:
-  #   for char in castling:
-  #     indices.append(_CHARACTERS_INDEX[char])
-  #   # Padding castling to have exactly 4 characters.
-  #   if len(castling) < 4:
-  #     indices.extend((4 - len(castling)) * [_CHARACTERS_INDEX['.']])
+  # # if castling == '-':
+  # #   indices.extend(4 * [_CHARACTERS_INDEX['.']])
+  # # else:
+  # #   for char in castling:
+  # #     indices.append(_CHARACTERS_INDEX[char])
+  # #   # Padding castling to have exactly 4 characters.
+  # #   if len(castling) < 4:
+  # #     indices.extend((4 - len(castling)) * [_CHARACTERS_INDEX['.']])
 
-  # Three digits for halfmoves (since last capture) is enough since the game
-  # ends at 50.
-  halfmoves_last += '.' * (3 - len(halfmoves_last))
-  indices.extend([_CHARACTERS_INDEX[x] for x in halfmoves_last])
+  # # Three digits for halfmoves (since last capture) is enough since the game
+  # # ends at 50.
+  # halfmoves_last += '.' * (3 - len(halfmoves_last))
+  # indices.extend([_CHARACTERS_INDEX[x] for x in halfmoves_last])
 
   assert len(indices) == SEQUENCE_LENGTH
 

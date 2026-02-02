@@ -16,27 +16,33 @@
 """Implements a PyGrain DataLoader for chess data."""
 
 import abc
+import math
 import os
+import random
 
+import chess
 import grain.python as pygrain
 import jax
+import msgpack
 import numpy as np
-
-from searchless_chess.src import bagz
-from searchless_chess.src import config as config_lib
-from searchless_chess.src import constants
-from searchless_chess.src import tokenizer
-from searchless_chess.src import utils
-
-from searchless_chess.src.engines import engine
 import torch
-import chess
-import random
-import math
 from scipy.stats import norm
+
+from searchless_chess.src import bagz, constants, tokenizer, utils
+from searchless_chess.src import config as config_lib
+from searchless_chess.src.engines import engine
 
 NUM_BINS = 81
 S = tokenizer.SEQUENCE_LENGTH
+
+# Policy target dimensions (matching CatGPT)
+# 64 normal destination squares + 9 underpromotion targets
+# Underpromotions: 3 pieces (knight, bishop, rook) x 3 directions (left capture, straight, right capture)
+POLICY_TO_DIM = 73
+POLICY_SHAPE = (64, POLICY_TO_DIM)  # (from_square, to_square)
+
+# Underpromotion piece type to index offset
+_UNDERPROMO_PIECE_OFFSET = {"n": 0, "b": 1, "r": 2}
 
 def _process_prob(
     win_prob: float,
@@ -123,7 +129,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
   def map(
     self, element: bytes
   ):
-  
+
     fen, move_values = constants.CODERS['action_values'].decode(element)
     stm = fen.split(' ')[1]
     flip = stm == 'b'
@@ -153,7 +159,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
       actions[s1, s2] = win_prob
       if win_prob == value_prob:
         policy[s1, s2] = 1
-      
+
       if win_prob >= value_prob * 0.95:
         weights[s1, s2] = 1
       else:
@@ -164,7 +170,7 @@ class ConvertActionValuesDataToSequence(ConvertToSequence):
     policy = policy / policy.sum()
 
     return state, legal_actions, actions, probs, np.array([value_prob]), policy, weights
-  
+
 
 class ConvertLeelaDataToSequence(ConvertToSequence):
   """Converts the fen, move, and win probability into a sequence of integers."""
@@ -172,7 +178,7 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     self, element: bytes
   ):
     fen, leela_policy, result, root_q, root_d, played_q, played_d, plies_left, _move = constants.CODERS['lc0_data'].decode(element)
-    
+
     state = _process_fen(fen)
     Q = (root_q + 1) / 2
     D = root_d
@@ -203,7 +209,7 @@ class ConvertLeelaDataToSequence(ConvertToSequence):
     flat_policy = policy.reshape(-1)
 
     if _move != 'CDB':
-    
+
       # Hard policy (temp=0.25)
       # Add small epsilon to avoid log(0)
       eps = 1e-8
@@ -254,6 +260,123 @@ class ConvertLeelaDataToSequenceWithU(ConvertToSequence):
     return state, legal_actions, U_values, Q_values, D_values
 
 
+def _flip_square(square: str) -> str:
+    """Flip a square name vertically (e.g., 'e2' -> 'e7')."""
+    return square[0] + str(9 - int(square[1]))
+
+
+def _parse_uci_move(uci: str) -> tuple[str, str, str | None]:
+    """Parse a UCI move string into (from_square, to_square, promotion)."""
+    from_sq = uci[:2]
+    to_sq = uci[2:4]
+    promo = uci[4].lower() if len(uci) > 4 else None
+    return from_sq, to_sq, promo
+
+
+def _encode_policy_target(
+    legal_moves: list[tuple[str, float]],
+    flip: bool = False,
+) -> np.ndarray:
+    """Convert legal moves with policy to (64, 73) target tensor.
+
+    Args:
+        legal_moves: List of (uci_move, probability) tuples.
+        flip: Whether to flip squares (for black to move, to match tokenizer).
+
+    Returns:
+        Shape (64, 73) array with policy probabilities.
+    """
+    target = np.zeros(POLICY_SHAPE, dtype=np.float32)
+
+    for uci_move, prob in legal_moves:
+        from_sq, to_sq, promo = _parse_uci_move(uci_move)
+
+        if flip:
+            from_sq = _flip_square(from_sq)
+            to_sq = _flip_square(to_sq)
+
+        from_idx = utils._parse_square(from_sq, flip=False)
+
+        if promo and promo != "q":
+            # Underpromotion: map to indices 64-72
+            # file_diff: -1 (capture left), 0 (straight), +1 (capture right)
+            file_diff = ord(to_sq[0]) - ord(from_sq[0])
+            to_idx = 64 + _UNDERPROMO_PIECE_OFFSET[promo] * 3 + (file_diff + 1)
+        else:
+            # Normal move or queen promotion: use destination square
+            to_idx = utils._parse_square(to_sq, flip=False)
+
+        target[from_idx, to_idx] = prob
+
+    return target
+
+
+class ConvertTrainingBagDataToSequence(ConvertToSequence):
+  """Converts training .bag data (msgpack format) to sequences for training.
+
+  This coder handles the .bag format from CatGPT containing msgpack-encoded
+  data with rich meta-features (fen, root_q, legal_moves, etc.).
+  """
+
+  def __init__(
+      self,
+      num_return_buckets: int = 128,
+      hard_policy_temperature: float = 0.25,
+  ) -> None:
+    super().__init__(num_return_buckets)
+    self.hard_policy_temperature = hard_policy_temperature
+
+  def map(self, element: bytes):
+    """Map a training position to training tensors.
+
+    Returns tuple of:
+        - state: tokenized FEN (int array)
+        - policy: (64, 73) policy target
+        - hard_policy: (64, 73) sharpened policy target
+        - hl: (NUM_BINS,) HL-Gauss value distribution
+        - value_prob: (1,) win probability
+    """
+    # Decode msgpack data
+    data = msgpack.unpackb(element, raw=False)
+
+    # Extract fields
+    fen = data["fen"]
+    root_q = data["root_q"]  # Q value in [-1, 1]
+    legal_moves = data["legal_moves"]  # List of (move_uci, probability)
+
+    # Parse FEN fields
+    fen_parts = fen.split()
+    side_to_move = fen_parts[1]
+    flip = side_to_move == "b"
+
+    # Tokenize FEN (tokenizer handles flip internally)
+    state = tokenizer.tokenize(fen, useRule50=True).astype(np.int32)
+
+    # Convert Q to win probability: Q ∈ [-1, 1] → win_prob ∈ [0, 1]
+    win_prob = (1.0 + root_q) / 2.0
+
+    # Build policy target (64, 73) from legal moves
+    policy = _encode_policy_target(legal_moves, flip=flip)
+
+    # Compute hard policy (temperature sharpening)
+    eps = 1e-8
+    flat_policy = policy.reshape(-1)
+    logits = np.where(flat_policy > 0, np.log(flat_policy + eps), -np.inf) / self.hard_policy_temperature
+    exp_logits = np.exp(logits - np.max(logits))
+    hard_policy = (exp_logits / exp_logits.sum()).reshape(POLICY_SHAPE)
+
+    # HL-Gauss value distribution
+    hl = _process_prob(win_prob)
+
+    return (
+        state,
+        policy,
+        hard_policy,
+        hl,
+        np.array([win_prob]),
+    )
+
+
 _TRANSFORMATION_BY_POLICY = {
     'behavioral_cloning': ConvertBehavioralCloningDataToSequence,
     'action_value': ConvertActionValueDataToSequence,
@@ -261,6 +384,7 @@ _TRANSFORMATION_BY_POLICY = {
     'state_value': ConvertStateValueDataToSequence,
     'lc0_data': ConvertLeelaDataToSequence,
     'lc0_data_with_U': ConvertLeelaDataToSequenceWithU,
+    'training_bag': ConvertTrainingBagDataToSequence,
 }
 
 # Follows the base_constants.DataLoaderBuilder protocol.
@@ -301,5 +425,5 @@ def build_data_loader(config: config_lib.DataConfig) -> pygrain.DataLoader:
       sampler=sampler,
       operations=transformations,
       worker_count=config.worker_count,
-      read_options=None, 
+      read_options=None,
   )

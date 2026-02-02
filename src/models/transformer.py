@@ -1,43 +1,60 @@
 from typing import Any, cast
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 torch.set_default_dtype(torch.float32)
 torch.set_float32_matmul_precision('high')
 torch.set_printoptions(profile="full")
 import dataclasses
 import math
 
-
 from searchless_chess.src import config as config_lib
-from searchless_chess.src import data_loader
-from searchless_chess.src import tokenizer
+from searchless_chess.src import data_loader, tokenizer
 
 S = tokenizer.SEQUENCE_LENGTH
+
+# Policy head dimensions (matching CatGPT)
+POLICY_TO_DIM = 73  # 64 normal + 9 underpromotions
+POLICY_SHAPE = (64, POLICY_TO_DIM)
 
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
     """Hyperparameters used in the Transformer architectures."""
-    
+
     # The dimension of the first embedding.
-    embedding_dim: int = 64
+    embedding_dim: int = 512
     # The number of multi-head attention layers.
-    num_layers: int = 4
+    num_layers: int = 16
     # The number of heads per layer.
-    num_heads: int = 8
+    num_heads: int = 32
     # How much larger the hidden layer of the feedforward network should be
     # compared to the `embedding_dim`.
-    widening_factor: float = 4
+    widening_factor: float = 3  # 1536 / 512 = 3
     # The dropout rate.
-    dropout: float = 0.1
+    dropout: float = 0.0
     # repeater for tokens
     repeater: int = 1
 
     # Position Embedding Type
-    # Whether to use smolgen
-    use_smolgen: bool = False
+    # Whether to use smolgen (now with proper LC0-style implementation)
+    use_smolgen: bool = True
+    # Smolgen configuration (matching jax_base.yaml)
+    smolgen_hidden_channels: int = 32
+    smolgen_hidden_size: int = 256
+    smolgen_gen_size: int = 256
     # Whether to use simple attention bias
     use_attention_bias: bool = False
+
+    # Output heads configuration (matching jax_base.yaml)
+    self_weight: float = 0.1      # Token reconstruction weight
+    value_weight: float = 0.7     # Value head weight
+    policy_weight: float = 1.5    # Policy weight
+    hard_policy_temperature: float = 0.25  # p^4 sharpening
+    hard_policy_weight: float = 0.1  # Small weight (harder targets are noisier)
+    # Policy head Q/K dimension for attention-based policy
+    policy_qk_dim: int = 32
 
 class MultiHeadAttention(nn.Module):
     """
@@ -53,6 +70,9 @@ class MultiHeadAttention(nn.Module):
         dropout (float, optional): Dropout probability. Default: 0.0
         bias (bool, optional): Whether to add bias to input projection. Default: True
         use_smolgen (bool, optional): Whether to use smolgen. Default: False
+        smolgen_hidden_channels (int): Compression dimension for smolgen
+        smolgen_hidden_size (int): Hidden layer size for smolgen
+        smolgen_gen_size (int): Per-head generation dimension for smolgen
         use_attention_bias (bool, optional): Whether to use simple attention bias. Default: False
     """
     def __init__(
@@ -65,6 +85,9 @@ class MultiHeadAttention(nn.Module):
         dropout: float = 0.0,
         bias=True,
         use_smolgen: bool = False,
+        smolgen_hidden_channels: int = 32,
+        smolgen_hidden_size: int = 256,
+        smolgen_gen_size: int = 256,
         use_attention_bias: bool = False,
         device=None,
         dtype=None,
@@ -89,19 +112,21 @@ class MultiHeadAttention(nn.Module):
         self.use_attention_bias = use_attention_bias
 
         if use_smolgen:
-            self.flatten = nn.Linear(E_q, 32)
-            self.smolgen = nn.Sequential(
-                nn.Linear(32 * S, 256, **factory_kwargs),
-                nn.LayerNorm(256, eps=1e-5, **factory_kwargs),
-                nn.Linear(256, 256 * self.nheads),
-            )
-            self.smolgen_shared = nn.Sequential(
-                nn.LayerNorm(256, eps=1e-5),
-                nn.Linear(256, S * S),
-            )
+            # LC0-style Smolgen: dynamic attention bias generation
+            # Compress input: (batch, seq, E_q) -> (batch, seq, hidden_channels)
+            self.smolgen_compress = nn.Linear(E_q, smolgen_hidden_channels, **factory_kwargs)
+            # Global transform: (batch, seq * hidden_channels) -> (batch, hidden_size)
+            self.smolgen_dense1 = nn.Linear(S * smolgen_hidden_channels, smolgen_hidden_size, **factory_kwargs)
+            self.smolgen_ln = nn.LayerNorm(smolgen_hidden_size, eps=1e-5, **factory_kwargs)
+            # Generate per-head codes: (batch, hidden_size) -> (batch, nheads * gen_size)
+            self.smolgen_dense2 = nn.Linear(smolgen_hidden_size, nheads * smolgen_gen_size, **factory_kwargs)
+            # Per-head attention bias generation (shared weights across heads)
+            self.smolgen_out_ln = nn.LayerNorm(smolgen_gen_size, eps=1e-5, **factory_kwargs)
+            self.smolgen_out = nn.Linear(smolgen_gen_size, S * S, **factory_kwargs)
+            self.smolgen_gen_size = smolgen_gen_size
         elif use_attention_bias:
             self.attn_bias = nn.Parameter(torch.empty(1, nheads, S, S, **factory_kwargs).uniform_(-0.02, 0.02))
-            
+
 
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None, is_causal=False) -> torch.Tensor:
         """
@@ -122,9 +147,18 @@ class MultiHeadAttention(nn.Module):
             attn_output (torch.Tensor): output of shape (N, L_t, E_q)
         """
         if self.use_smolgen:
-            flat = self.flatten(query).view(query.size(0), -1)
-            smol = self.smolgen(flat).view(-1, self.nheads, 256)
-            attn_bias = self.smolgen_shared(smol).view(-1, self.nheads, S, S)
+            batch_size = query.size(0)
+            # Compress input: (batch, seq, E_q) -> (batch, seq, hidden_channels)
+            compressed = self.smolgen_compress(query)
+            # Flatten: (batch, seq * hidden_channels)
+            flat = compressed.view(batch_size, -1)
+            # Global transform with LayerNorm
+            hidden = F.gelu(self.smolgen_ln(self.smolgen_dense1(flat)))
+            # Generate per-head codes: (batch, nheads, gen_size)
+            codes = self.smolgen_dense2(hidden).view(batch_size, self.nheads, self.smolgen_gen_size)
+            # Apply LayerNorm and generate attention bias per head
+            codes = self.smolgen_out_ln(codes)
+            attn_bias = self.smolgen_out(codes).view(batch_size, self.nheads, S, S)
         elif self.use_attention_bias:
             attn_bias = self.attn_bias
         else:
@@ -182,6 +216,9 @@ class MyTransformerEncoderLayer(nn.Module):
         norm_first=False,
         bias=True,
         use_smolgen=False,
+        smolgen_hidden_channels=32,
+        smolgen_hidden_size=256,
+        smolgen_gen_size=256,
         use_attention_bias=False,
         device=None,
         dtype=None,
@@ -198,6 +235,9 @@ class MyTransformerEncoderLayer(nn.Module):
             dropout=dropout,
             bias=bias,
             use_smolgen=use_smolgen,
+            smolgen_hidden_channels=smolgen_hidden_channels,
+            smolgen_hidden_size=smolgen_hidden_size,
+            smolgen_gen_size=smolgen_gen_size,
             use_attention_bias=use_attention_bias,
             **factory_kwargs,
         )
@@ -208,7 +248,7 @@ class MyTransformerEncoderLayer(nn.Module):
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps, bias=bias, **factory_kwargs)
         self.activation = activation
-        
+
 
     def _sa_block(self, x, attn_mask, is_causal):
         x = self.self_attn(x, x, x, is_causal=is_causal)
@@ -236,7 +276,7 @@ class MyTransformerEncoderLayer(nn.Module):
 
 class ChessTransformer(nn.Module):
     """PyTorch implementation of the transformer model."""
-    
+
     def __init__(self, config: TransformerConfig):
         super().__init__()
 
@@ -244,7 +284,7 @@ class ChessTransformer(nn.Module):
 
         self.vocab_size = len(tokenizer._CHARACTERS)
         self.seq_len = tokenizer.SEQUENCE_LENGTH
-        
+
         self.embedding = nn.Embedding(self.vocab_size, config.embedding_dim)
         self.pos_embedding = nn.Parameter(
             torch.randn(1, self.seq_len, config.embedding_dim)
@@ -264,6 +304,9 @@ class ChessTransformer(nn.Module):
                 activation=self.activation,
                 norm_first=False,
                 use_smolgen=config.use_smolgen,
+                smolgen_hidden_channels=config.smolgen_hidden_channels,
+                smolgen_hidden_size=config.smolgen_hidden_size,
+                smolgen_gen_size=config.smolgen_gen_size,
                 use_attention_bias=config.use_attention_bias,
             ) for _ in range(post_ln_layers)],
             *[MyTransformerEncoderLayer(
@@ -274,53 +317,46 @@ class ChessTransformer(nn.Module):
                 activation=self.activation,
                 norm_first=True,
                 use_smolgen=config.use_smolgen,
+                smolgen_hidden_channels=config.smolgen_hidden_channels,
+                smolgen_hidden_size=config.smolgen_hidden_size,
+                smolgen_gen_size=config.smolgen_gen_size,
                 use_attention_bias=config.use_attention_bias,
             ) for _ in range(pre_ln_layers)]
         ])
 
+        # Self reconstruction head (auxiliary task for stability)
         self.self_head = nn.Linear(config.embedding_dim, self.vocab_size)
 
+        # Value head with HL-Gauss distribution
         self.value_head = nn.Sequential(
             nn.Linear(config.embedding_dim, config.embedding_dim // 2),
             nn.GELU(),
             nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
         )
 
-        self.draw_head = nn.Sequential(
-            nn.Linear(config.embedding_dim, config.embedding_dim // 2),
-            nn.GELU(),
-            nn.Linear(config.embedding_dim // 2, data_loader.NUM_BINS),
-        )
-
-        self.wdl_head = nn.Linear(config.embedding_dim, 3)
-
-        # Complex Projection for action matrix
+        # Final layer norm
         self.final_ln = nn.LayerNorm(config.embedding_dim)
-        self.final_num_heads = 16
-        self.final_head_dim = config.embedding_dim // self.final_num_heads
-        self.final_scaling = self.final_head_dim ** -0.5
 
-
-        self.post_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
-        self.post_out_proj = nn.Sequential(
-            nn.Linear(self.final_num_heads, 
-                    self.final_num_heads),
-            nn.GELU(),
-            nn.Linear(self.final_num_heads, 3),
+        # LC0-style attention policy head: uses Q·K^T for 64x73 move logits
+        # Q projects from first 64 positions (from squares)
+        # K projects to 73 dimensions (to squares + underpromotions)
+        policy_qk_dim = config.policy_qk_dim
+        self.policy_q_proj = nn.Linear(config.embedding_dim, policy_qk_dim)
+        self.policy_k_proj = nn.Linear(config.embedding_dim, policy_qk_dim)
+        # Additional projection for the 9 underpromotion targets
+        # These are special "virtual" positions that don't exist in the sequence
+        self.policy_promo_embed = nn.Parameter(
+            torch.randn(9, policy_qk_dim) * 0.02  # 9 underpromotion targets
         )
-        self.final_qk_proj = nn.Linear(config.embedding_dim, 2 * config.embedding_dim)
-        self.final_out_proj = nn.Sequential(
-            nn.Linear(self.final_num_heads, 
-                    self.final_num_heads),
-            nn.GELU(),
-            nn.Linear(self.final_num_heads, 5),
-        )
+        self.policy_scaling = policy_qk_dim ** -0.5
 
-        
-        
-        
+
+
+
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         batch_size = x.size(0)
+        device = x.device
+
         x = self.embedding(x)
         x = x + self.pos_embedding
         for layer in self.transformer:
@@ -328,122 +364,98 @@ class ChessTransformer(nn.Module):
 
         x = self.final_ln(x)
 
-        qk = self.final_qk_proj(x)
-        qk = qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
-
-        q, k = qk.unbind(dim=2)
-
-        attn_scores = torch.einsum('bhid,bhjd->bhij', q, k) * self.final_scaling
-        attn_scores = torch.tanh(attn_scores)
-
-        attn_scores = attn_scores.permute(0, 2, 3, 1)
-
-
-        attn_scores = self.final_out_proj(attn_scores)
-
-
-        post_qk = self.post_qk_proj(x)
-        post_qk = post_qk.reshape(batch_size, self.seq_len, 2, self.final_num_heads, self.final_head_dim).transpose(1, 3)
-        post_q, post_k = post_qk.unbind(dim=2)
-        post_attn_scores = torch.einsum('bhid,bhjd->bhij', post_q, post_k) * self.final_scaling
-        post_attn_scores = torch.tanh(post_attn_scores)
-        post_attn_scores = post_attn_scores.permute(0, 2, 3, 1)
-        post_attn_scores = self.post_out_proj(post_attn_scores)
-
-        bin_width = 1.0 / (data_loader.NUM_BINS)
-        bin_centers = torch.arange(bin_width / 2, 1.0, bin_width).to('cuda')
-
+        # Value head: use last position for value prediction
+        bin_width = 1.0 / data_loader.NUM_BINS
+        bin_centers = torch.arange(bin_width / 2, 1.0, bin_width, device=device)
 
         hl = self.value_head(x[:, -1, :])
         value = torch.sum(F.softmax(hl, dim=-1) * bin_centers, dim=-1, keepdim=True)
 
-        wdl = self.wdl_head(x[:, -1, :])
+        # Self reconstruction head
+        self_logits = self.self_head(x)
 
-        dhl = self.draw_head(x[:, -2, :])
-        draw = torch.sum(F.softmax(dhl, dim=-1) * bin_centers, dim=-1, keepdim=True)
+        # LC0-style attention policy head
+        # Q from first 64 positions (from squares): (batch, 64, qk_dim)
+        policy_q = self.policy_q_proj(x[:, :64, :])  # (batch, 64, qk_dim)
+
+        # K for normal destination squares (first 64): (batch, 64, qk_dim)
+        policy_k_normal = self.policy_k_proj(x[:, :64, :])  # (batch, 64, qk_dim)
+
+        # K for underpromotion targets: (batch, 9, qk_dim)
+        promo_embed = self.policy_promo_embed.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Concatenate normal and underpromotion K: (batch, 73, qk_dim)
+        policy_k = torch.cat([policy_k_normal, promo_embed], dim=1)  # (batch, 73, qk_dim)
+
+        # Compute attention scores: Q @ K^T -> (batch, 64, 73)
+        policy_logits = torch.matmul(policy_q, policy_k.transpose(-2, -1)) * self.policy_scaling
 
         return {
-            'self': self.self_head(x),
+            'self': self_logits,
             'value': value,
-            'draw': draw,
             'hl': hl,
-            'dhl': dhl,
-            'wdl': wdl,
-            'legal': attn_scores[:, :, :, 0],
-            'policy': attn_scores[:, :, :, 1],
-            'soft_policy': attn_scores[:, :, :, 2],
-            'hard_policy': attn_scores[:, :, :, 3],
-            'hardest_policy': attn_scores[:, :, :, 4],
-            'U': post_attn_scores[:, :, :, 0],
-            'Q': post_attn_scores[:, :, :, 1],
-            'D': post_attn_scores[:, :, :, 2],
+            'policy': policy_logits,  # Shape: (batch, 64, 73)
         }
-    
+
     def losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Compute losses matching jax_base.yaml config.
 
-        legal_moves = target['legal'] == 1
-        batch_size = target['legal'].shape[0]
+        Args:
+            output: Model outputs with keys 'self', 'value', 'hl', 'policy'
+            target: Targets with keys 'self', 'policy', 'hard_policy', 'hl', 'value'
 
-        # Policy loss with masking
+        Loss weights (from jax_base.yaml):
+            - self_weight: 0.1 (token reconstruction)
+            - value_weight: 0.7 (win probability)
+            - policy_weight: 1.5 (main policy)
+            - hard_policy_weight: 0.1 (sharpened policy)
+        """
         batch_size = output['policy'].shape[0]
-        # Clone policy logits to avoid modifying the original
+        config = self.config
+
+        # Self reconstruction loss (cross entropy)
+        self_loss = F.cross_entropy(
+            output['self'].view(-1, output['self'].size(-1)),
+            target['self'].view(-1)
+        ) * config.self_weight
+
+        # HL-Gauss distribution cross entropy (actual training loss)
+        hl_loss = -torch.sum(
+            target['hl'] * F.log_softmax(output['hl'], dim=-1),
+            dim=-1
+        ).mean() * config.value_weight
+
+        # MSE loss for value (metrics only, excluded from training loss)
+        value_mse = F.mse_loss(output['value'], target['value'])
+
+        # Policy loss: cross entropy on (64, 73) policy
+        # Mask out zero-probability moves (illegal) by setting logits to -inf
+        legal_mask = target['policy'] > 0  # (batch, 64, 73)
         masked_policy = output['policy'].clone()
-        masked_soft_policy = output['soft_policy'].clone()
-        masked_hard_policy = output['hard_policy'].clone()
-        masked_hardest_policy = output['hardest_policy'].clone()
-        # Apply masking - set illegal moves to large negative value
-        masked_policy[~legal_moves] = -1e9  
-        masked_soft_policy[~legal_moves] = -1e9
-        masked_hard_policy[~legal_moves] = -1e9
-        masked_hardest_policy[~legal_moves] = -1e9
+        masked_policy[~legal_mask] = -1e9
 
-        # Reshape for softmax over all possible moves
-        masked_policy_flat = masked_policy.view(batch_size, -1)  # [batch_size, S*S]
-        masked_soft_policy_flat = masked_soft_policy.view(batch_size, -1)  # [batch_size, S*S]
-        masked_hard_policy_flat = masked_hard_policy.view(batch_size, -1)  # [batch_size, S*S]
-        masked_hardest_policy_flat = masked_hardest_policy.view(batch_size, -1)  # [batch_size, S*S]
-        target_policy_flat = target['policy'].view(batch_size, -1)  # [batch_size, S*S]
-        target_soft_policy_flat = target['soft_policy'].view(batch_size, -1)  # [batch_size, S*S]
-        target_hard_policy_flat = target['hard_policy'].view(batch_size, -1)  # [batch_size, S*S]
-        target_hardest_policy_flat = target['hardest_policy'].view(batch_size, -1)  # [batch_size, S*S]
-        # Compute cross entropy loss
-        policy_loss = -torch.sum(target_policy_flat * F.log_softmax(masked_policy_flat, dim=-1), dim=-1).mean()
-        soft_policy_loss = -torch.sum(target_soft_policy_flat * F.log_softmax(masked_soft_policy_flat, dim=-1), dim=-1).mean()
-        hard_policy_loss = -torch.sum(target_hard_policy_flat * F.log_softmax(masked_hard_policy_flat, dim=-1), dim=-1).mean()
-        hardest_policy_loss = -torch.sum(target_hardest_policy_flat * F.log_softmax(masked_hardest_policy_flat, dim=-1), dim=-1).mean()
-        
-        return {
-            'self': F.cross_entropy(output['self'].view(-1, output['self'].size(-1)), target['self'].view(-1)),
-            'value': F.mse_loss(output['value'], target['value']),
-            'draw': F.mse_loss(output['draw'], target['draw']),
-            # 'wdl': F.cross_entropy(output['wdl'].view(-1, 3), target['wdl'].view(-1)) * 0.01,
-            'hl': -0.1 * torch.sum(target['hl'] * F.log_softmax(output['hl'], dim=-1), dim=-1).mean(),
-            'dhl': -0.02 * torch.sum(target['dhl'] * F.log_softmax(output['dhl'], dim=-1), dim=-1).mean(),
-            'legal': F.binary_cross_entropy_with_logits(output['legal'], target['legal']),
-            'policy': policy_loss * 0.1 * 1.5,
-            'soft_policy': soft_policy_loss * 0.8 * 1.5,
-            'hard_policy': hard_policy_loss * 0.075 * 1.5,
-            'hardest_policy': hardest_policy_loss * 0.025 * 1.5,
-        }
+        # Flatten for cross entropy computation
+        masked_policy_flat = masked_policy.view(batch_size, -1)  # (batch, 64*73)
+        target_policy_flat = target['policy'].view(batch_size, -1)  # (batch, 64*73)
 
-    def post_losses(self, output: dict[str, torch.Tensor], target: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        legal_moves = target['legal'] == 1
-        batch_size = target['legal'].shape[0]
+        policy_loss = -torch.sum(
+            target_policy_flat * F.log_softmax(masked_policy_flat, dim=-1),
+            dim=-1
+        ).mean() * config.policy_weight
 
-        # Zero out U loss if not in legal moves
-        output_U = output['U'].clone()
-        output_U[~legal_moves] = -1e9
-
-        output_Q = output['Q'].clone()
-        output_Q[~legal_moves] = -1e9
-
-        output_D = output['D'].clone()
-        output_D[~legal_moves] = -1e9
+        # Hard policy loss (sharpened target)
+        target_hard_policy_flat = target['hard_policy'].view(batch_size, -1)
+        hard_policy_loss = -torch.sum(
+            target_hard_policy_flat * F.log_softmax(masked_policy_flat, dim=-1),
+            dim=-1
+        ).mean() * config.hard_policy_weight
 
         return {
-            'U': ((F.binary_cross_entropy_with_logits(output_U, target['U'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
-            'Q': ((F.binary_cross_entropy_with_logits(output_Q, target['Q'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
-            'D': 0.2 * ((F.binary_cross_entropy_with_logits(output_D, target['D'], reduction='none') * target['legal']).view(batch_size, -1).sum(dim=-1) / target['legal'].view(batch_size, -1).sum(dim=-1)).mean(),
+            'self': self_loss,
+            'hl': hl_loss,
+            'value': value_mse,  # Metrics only (excluded from loss via k not in ['value', 'draw'])
+            'policy': policy_loss,
+            'hard_policy': hard_policy_loss,
         }
 
 
